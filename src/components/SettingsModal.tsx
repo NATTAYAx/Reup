@@ -1,0 +1,1099 @@
+import { useState, useEffect, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { X, Save, Power, Image, Palette, Upload, Sparkles, Check, RotateCcw, Bell, BellOff, Clock, Languages } from "lucide-react";
+import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { isMuted, setMuted } from "../lib/notifier";
+import { invoke } from "@tauri-apps/api/core";
+import { getLang, setLang, t, type Lang } from "../lib/i18n";
+
+interface Props {
+  open: boolean;
+  onClose: () => void;
+}
+
+// ─── Theme type ────────────────────────────────────────────────────────────────
+export interface AppTheme {
+  primary: string;       // main accent color (buttons, highlights)
+  secondary: string;     // secondary accent
+  accent: string;        // bright pop color
+  bg: string;            // main background
+  bgCard: string;        // card background
+  border: string;        // border color
+  textMuted: string;     // muted text
+  name: string;          // theme name
+}
+
+export const DEFAULT_THEME: AppTheme = {
+  primary: "#7c3aed",
+  secondary: "#4f46e5",
+  accent: "#a78bfa",
+  bg: "#030712",
+  bgCard: "rgba(255,255,255,0.05)",
+  border: "rgba(255,255,255,0.10)",
+  textMuted: "rgba(255,255,255,0.40)",
+  name: "Default Purple",
+};
+
+// ─── Theme storage helpers ────────────────────────────────────────────────────
+const THEME_KEY = "gamesched_theme_v1";
+const SOUND_KEY  = "gamesched_notif_sound_v1"; // base64 data URL of custom sound
+
+export function loadCustomSound(): string | null {
+  return localStorage.getItem(SOUND_KEY);
+}
+export function saveCustomSound(dataUrl: string | null) {
+  if (dataUrl) localStorage.setItem(SOUND_KEY, dataUrl);
+  else localStorage.removeItem(SOUND_KEY);
+}
+const ICON_KEY  = "gamesched_icon_v1";
+
+export function loadTheme(): AppTheme {
+  try { return JSON.parse(localStorage.getItem(THEME_KEY) || "null") ?? DEFAULT_THEME; }
+  catch { return DEFAULT_THEME; }
+}
+
+export function saveTheme(t: AppTheme) {
+  localStorage.setItem(THEME_KEY, JSON.stringify(t));
+}
+
+export function applyTheme(t: AppTheme) {
+  const r = document.documentElement.style;
+  r.setProperty("--color-primary",   t.primary);
+  r.setProperty("--color-secondary", t.secondary);
+  r.setProperty("--color-accent",    t.accent);
+  r.setProperty("--color-bg",        t.bg);
+  r.setProperty("--color-card",      t.bgCard);
+  r.setProperty("--color-border",    t.border);
+  r.setProperty("--color-muted",     t.textMuted);
+
+  // Inject dynamic <style> that overrides all hardcoded Tailwind purple/indigo classes
+  const id = "theme-override-style";
+  let el = document.getElementById(id) as HTMLStyleElement | null;
+  if (!el) {
+    el = document.createElement("style");
+    el.id = id;
+    document.head.appendChild(el);
+  }
+
+  // hex to "r g b" for rgb() / rgba()
+  const hexToRgb = (hex: string) => {
+    const c = hex.replace("#", "");
+    return [parseInt(c.slice(0,2),16), parseInt(c.slice(2,4),16), parseInt(c.slice(4,6),16)];
+  };
+  const [pr, pg, pb] = hexToRgb(t.primary);
+  const [sr, sg, sb] = hexToRgb(t.secondary);
+  
+
+  el.textContent = `
+    /* Dynamic theme override — applyTheme() */
+
+    /* Gradient buttons */
+    .bg-gradient-to-r.from-purple-600.to-indigo-600 {
+      background: linear-gradient(135deg, ${t.primary}, ${t.secondary}) !important;
+    }
+    .bg-gradient-to-br.from-purple-500.to-indigo-600 {
+      background: linear-gradient(135deg, ${t.primary}, ${t.secondary}) !important;
+    }
+
+    /* Solid purple */
+    .bg-purple-600 { background-color: ${t.primary} !important; }
+
+    /* Purple text */
+    .text-purple-400 { color: ${t.accent} !important; }
+    .text-purple-300 { color: ${t.accent}cc !important; }
+
+    /* Gradient stops */
+    .from-purple-500, .from-purple-600 { --tw-gradient-from: ${t.primary} !important; }
+    .to-indigo-600 { --tw-gradient-to: ${t.secondary} !important; }
+    .from-purple-600\\/20 { --tw-gradient-from: rgba(${pr},${pg},${pb},0.20) !important; }
+    .from-purple-600\\/30 { --tw-gradient-from: rgba(${pr},${pg},${pb},0.30) !important; }
+    .to-indigo-600\\/20   { --tw-gradient-to: rgba(${sr},${sg},${sb},0.20) !important; }
+    .to-indigo-600\\/30   { --tw-gradient-to: rgba(${sr},${sg},${sb},0.30) !important; }
+
+    /* Tinted backgrounds */
+    .bg-purple-500\\/10, .bg-purple-600\\/10 { background-color: rgba(${pr},${pg},${pb},0.10) !important; }
+    .bg-purple-600\\/20 { background-color: rgba(${pr},${pg},${pb},0.20) !important; }
+    .bg-purple-600\\/90 { background-color: rgba(${pr},${pg},${pb},0.90) !important; }
+    .bg-indigo-500\\/10 { background-color: rgba(${sr},${sg},${sb},0.10) !important; }
+
+    /* Borders */
+    .border-purple-500\\/30 { border-color: rgba(${pr},${pg},${pb},0.30) !important; }
+    .border-purple-500\\/40 { border-color: rgba(${pr},${pg},${pb},0.40) !important; }
+    .border-purple-500\\/60 { border-color: rgba(${pr},${pg},${pb},0.60) !important; }
+    .hover\\:border-purple-500\\/60:hover { border-color: rgba(${pr},${pg},${pb},0.60) !important; }
+
+    /* Focus */
+    .focus\\:border-purple-500:focus { border-color: ${t.primary} !important; }
+    .focus\\:bg-purple-500\\/10:focus { background-color: rgba(${pr},${pg},${pb},0.10) !important; }
+    input:focus, select:focus { border-color: ${t.primary} !important; outline-color: ${t.primary} !important; }
+
+    /* Glow */
+    .theme-glow { box-shadow: 0 0 20px rgba(${pr},${pg},${pb},0.35) !important; }
+    .shadow-purple-500\\/30,
+    .shadow-lg.shadow-purple-500\\/30 {
+      box-shadow: 0 10px 15px -3px rgba(${pr},${pg},${pb},0.30) !important;
+    }
+
+    /* Ring */
+    .ring-2.ring-purple-500 { --tw-ring-color: ${t.primary} !important; }
+
+    /* Calendar badge */
+    .bg-purple-600.rounded-full { background-color: ${t.primary} !important; }
+
+    /* AI assist button highlight hover */
+    .hover\\:from-purple-600\\/30:hover { --tw-gradient-from: rgba(${pr},${pg},${pb},0.30) !important; }
+    .hover\\:to-indigo-600\\/30:hover   { --tw-gradient-to: rgba(${sr},${sg},${sb},0.30) !important; }
+  `;
+}
+
+// ─── Preset themes ─────────────────────────────────────────────────────────────
+const PRESET_THEMES: AppTheme[] = [
+  DEFAULT_THEME,
+  {
+    name: "Ocean Cyan",
+    primary: "#0891b2", secondary: "#0e7490", accent: "#22d3ee",
+    bg: "#020f14", bgCard: "rgba(8,145,178,0.08)", border: "rgba(34,211,238,0.15)",
+    textMuted: "rgba(255,255,255,0.40)",
+  },
+  {
+    name: "Rose Gold",
+    primary: "#e11d48", secondary: "#be123c", accent: "#fb7185",
+    bg: "#0f0509", bgCard: "rgba(225,29,72,0.08)", border: "rgba(251,113,133,0.15)",
+    textMuted: "rgba(255,255,255,0.40)",
+  },
+  {
+    name: "Forest",
+    primary: "#16a34a", secondary: "#15803d", accent: "#4ade80",
+    bg: "#020d05", bgCard: "rgba(22,163,74,0.08)", border: "rgba(74,222,128,0.15)",
+    textMuted: "rgba(255,255,255,0.40)",
+  },
+  {
+    name: "Amber",
+    primary: "#d97706", secondary: "#b45309", accent: "#fbbf24",
+    bg: "#0c0800", bgCard: "rgba(217,119,6,0.08)", border: "rgba(251,191,36,0.15)",
+    textMuted: "rgba(255,255,255,0.40)",
+  },
+];
+
+// ─── Component ────────────────────────────────────────────────────────────────
+export default function SettingsModal({ open, onClose }: Props) {
+  const [autostart, setAutostart]       = useState(false);
+  const [activeTab, setActiveTab]       = useState<"general" | "appearance">("general");
+  const [currentTheme, setCurrentTheme] = useState<AppTheme>(loadTheme);
+  const [customIcon, setCustomIcon]     = useState<string | null>(null);
+  const [aiLoading, setAiLoading]       = useState(false);
+  const [aiTheme, setAiTheme]           = useState<AppTheme | null>(null);
+  const [aiPreview, setAiPreview]       = useState<string | null>(null); // base64 of uploaded image
+  const [aiError, setAiError]           = useState("");
+  const [saved, setSaved]               = useState(false);
+  const [notifMuted, setNotifMuted]     = useState(false);
+  const [toastDuration, setToastDuration] = useState(8);
+  const [lang, setLangState] = useState<Lang>(getLang);
+  const [pendingLang, setPendingLang] = useState<Lang | null>(null);
+  const [pendingIconUrl, setPendingIconUrl] = useState<string | null>(null);
+  const [customSound, setCustomSound]   = useState<string | null>(null);
+  const [soundName, setSoundName]       = useState<string>("");
+  const iconRef  = useRef<HTMLInputElement>(null);
+  const imageRef = useRef<HTMLInputElement>(null);
+  const soundRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (open) {
+      isEnabled().then(setAutostart).catch(() => {});
+      // Load saved icon
+      const icon = localStorage.getItem(ICON_KEY);
+      if (icon) setCustomIcon(icon);
+      setCurrentTheme(loadTheme());
+      setAiTheme(null);
+      setAiPreview(null);
+      setAiError("");
+      setNotifMuted(isMuted());
+      const stored = parseInt(localStorage.getItem("gamesched_toast_duration_sec") || "8");
+      setToastDuration(isNaN(stored) ? 8 : stored);
+      const snd = loadCustomSound();
+      setCustomSound(snd);
+      setSoundName(snd ? (localStorage.getItem("gamesched_notif_sound_name") || "Custom sound") : "");
+    }
+  }, [open]);
+
+  const handleLangChange = (newLang: Lang) => {
+    if (newLang === lang) return;
+    setPendingLang(newLang);
+  };
+
+  const confirmLangChange = () => {
+    if (!pendingLang) return;
+    setLang(pendingLang);
+    setLangState(pendingLang);
+    setPendingLang(null);
+    setTimeout(() => window.location.reload(), 300);
+  };
+
+  const cancelLangChange = () => {
+    setPendingLang(null);
+  };
+
+  const toggleAutostart = async () => {
+    try {
+      if (autostart) { await disable(); setAutostart(false); }
+      else           { await enable();  setAutostart(true);  }
+    } catch (err) { console.error("Autostart error:", err); }
+  };
+
+  const handleSoundUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      saveCustomSound(dataUrl);
+      setCustomSound(dataUrl);
+      setSoundName(file.name);
+      localStorage.setItem("gamesched_notif_sound_name", file.name);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSoundReset = () => {
+    saveCustomSound(null);
+    setCustomSound(null);
+    setSoundName("");
+    localStorage.removeItem("gamesched_notif_sound_name");
+    if (soundRef.current) soundRef.current.value = "";
+  };
+
+  const toggleNotifMute = () => {
+    const next = !notifMuted;
+    setMuted(next);
+    setNotifMuted(next);
+  };
+
+  const handleDurationChange = (v: number) => {
+    setToastDuration(v);
+    localStorage.setItem("gamesched_toast_duration_sec", String(v));
+  };
+
+  const DURATION_OPTIONS = [
+    { label: "3s", value: 3 }, { label: "5s", value: 5 },
+    { label: "8s", value: 8 }, { label: "10s", value: 10 },
+    { label: "15s", value: 15 }, { label: "30s", value: 30 },
+  ];
+
+  // ── Icon upload ──────────────────────────────────────────────────────────────
+  const applyIconFromDataUrl = (b64: string, andReload: boolean) => {
+    setCustomIcon(b64);
+    localStorage.setItem(ICON_KEY, b64);
+    const img = new window.Image();
+    img.onload = () => {
+      const size = 32;
+      const canvas = document.createElement("canvas");
+      canvas.width = size; canvas.height = size;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(img, 0, 0, size, size);
+      const rgba = Array.from(ctx.getImageData(0, 0, size, size).data);
+      invoke("set_tray_icon", { rgba, width: size, height: size })
+        .catch(console.warn)
+        .finally(() => {
+          if (andReload) setTimeout(() => window.location.reload(), 300);
+        });
+    };
+    img.onerror = () => {
+      if (andReload) setTimeout(() => window.location.reload(), 300);
+    };
+    img.src = b64;
+  };
+
+  const handleIconUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const b64 = reader.result as string;
+      if (import.meta.env.DEV) {
+        // Dev mode: apply live immediately, no restart needed
+        applyIconFromDataUrl(b64, false);
+      } else {
+        // Prod: show confirm dialog, then restart
+        setPendingIconUrl(b64);
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
+
+  const confirmIconChange = () => {
+    if (!pendingIconUrl) return;
+    setPendingIconUrl(null);
+    applyIconFromDataUrl(pendingIconUrl, true);
+  };
+
+  const cancelIconChange = () => {
+    setPendingIconUrl(null);
+  };
+
+  const resetIcon = () => {
+    setCustomIcon(null);
+    localStorage.removeItem(ICON_KEY);
+    // Restore default tray icon (empty signals Rust to use default)
+    invoke("set_tray_icon", { rgba: [], width: 0, height: 0 }).catch(console.warn);
+  };
+
+  // ── Apply a theme ────────────────────────────────────────────────────────────
+  const applyAndSave = (theme: AppTheme) => {
+    setCurrentTheme(theme);
+    saveTheme(theme);
+    applyTheme(theme);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1500);
+  };
+
+  // ── Color utilities ──────────────────────────────────────────────────────────
+
+  const clamp = (v: number) => Math.min(255, Math.max(0, Math.round(v)));
+  const toHex = (r: number, g: number, b: number) =>
+    `#${clamp(r).toString(16).padStart(2,"0")}${clamp(g).toString(16).padStart(2,"0")}${clamp(b).toString(16).padStart(2,"0")}`;
+  const darken  = (r: number, g: number, b: number, f: number) => toHex(r*f, g*f, b*f);
+  const brighten = (r: number, g: number, b: number, f: number) => toHex(r*f, g*f, b*f);
+
+  // ── Gold/warm dedicated scan ─────────────────────────────────────────────────
+  // Scans every pixel for warm-tone signature (R dominates, G moderate, B clearly lower).
+  // Returns averaged warm color if enough pixels found, otherwise null.
+  const scanWarmHighlight = (data: Uint8ClampedArray): {r:number,g:number,b:number} | null => {
+    let rSum = 0, gSum = 0, bSum = 0, n = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i], g = data[i+1], b = data[i+2];
+      // Gold/amber signature: R clearly beats G, G clearly beats B, not too dark
+      if (r > 110 && g > 70 && r > g * 1.15 && r > b * 1.9 && (r+g+b)/3 > 70) {
+        rSum += r; gSum += g; bSum += b; n++;
+      }
+    }
+    // Require at least 0.2% of total pixels (very lenient — gold streaks are small)
+    if (n < (data.length / 4) * 0.002 || n < 3) return null;
+    return { r: Math.round(rSum/n), g: Math.round(gSum/n), b: Math.round(bSum/n) };
+  };
+
+  // ── k-means++ clustering ─────────────────────────────────────────────────────
+  // Finds k dominant color clusters using better initialization than random.
+  type RGBCluster = {r:number,g:number,b:number,count:number,sat:number,brightness:number};
+
+  const extractDominantColors = (data: Uint8ClampedArray, k = 8): RGBCluster[] => {
+    type RGB = [number,number,number];
+    const samples: RGB[] = [];
+
+    // Dense sample — every pixel (skip only alpha channel)
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i], g = data[i+1], b = data[i+2];
+      const br = (r+g+b)/3;
+      if (br < 12 || br > 250) continue; // skip pure black/white only
+      samples.push([r,g,b]);
+    }
+    if (samples.length < k) return [];
+
+    // k-means++ init: spread centroids far apart
+    const cents: RGB[] = [samples[Math.floor(samples.length/2)]];
+    while (cents.length < k) {
+      const dists = samples.map(([r,g,b]) => {
+        let min = Infinity;
+        for (const [cr,cg,cb] of cents) {
+          const d = (r-cr)**2 + (g-cg)**2 + (b-cb)**2;
+          if (d < min) min = d;
+        }
+        return min;
+      });
+      const total = dists.reduce((a,b) => a+b, 0);
+      if (total === 0) break;
+      let rand = Math.random() * total;
+      let pick = samples[0];
+      for (let i = 0; i < samples.length; i++) { rand -= dists[i]; if (rand <= 0) { pick = samples[i]; break; } }
+      cents.push([...pick]);
+    }
+
+    // 15 iterations of k-means
+    let centroids: RGB[] = cents;
+    for (let iter = 0; iter < 15; iter++) {
+      const sums: [number,number,number,number][] = Array.from({length:k}, () => [0,0,0,0]);
+      for (const [r,g,b] of samples) {
+        let best = 0, bestD = Infinity;
+        for (let c = 0; c < k; c++) {
+          const d = (r-centroids[c][0])**2 + (g-centroids[c][1])**2 + (b-centroids[c][2])**2;
+          if (d < bestD) { bestD = d; best = c; }
+        }
+        sums[best][0]+=r; sums[best][1]+=g; sums[best][2]+=b; sums[best][3]++;
+      }
+      centroids = sums.map(([r,g,b,n],i) => n>0 ? [Math.round(r/n),Math.round(g/n),Math.round(b/n)] : centroids[i]);
+    }
+
+    // Final counts
+    const counts = new Array(k).fill(0);
+    for (const [r,g,b] of samples) {
+      let best = 0, bestD = Infinity;
+      for (let c = 0; c < k; c++) {
+        const d = (r-centroids[c][0])**2 + (g-centroids[c][1])**2 + (b-centroids[c][2])**2;
+        if (d < bestD) { bestD = d; best = c; }
+      }
+      counts[best]++;
+    }
+
+    return centroids.map(([r,g,b],i) => {
+      const mx=Math.max(r,g,b), mn=Math.min(r,g,b);
+      return { r, g, b, count: counts[i], sat: mx===0?0:(mx-mn)/mx, brightness:(r+g+b)/3 };
+    }).sort((a,b) => b.count - a.count);
+  };
+
+  // ── Theme builder ─────────────────────────────────────────────────────────────
+  // warmHighlight: gold/amber pixels from dedicated scan (bypasses k-means for accent)
+  const buildThemeFromClusters = (clusters: RGBCluster[], warmHighlight: {r:number,g:number,b:number} | null): AppTheme => {
+    if (clusters.length === 0) throw new Error("No clusters");
+
+    const isWarm = (r:number,g:number,b:number) => r > g*1.15 && r > b*1.8;
+
+    // Sort clusters by vividness (sat × brightness, not too dark/light)
+    const vivid = [...clusters]
+      .filter(c => c.brightness > 20 && c.brightness < 242)
+      .sort((a,b) => (b.sat * Math.min(b.brightness/90,1.8)) - (a.sat * Math.min(a.brightness/90,1.8)));
+
+    // Primary: most vivid NON-warm cluster (blue, purple, teal etc.)
+    const primary = vivid.find(c => !isWarm(c.r,c.g,c.b)) ?? vivid[0] ?? clusters[0];
+    const { r:pr, g:pg, b:pb } = primary;
+
+    // Accent: use gold scan result if present, otherwise find visually different cluster
+    let ar: number, ag: number, ab: number, accentIsGold = false;
+    if (warmHighlight) {
+      // Boost gold saturation slightly for UI vibrancy
+      ar = clamp(warmHighlight.r * 1.18);
+      ag = clamp(warmHighlight.g * 1.05);
+      ab = clamp(warmHighlight.b * 0.85);
+      accentIsGold = true;
+    } else {
+      let acc = vivid[1] ?? vivid[0];
+      for (const c of vivid) {
+        const dist = Math.abs(c.r-pr) + Math.abs(c.g-pg) + Math.abs(c.b-pb);
+        if (dist > 60) { acc = c; break; }
+      }
+      ar=acc.r; ag=acc.g; ab=acc.b;
+    }
+
+    // bg: darkest dominant hue, very near black
+    const dom = clusters[0];
+    const bg = toHex(dom.r*0.055+pr*0.02, dom.g*0.055+pg*0.02, dom.b*0.065+pb*0.02);
+
+    // Poetic name
+    const primWord = (() => {
+      if (pb>pr*1.25 && pb>pg) return pb>170?"Azure":"Midnight";
+      if (pr>pg && pr>pb && !isWarm(pr,pg,pb)) return pr>170?"Crimson":"Ember";
+      if (pg>pr*1.2 && pg>pb) return "Jade";
+      if (pr>130 && pb>130) return "Violet";
+      if (pb>100) return "Cobalt";
+      return "Obsidian";
+    })();
+    const accWord = (() => {
+      if (accentIsGold) return "Gold";
+      if (ar>ag*1.3 && ar>ab*1.8) return "Amber";
+      if (ab>ar+40) return "Frost";
+      if (ar>ag+40) return "Rose";
+      if (ag>ar && ag>ab) return "Sage";
+      return "Silver";
+    })();
+
+    return {
+      name: `${primWord} ${accWord}`,
+      primary: brighten(pr,pg,pb,1.12),
+      secondary: darken(pr,pg,pb,0.58),
+      accent: toHex(ar,ag,ab),
+      bg,
+      bgCard: `rgba(${pr},${pg},${pb},0.09)`,
+      border: `rgba(${ar},${ag},${ab},0.22)`,
+      textMuted: "rgba(255,255,255,0.40)",
+    };
+  };
+
+  // ── Canvas extraction (runs the full pipeline on the actual image) ────────────
+  const extractThemeFromCanvas = (file: File): Promise<{ theme: AppTheme; hasGold: boolean }> =>
+    new Promise((resolve, reject) => {
+      const img = new window.Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        try {
+          // Use 200×200 — large enough to preserve thin gold streaks
+          const SZ = 200;
+          const canvas = document.createElement("canvas");
+          canvas.width = SZ; canvas.height = SZ;
+          const ctx = canvas.getContext("2d")!;
+          ctx.drawImage(img, 0, 0, SZ, SZ);
+          const { data } = ctx.getImageData(0, 0, SZ, SZ);
+
+          const warmHighlight = scanWarmHighlight(data);
+          const clusters = extractDominantColors(data, 9);
+          if (clusters.length === 0) { reject(new Error("No usable colors")); return; }
+          const theme = buildThemeFromClusters(clusters, warmHighlight);
+          resolve({ theme, hasGold: warmHighlight !== null });
+        } catch(e) { reject(e); }
+        finally { URL.revokeObjectURL(url); }
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Image load failed")); };
+      img.src = url;
+    });
+
+  // ── Main upload handler ───────────────────────────────────────────────────────
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setAiError(""); setAiTheme(null);
+
+    const reader = new FileReader();
+    reader.onload = () => setAiPreview(reader.result as string);
+    reader.readAsDataURL(file);
+
+    setAiLoading(true);
+
+    // Step 1 — canvas extraction (always fast, always works)
+    let canvasResult: { theme: AppTheme; hasGold: boolean } | null = null;
+    try { canvasResult = await extractThemeFromCanvas(file); }
+    catch(e) { console.warn("Canvas extraction failed:", e); }
+
+    // Step 2 — AI refinement with canvas colors as ground truth
+    try {
+      const ab = await file.arrayBuffer();
+      let binary = "";
+      new Uint8Array(ab).forEach(b => binary += String.fromCharCode(b));
+      const base64 = btoa(binary);
+      const mediaType = file.type as "image/jpeg"|"image/png"|"image/webp"|"image/gif";
+
+      const goldWarning = canvasResult?.hasGold
+        ? " ⚠️ CRITICAL: The canvas pixel scan detected GOLD/AMBER highlights in this image. You MUST use a gold/amber color (#c8960a–#f5c842 range) as the accent. Do NOT use blue or grey for the accent."
+        : "";
+
+      const hint = canvasResult
+        ? `Canvas pixel analysis: primary=${canvasResult.theme.primary}, accent=${canvasResult.theme.accent}, secondary=${canvasResult.theme.secondary}, bg=${canvasResult.theme.bg}.${goldWarning} Use these as ground truth and refine slightly.`
+        : "";
+
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 600,
+          system: "You are a UI color theme generator. Output valid JSON only. Zero extra text.",
+          messages: [{ role: "user", content: [
+            { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+            { type: "text", text:
+              `Generate a dark UI theme from this image. ${hint}
+
+JSON only:
+{"name":"<2-3 word name>","primary":"<hex>","secondary":"<hex>","accent":"<hex>","bg":"<hex>","bgCard":"<rgba>","border":"<rgba>","textMuted":"rgba(255,255,255,0.40)"}
+
+Rules:
+- primary: dominant vivid hue (cobalt/navy/purple etc.)
+- secondary: 58% brightness of primary
+- accent: GOLD if any gold/yellow/amber shimmer exists — even faint streaks count; else brightest contrasting color
+- bg: near-black with faint primary tint (2–6% brightness)
+- bgCard: rgba(primary-rgb, 0.09), border: rgba(accent-rgb, 0.22)` }
+          ]}]
+        })
+      });
+
+      const res = await resp.json();
+      if (!res.error) {
+        const txt = (res.content ?? []).map((b: any) => b.type==="text" ? b.text : "").join("");
+        const m = txt.match(/\{[\s\S]*?\}/);
+        if (m) {
+          const parsed = JSON.parse(m[0]) as AppTheme;
+          if (parsed.primary && parsed.accent && parsed.name) {
+            setAiTheme(parsed);
+            setAiLoading(false);
+            return;
+          }
+        }
+      }
+    } catch(e) { console.warn("AI failed, using canvas:", e); }
+
+    // Step 3 — canvas fallback
+    if (canvasResult) { setAiTheme(canvasResult.theme); }
+    else { setAiError("Could not extract colors from this image."); }
+    setAiLoading(false);
+  };
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          onClick={onClose}
+        >
+          <motion.div
+            initial={{ scale: 0.9, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.9, opacity: 0 }}
+            onClick={e => e.stopPropagation()}
+            className="bg-gray-900 border border-white/10 rounded-3xl w-full max-w-md shadow-2xl overflow-hidden"
+            style={{ maxHeight: "88vh" }}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-white/8">
+              <h2 className="text-white font-bold text-xl">{t("settings.title")}</h2>
+              <button onClick={onClose} className="text-white/40 hover:text-white transition-colors">
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex border-b border-white/8">
+              {(["general", "appearance"] as const).map(tab => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab)}
+                  className={`flex-1 py-3 text-sm font-semibold transition-all capitalize ${
+                    activeTab === tab
+                      ? "text-white border-b-2 border-purple-500"
+                      : "text-white/30 hover:text-white/60"
+                  }`}
+                >
+                  {tab === "general" ? t("settings.tabGeneral") : t("settings.tabAppearance")}
+                </button>
+              ))}
+            </div>
+
+            <div className="overflow-y-auto" style={{ maxHeight: "calc(88vh - 130px)" }}>
+
+              {/* ── GENERAL TAB ─────────────────────────────────────────── */}
+              {activeTab === "general" && (
+                <div className="p-6 space-y-4">
+                  {/* Autostart */}
+                  <div className="flex items-center justify-between bg-white/5 border border-white/10 rounded-2xl p-4">
+                    <div className="flex items-center gap-3">
+                      <Power size={18} className={autostart ? "text-green-400" : "text-white/30"} />
+                      <div>
+                        <p className="text-white text-sm font-semibold">{t("settings.autostart")}</p>
+                        <p className="text-white/40 text-xs">{t("settings.autostartSub")}</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={toggleAutostart}
+                      className={`w-12 h-6 rounded-full transition-all relative ${autostart ? "bg-green-500" : "bg-white/20"}`}
+                    >
+                      <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${autostart ? "left-7" : "left-1"}`} />
+                    </button>
+                  </div>
+
+                  {/* Notifications */}
+                  <div className="bg-white/5 border border-white/10 rounded-2xl p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        {notifMuted ? <BellOff size={18} className="text-white/30" /> : <Bell size={18} className="text-purple-400" />}
+                        <div>
+                          <p className="text-white text-sm font-semibold">{t("settings.notifications")}</p>
+                          <p className="text-white/40 text-xs">{notifMuted ? t("settings.muted") : t("settings.toastSub")}</p>
+                        </div>
+                      </div>
+                      <button onClick={toggleNotifMute} className={`w-12 h-6 rounded-full transition-all relative ${!notifMuted ? "bg-purple-500" : "bg-white/20"}`}>
+                        <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${!notifMuted ? "left-7" : "left-1"}`} />
+                      </button>
+                    </div>
+                    {!notifMuted && (
+                      <div className="border-t border-white/8 pt-3 space-y-3">
+                        {/* Duration */}
+                        <div>
+                          <div className="flex items-center gap-2 mb-2">
+                            <Clock size={13} className="text-white/40" />
+                            <span className="text-white/60 text-xs font-semibold">{t("settings.duration")}</span>
+                            <span className="ml-auto text-purple-400 text-xs font-bold">{toastDuration}s</span>
+                          </div>
+                          <div className="flex gap-1.5 flex-wrap">
+                            {DURATION_OPTIONS.map(opt => (
+                              <button key={opt.value} onClick={() => handleDurationChange(opt.value)}
+                                className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all ${toastDuration === opt.value ? "bg-purple-600 text-white" : "bg-white/8 text-white/40 hover:bg-white/15 hover:text-white"}`}>
+                                {opt.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        {/* Custom sound */}
+                        <div className="border-t border-white/8 pt-3">
+                          <div className="flex items-center gap-3 mb-2">
+                            <span className="text-base">🔔</span>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-white/80 text-xs font-semibold">{t("settings.sound")}</p>
+                              <p className="text-white/35 text-xs truncate">{customSound ? soundName : t("settings.soundDefault")}</p>
+                            </div>
+                            <div className="flex gap-1.5">
+                              <button onClick={() => soundRef.current?.click()} className="px-2.5 py-1 bg-purple-600/20 border border-purple-500/30 rounded-lg text-purple-300 text-xs font-semibold hover:bg-purple-600/30 transition-all">{t("settings.soundUpload")}</button>
+                              {customSound && <button onClick={handleSoundReset} className="px-2.5 py-1 bg-white/5 border border-white/10 rounded-lg text-white/40 text-xs hover:text-white transition-all">{t("settings.soundClear")}</button>}
+                            </div>
+                            <input ref={soundRef} type="file" accept="audio/*" className="hidden" onChange={handleSoundUpload} />
+                          </div>
+                          {customSound && <audio controls src={customSound} className="w-full h-7" style={{filter: "invert(0.7)"}} />}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Custom tray icon */}
+                  <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+                    <div className="flex items-center gap-3 mb-3">
+                      <Image size={18} className="text-white/50" />
+                      <div>
+                        <p className="text-white text-sm font-semibold">{t("settings.appIcon")}</p>
+                        <p className="text-white/40 text-xs">{t("settings.appIconSub")}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      {/* Preview */}
+                      <div className="w-12 h-12 rounded-xl border border-white/10 bg-white/5 flex items-center justify-center overflow-hidden flex-shrink-0">
+                        {customIcon
+                          ? <img src={customIcon} className="w-full h-full object-cover" alt="icon" />
+                          : <span className="text-2xl">🎮</span>
+                        }
+                      </div>
+                      <div className="flex gap-2 flex-1">
+                        <button
+                          onClick={() => iconRef.current?.click()}
+                          className="flex-1 py-2 bg-purple-600/20 border border-purple-500/30 rounded-xl text-purple-300 text-xs font-semibold hover:bg-purple-600/30 transition-all flex items-center justify-center gap-1.5"
+                        >
+                          <Upload size={12} /> {t("settings.trayUpload")}
+                        </button>
+                        {customIcon && (
+                          <button
+                            onClick={resetIcon}
+                            className="py-2 px-3 bg-white/5 border border-white/10 rounded-xl text-white/40 text-xs hover:text-white transition-all"
+                          >
+                            <RotateCcw size={12} />
+                          </button>
+                        )}
+                      </div>
+                      <input ref={iconRef} type="file" accept="image/*" className="hidden" onChange={handleIconUpload} />
+                    </div>
+                    <p className="text-white/20 text-xs mt-2">{t("settings.trayNote")}</p>
+                  </div>
+
+                  {/* Language */}
+                  <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+                    <div className="flex items-center gap-3 mb-3">
+                      <Languages size={18} className="text-purple-400" />
+                      <div>
+                        <p className="text-white text-sm font-semibold">{t("settings.language")}</p>
+                        <p className="text-white/40 text-xs">{t("settings.languageSub")}</p>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() => handleLangChange("en")}
+                        className={`py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2 ${
+                          lang === "en"
+                            ? "bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-lg"
+                            : "bg-white/5 text-white/50 hover:bg-white/10 hover:text-white border border-white/10"
+                        }`}
+                      >
+                        🇬🇧 {t("settings.langEN")}
+                      </button>
+                      <button
+                        onClick={() => handleLangChange("th")}
+                        className={`py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2 ${
+                          lang === "th"
+                            ? "bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-lg"
+                            : "bg-white/5 text-white/50 hover:bg-white/10 hover:text-white border border-white/10"
+                        }`}
+                      >
+                        🇹🇭 {t("settings.langTH")}
+                      </button>
+                    </div>
+                  </div>
+
+                  <p className="text-white/30 text-xs text-center">
+                    {t("settings.trayHint")}
+                  </p>
+
+                  <button
+                    onClick={onClose}
+                    className="w-full py-3 bg-gradient-to-r from-purple-600 to-indigo-600 rounded-xl text-white font-semibold flex items-center justify-center gap-2"
+                  >
+                    <Save size={16} /> {t("settings.done")}
+                  </button>
+                </div>
+              )}
+
+              {/* ── APPEARANCE TAB ──────────────────────────────────────── */}
+              {activeTab === "appearance" && (
+                <div className="p-6 space-y-5">
+
+                  {/* Current theme preview bar */}
+                  <div className="flex items-center gap-2 p-3 rounded-2xl border border-white/10 bg-white/5">
+                    <div className="flex gap-1.5">
+                      {[currentTheme.primary, currentTheme.accent, currentTheme.secondary].map((c, i) => (
+                        <div key={i} className="w-5 h-5 rounded-full border border-white/10" style={{ background: c }} />
+                      ))}
+                    </div>
+                    <span className="text-white/60 text-xs font-semibold ml-1">{currentTheme.name}</span>
+                    {saved && (
+                      <motion.span
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        className="ml-auto text-green-400 text-xs flex items-center gap-1"
+                      >
+                        <Check size={11} /> {t("settings.applied")}
+                      </motion.span>
+                    )}
+                  </div>
+
+                  {/* Preset themes */}
+                  <div>
+                    <p className="text-white/40 text-xs font-semibold uppercase tracking-widest mb-2 px-1">{t("settings.presets")}</p>
+                    <div className="grid grid-cols-5 gap-2">
+                      {PRESET_THEMES.map(theme => (
+                        <button
+                          key={theme.name}
+                          onClick={() => applyAndSave(theme)}
+                          title={theme.name}
+                          className={`relative h-10 rounded-xl border transition-all overflow-hidden ${
+                            currentTheme.name === theme.name
+                              ? "border-white/50 scale-105 shadow-lg"
+                              : "border-white/10 hover:border-white/30 hover:scale-105"
+                          }`}
+                          style={{ background: `linear-gradient(135deg, ${theme.primary}, ${theme.secondary})` }}
+                        >
+                          {currentTheme.name === theme.name && (
+                            <div className="absolute inset-0 flex items-center justify-center">
+                              <Check size={14} className="text-white drop-shadow" />
+                            </div>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-5 gap-2 mt-1">
+                      {PRESET_THEMES.map(theme => (
+                        <p key={theme.name} className="text-white/25 text-center" style={{ fontSize: "9px" }}>
+                          {theme.name.split(" ")[0]}
+                        </p>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Divider */}
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 h-px bg-white/10" />
+                    <span className="text-white/25 text-xs flex items-center gap-1.5">
+                      <Sparkles size={10} /> {t("settings.aiFromImage")}
+                    </span>
+                    <div className="flex-1 h-px bg-white/10" />
+                  </div>
+
+                  {/* AI theme from image */}
+                  <div className="bg-white/5 border border-white/10 rounded-2xl p-4 space-y-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center flex-shrink-0">
+                        <Palette size={15} className="text-white" />
+                      </div>
+                      <div>
+                        <p className="text-white text-sm font-semibold">{t("settings.themeFromImg")}</p>
+                        <p className="text-white/40 text-xs">{t("settings.themeFromImgSub")}</p>
+                      </div>
+                    </div>
+
+                    {/* Upload zone */}
+                    <button
+                      onClick={() => imageRef.current?.click()}
+                      className="w-full border border-dashed border-white/20 rounded-xl py-4 flex flex-col items-center gap-2 hover:border-purple-500/50 hover:bg-purple-500/5 transition-all"
+                    >
+                      {aiPreview ? (
+                        <img src={aiPreview} className="w-16 h-16 rounded-xl object-cover" alt="preview" />
+                      ) : (
+                        <Upload size={20} className="text-white/30" />
+                      )}
+                      <span className="text-white/40 text-xs">
+                        {aiPreview ? t("settings.clickChange") : t("settings.clickUpload")}
+                      </span>
+                    </button>
+                    <input ref={imageRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+
+                    {/* Loading */}
+                    {aiLoading && (
+                      <div className="flex items-center gap-2 text-purple-400 text-sm py-1">
+                        <motion.div
+                          animate={{ rotate: 360 }}
+                          transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
+                        >
+                          <Sparkles size={14} />
+                        </motion.div>
+                        {t("settings.extracting")}
+                      </div>
+                    )}
+
+                    {/* Hard error (both AI and canvas failed) */}
+                    {aiError && !aiTheme && (
+                      <p className="text-red-400 text-xs">{aiError}</p>
+                    )}
+
+                    {/* AI / canvas result */}
+                    {aiTheme && !aiLoading && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="space-y-2"
+                      >
+                        {/* Full palette preview card */}
+                        <div className="rounded-xl overflow-hidden" style={{ background: aiTheme.bg, border: `1px solid ${aiTheme.border}` }}>
+                          {/* Gradient banner showing all 4 key colors */}
+                          <div className="h-3 w-full" style={{ background: `linear-gradient(90deg, ${aiTheme.secondary}, ${aiTheme.primary}, ${aiTheme.accent}, ${aiTheme.primary}90, ${aiTheme.secondary})` }} />
+                          <div className="p-3 space-y-2.5">
+                            {/* Name + source */}
+                            <div className="flex items-center justify-between">
+                              <p className="text-white text-xs font-bold">{aiTheme.name}</p>
+                              <span className="text-[10px] px-2 py-0.5 rounded-full" style={{ background: aiTheme.bgCard, color: aiTheme.accent }}>
+                                {t("settings.extracted")}
+                              </span>
+                            </div>
+                            {/* All swatches: bg · secondary · primary · accent + labels */}
+                            <div className="grid grid-cols-5 gap-1.5">
+                              {[
+                                { color: aiTheme.bg, label: "BG" },
+                                { color: aiTheme.secondary, label: "2nd" },
+                                { color: aiTheme.primary, label: "Main" },
+                                { color: aiTheme.accent, label: (aiTheme.name.includes("Gold") || aiTheme.name.includes("Amber")) ? "✦ Gold" : "Pop" },
+                                { color: aiTheme.bgCard, label: "Card" },
+                              ].map(({ color, label }) => (
+                                <div key={label} className="flex flex-col items-center gap-1">
+                                  <div className="w-full h-7 rounded-lg ring-1 ring-white/10" style={{ background: color }} />
+                                  <span className="text-[9px] text-white/30">{label}</span>
+                                </div>
+                              ))}
+                            </div>
+                            {/* Mini UI mockup */}
+                            <div className="rounded-lg p-2 space-y-1.5" style={{ background: aiTheme.bgCard, border: `1px solid ${aiTheme.border}` }}>
+                              <div className="flex items-center gap-1.5">
+                                <div className="w-2 h-2 rounded-full" style={{ background: aiTheme.primary }} />
+                                <div className="h-1.5 w-16 rounded-full" style={{ background: aiTheme.primary, opacity: 0.7 }} />
+                                <div className="ml-auto h-1.5 w-8 rounded-full" style={{ background: aiTheme.accent, opacity: 0.8 }} />
+                              </div>
+                              <div className="h-1 w-3/4 rounded-full bg-white/10" />
+                              <div className="flex gap-1">
+                                <div className="h-4 flex-1 rounded" style={{ background: `linear-gradient(135deg, ${aiTheme.primary}, ${aiTheme.secondary})` }} />
+                                <div className="h-4 w-8 rounded bg-white/5" />
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => applyAndSave(aiTheme)}
+                          className="w-full py-2.5 rounded-xl text-white text-sm font-bold transition-all hover:opacity-90 hover:scale-[1.01] active:scale-[0.99]"
+                          style={{ background: `linear-gradient(135deg, ${aiTheme.primary}, ${aiTheme.secondary})` }}
+                        >
+                          {t("settings.applyTheme")}
+                        </button>
+                      </motion.div>
+                    )}
+                  </div>
+
+                  {/* Reset to default */}
+                  <button
+                    onClick={() => applyAndSave(DEFAULT_THEME)}
+                    className="w-full py-2.5 bg-white/5 border border-white/10 rounded-xl text-white/50 text-sm hover:text-white transition-all flex items-center justify-center gap-2"
+                  >
+                    <RotateCcw size={13} /> {t("settings.resetDefault")}
+                  </button>
+                </div>
+              )}
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+      {/* ── Language change confirmation dialog ── */}
+      {pendingLang && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[60] flex items-center justify-center p-4"
+          onClick={cancelLangChange}
+        >
+          <motion.div
+            initial={{ scale: 0.9, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.9, opacity: 0 }}
+            onClick={e => e.stopPropagation()}
+            className="bg-gray-900 border border-white/15 rounded-2xl p-6 w-full max-w-xs shadow-2xl"
+          >
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-xl bg-purple-600/20 border border-purple-500/30 flex items-center justify-center flex-shrink-0">
+                <Languages size={18} className="text-purple-400" />
+              </div>
+              <div>
+                <p className="text-white font-bold text-sm">{t("settings.language")}</p>
+                <p className="text-white/40 text-xs">{t("settings.languageSub")}</p>
+              </div>
+            </div>
+
+            <p className="text-white/70 text-sm mb-5 leading-relaxed">
+              {pendingLang === "th"
+                ? t("settings.langConfirmTH")
+                : t("settings.langConfirmEN")}
+            </p>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={cancelLangChange}
+                className="py-2.5 rounded-xl text-sm font-semibold bg-white/5 border border-white/10 text-white/50 hover:text-white hover:bg-white/10 transition-all"
+              >
+                {t("settings.cancel")}
+              </button>
+              <button
+                onClick={confirmLangChange}
+                className="py-2.5 rounded-xl text-sm font-semibold bg-gradient-to-r from-purple-600 to-indigo-600 text-white hover:opacity-90 transition-all"
+              >
+                {pendingLang === "th" ? t("settings.switchTH") : t("settings.switchEN")}
+              </button>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+
+      {/* ── Icon change confirmation dialog ── */}
+      {pendingIconUrl && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[60] flex items-center justify-center p-4"
+          onClick={cancelIconChange}
+        >
+          <motion.div
+            initial={{ scale: 0.9, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.9, opacity: 0 }}
+            onClick={e => e.stopPropagation()}
+            className="bg-gray-900 border border-white/15 rounded-2xl p-6 w-full max-w-xs shadow-2xl"
+          >
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center flex-shrink-0 overflow-hidden">
+                <img src={pendingIconUrl} className="w-full h-full object-cover" alt="preview" />
+              </div>
+              <div>
+                <p className="text-white font-bold text-sm">{t("settings.iconConfirmTitle")}</p>
+                <p className="text-white/40 text-xs">{t("settings.iconConfirmSub")}</p>
+              </div>
+            </div>
+
+            <p className="text-white/70 text-sm mb-5 leading-relaxed">
+              {t("settings.iconConfirmMsg")}
+            </p>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={cancelIconChange}
+                className="py-2.5 rounded-xl text-sm font-semibold bg-white/5 border border-white/10 text-white/50 hover:text-white hover:bg-white/10 transition-all"
+              >
+                {t("settings.cancel")}
+              </button>
+              <button
+                onClick={confirmIconChange}
+                className="py-2.5 rounded-xl text-sm font-semibold bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:opacity-90 transition-all"
+              >
+                {t("settings.iconConfirmApply")}
+              </button>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}

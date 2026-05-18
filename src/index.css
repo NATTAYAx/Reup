@@ -1,0 +1,98 @@
+@import "tailwindcss";
+
+/* ─── Theme CSS variables (set by applyTheme() in JS) ────────────────────── */
+:root {
+  --color-primary:   #7c3aed;
+  --color-secondary: #4f46e5;
+  --color-accent:    #a78bfa;
+  --color-bg:        #030712;
+  --color-card:      rgba(255,255,255,0.05);
+  --color-border:    rgba(255,255,255,0.10);
+  --color-muted:     rgba(255,255,255,0.40);
+}
+
+/* ─── Theme utility classes ──────────────────────────────────────────────── */
+.theme-primary   { color: var(--color-primary); }
+.theme-accent    { color: var(--color-accent); }
+.theme-bg        { background-color: var(--color-bg); }
+.theme-card      { background: var(--color-card); }
+.theme-border    { border-color: var(--color-border); }
+.theme-muted     { color: var(--color-muted); }
+
+.theme-btn {
+  background: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
+}
+
+.theme-glow {
+  box-shadow: 0 0 20px color-mix(in srgb, var(--color-primary) 30%, transparent);
+}
+
+/* ─── Select dropdown dark style ─────────────────────────────────────────── */
+select option {
+  background-color: #1f2937;
+  color: white;
+}
+select {
+  color-scheme: dark;
+}
+
+/* ─── Smooth theme transitions ───────────────────────────────────────────── */
+*, *::before, *::after {
+  transition-property: background-color, border-color, color, box-shadow;
+  transition-duration: 300ms;
+  transition-timing-function: ease;
+}
+
+/* Exclude transitions that would break animations */
+.no-transition, .no-transition * {
+  transition: none !important;
+}
+/* ─── Custom slim scrollbar — all scroll areas ───────────────────────────── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.12) transparent;
+}
+*::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.12);
+  border-radius: 99px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,0.25);
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Finance scroll area — slightly more visible */
+.finance-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.10) transparent;
+  padding-right: 2px;
+}
+.finance-scroll::-webkit-scrollbar {
+  width: 3px;
+}
+.finance-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.10);
+  border-radius: 99px;
+}
+.finance-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--color-primary);
+  opacity: 0.6;
+}
+
+/* ─── Finance card hover depth ───────────────────────────────────────────── */
+.finance-card-hover {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.finance-card-hover:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+}
