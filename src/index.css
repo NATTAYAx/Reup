@@ -96,3 +96,28 @@ select {
   transform: translateY(-1px);
   box-shadow: 0 4px 20px rgba(0,0,0,0.3);
 }
+/* ─── Number inputs ───────────────────────────────────────────────────────────
+   Chromium draws a stepper on every input[type=number]. It looks wrong in a
+   dark app, it is useless for typing a price, and worse, hovering the field and
+   scrolling the wheel silently changes the value. Killing the stepper here fixes
+   every number field in the app at once instead of per component. The wheel
+   behaviour is handled in main.tsx. */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* ─── Date inputs ─────────────────────────────────────────────────────────────
+   The native calendar glyph is light grey on dark and cannot be recoloured, so
+   it is hidden. Date fields in this app open the picker from their own button
+   via showPicker(). */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  opacity: 0;
+  display: none;
+}

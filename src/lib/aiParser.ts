@@ -1,4 +1,5 @@
 import { Category, ResetType } from "../types";
+import { todayBangkok } from "./dateUtil";
 
 interface ParsedTask {
   name: string;
@@ -244,7 +245,7 @@ export function parseNaturalLanguage(input: string): ParsedTask {
     reset_day,
     reset_interval_days: reset_type === "custom_days" ? 30 : null,
     anchor_date: (reset_type === "biweekly" || reset_type === "custom_days")
-      ? new Date().toISOString().split("T")[0]
+      ? todayBangkok()
       : null,
     event_start: null,
     event_end: null,

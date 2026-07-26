@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ChevronLeft, ChevronRight, Plus, Trash2, RefreshCw, Star, Clock, Flame, CheckCircle2, RotateCcw } from "lucide-react";
 import {
@@ -13,6 +13,7 @@ import {
   toggleUrgent, markTaskCompleted, unmarkTaskCompleted
 } from "../lib/database";
 import { t } from "../lib/i18n";
+import { bangkokNow } from "../lib/dateUtil";
 
 interface Props {
   onBack?: () => void;
@@ -83,15 +84,47 @@ function getTaskDisplayTime(task: any): string | null {
   return fmtTime(task.reset_time);
 }
 
-/** Returns today's date in Bangkok timezone (UTC+7) */
-function bkkNow(): Date {
-  const n = new Date(Date.now() + 7 * 60 * 60 * 1000);
-  return new Date(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
+/**
+ * Does this task actually occur on the given date?
+ * Fixes the old bug where ALL recurring tasks were counted on EVERY day.
+ * - daily: every day
+ * - weekly: only on reset_day (0=Sun..6=Sat)
+ * - biweekly / custom_days: only days landing on a cycle boundary from anchor_date
+ * - specific_date / one_time / event_window: exact date or within window
+ */
+function taskOccursOnDate(task: any, ds: string, date: Date): boolean {
+  switch (task.reset_type) {
+    case "daily":
+      return true;
+    case "weekly":
+      return task.reset_day != null && date.getDay() === task.reset_day;
+    case "biweekly":
+    case "custom_days": {
+      if (!task.anchor_date) return false;
+      const interval = task.reset_type === "biweekly" ? 14 : (task.reset_interval_days ?? 14);
+      const anchor = new Date(task.anchor_date.substring(0, 10) + "T00:00:00");
+      const target = new Date(ds + "T00:00:00");
+      const diffDays = Math.round((target.getTime() - anchor.getTime()) / (24 * 60 * 60 * 1000));
+      return diffDays >= 0 && diffDays % interval === 0;
+    }
+    case "specific_date":
+      return task.specific_date === ds;
+    case "one_time":
+      return !!task.event_end && task.event_end.substring(0, 10) === ds;
+    case "event_window": {
+      if (!task.event_end) return false;
+      const end = task.event_end.substring(0, 10);
+      if (task.event_start) return ds >= task.event_start.substring(0, 10) && ds <= end;
+      return ds === end;
+    }
+    default:
+      return false;
+  }
 }
 
 export default function CalendarView({ onBack, isVisible = true, refreshKey = 0, onTaskChanged }: Props) {
-  const [viewDate, setViewDate] = useState(() => { const n = bkkNow(); return new Date(n.getFullYear(), n.getMonth(), 1); });
-  const [selectedDate, setSelectedDate] = useState<Date>(() => bkkNow());
+  const [viewDate, setViewDate] = useState(() => { const n = bangkokNow(); return new Date(n.getFullYear(), n.getMonth(), 1); });
+  const [selectedDate, setSelectedDate] = useState<Date>(() => bangkokNow());
   const [allTasks, setAllTasks] = useState<any[]>([]);
   const [dayTasks, setDayTasks] = useState<any[]>([]);
   const [monthPriorityTasks, setMonthPriorityTasks] = useState<any[]>([]);
@@ -125,41 +158,18 @@ export default function CalendarView({ onBack, isVisible = true, refreshKey = 0,
     loadDayTasks(selectedDate);
   }, [selectedDate, isVisible, refreshKey]);
 
-  const recurringCats = useMemo(() =>
-    Array.from(new Set(
-      allTasks.filter(t => ["daily","weekly","biweekly","custom_days"].includes(t.reset_type)).map(t => t.category)
-    )), [allTasks]);
-
-  const specificDateMap = useMemo(() => {
-    const map = new Map<string, string[]>();
-    allTasks.filter(t => t.specific_date).forEach(t => {
-      if (!map.has(t.specific_date)) map.set(t.specific_date, []);
-      map.get(t.specific_date)!.push(t.category);
-    });
-    return map;
-  }, [allTasks]);
-
   const getDateIndicators = (date: Date): string[] => {
     const ds = toDateString(date);
-    const cats = new Set<string>(recurringCats);
-    (specificDateMap.get(ds) || []).forEach(cat => cats.add(cat));
+    const cats = new Set<string>();
+    for (const t of allTasks) {
+      if (taskOccursOnDate(t, ds, date)) cats.add(t.category);
+    }
     return Array.from(cats);
   };
 
   const getTaskCount = (date: Date): number => {
     const ds = toDateString(date);
-    const recurring = allTasks.filter(t =>
-      ["daily", "weekly", "biweekly", "custom_days"].includes(t.reset_type)
-    ).length;
-    const nonRecurring = allTasks.filter(t =>
-      t.specific_date === ds ||
-      (t.reset_type === "event_window" && t.event_end && (() => {
-        const end = t.event_end.substring(0, 10);
-        if (t.event_start) return ds >= t.event_start.substring(0, 10) && ds <= end;
-        return ds === end;
-      })())
-    ).length;
-    return recurring + nonRecurring;
+    return allTasks.filter(t => taskOccursOnDate(t, ds, date)).length;
   };
 
   const priorityTasksOnDay = (date: Date) =>
@@ -248,7 +258,7 @@ export default function CalendarView({ onBack, isVisible = true, refreshKey = 0,
   for (let i = 0; i < firstDay; i++) cells.push(null);
   for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(year, month, d));
 
-  const todayLocal = bkkNow();
+  const todayLocal = bangkokNow();
   const isSelectedToday = toDateString(selectedDate) === toDateString(todayLocal);
 
   return (
@@ -268,7 +278,7 @@ export default function CalendarView({ onBack, isVisible = true, refreshKey = 0,
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => { const n = new Date(Date.now() + 7*3600000); const tl = new Date(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate()); setViewDate(new Date(tl.getFullYear(), tl.getMonth(), 1)); setSelectedDate(tl); }}
+            onClick={() => { const tl = bangkokNow(); setViewDate(new Date(tl.getFullYear(), tl.getMonth(), 1)); setSelectedDate(tl); }}
             className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-white/60 text-xs hover:text-white transition-all"
           >
             {t("calendar.today")}

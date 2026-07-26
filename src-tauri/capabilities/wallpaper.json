@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "wallpaper",
+  "description": "Permissions for the live wallpaper window",
+  "windows": [
+    "wallpaper"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-emit",
+    "core:webview:allow-internal-toggle-devtools",
+    "wallpaper:default"
+  ]
+}

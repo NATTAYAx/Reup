@@ -8,6 +8,7 @@ import DatePicker from "./DatePicker";
 import TaskImagePicker from "./TaskImagePicker";
 import AIChatModal from "./AIChatModal";
 import { t } from "../lib/i18n";
+import { todayBangkok } from "../lib/dateUtil";
 
 interface Props {
   open: boolean;
@@ -23,7 +24,7 @@ const EMPTY_FORM = {
   reset_time: "04:00",
   reset_day: 1,
   reset_interval_days: 14,
-  anchor_date: new Date().toISOString().split("T")[0],
+  anchor_date: todayBangkok(),
   event_start: "",
   event_end: "",
   specific_date: "",

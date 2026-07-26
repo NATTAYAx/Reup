@@ -5,7 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { useCountdowns } from "./hooks/useCountdowns";
 import { loadTheme, applyTheme } from "./lib/theme";
-import { deleteTask, togglePriority, toggleUrgent } from "./lib/database";
+import { deleteTask, togglePriority, toggleUrgent, getSetting } from "./lib/database";
 import TaskCard from "./components/TaskCard";
 import AddTaskModal from "./components/AddTaskModal";
 import SettingsModal from "./components/SettingsModal";
@@ -14,9 +14,23 @@ import CalendarView from "./components/CalendarView";
 import FinanceView from "./components/FinanceView";
 import EditTaskModal from "./components/EditTaskModal";
 import UnifiedAIChat from "./components/UnifiedAIChat";
-import DebugOverlay from "./components/DebugOverlay";
+// import DebugOverlay from "./components/DebugOverlay"; // debug tool, re-enable if needed
+import { bangkokHour } from "./lib/dateUtil";
 
 type Filter = "all" | "priority" | "urgent" | "done" | "game" | "school" | "work" | "personal";
+
+/**
+ * Keeps a heavy child unmounted until the first time it is actually needed,
+ * then keeps it mounted for the rest of the session so its state survives.
+ * Deliberately NOT React.lazy: dynamic import() has hung in production builds
+ * on this project before, and this gets most of the startup win with none of
+ * that risk.
+ */
+function useMountOnce(active: boolean): boolean {
+  const [seen, setSeen] = useState(active);
+  useEffect(() => { if (active) setSeen(true); }, [active]);
+  return seen || active;
+}
 
 export default function App() {
   const { countdowns, loading, refreshTasks } = useCountdowns();
@@ -24,6 +38,24 @@ export default function App() {
   useEffect(() => {
     applyTheme(loadTheme());
     getCurrentWindow().show().catch(() => {});
+
+    // Restore the live wallpaper if it was on when the app last closed.
+    // This was disabled while the wallpaper window lived in this process and
+    // froze the event loop at launch. It now runs in its own process
+    // (see src-tauri/src/wallpaper.rs), so starting it here is safe.
+    (async () => {
+      try {
+        const [enabled, path] = await Promise.all([
+          getSetting("wallpaper_enabled"),
+          getSetting("wallpaper_path"),
+        ]);
+        if (enabled === "1" && path) {
+          await invoke("start_wallpaper", { path });
+        }
+      } catch (e) {
+        console.error("wallpaper auto-restore failed:", e);
+      }
+    })();
 
     // Restore custom tray icon from localStorage on every startup.
     // The Rust tray always starts with the default icon — we must re-send
@@ -52,6 +84,14 @@ export default function App() {
   const [filter, setFilter] = useState<Filter>("all");
   const [calendarKey, setCalendarKey] = useState(0);
   const [financeKey, setFinanceKey] = useState(0);
+
+  // Nothing below is built until it is opened for the first time.
+  const mountCalendar = useMountOnce(view === "calendar");
+  const mountFinance  = useMountOnce(view === "finance");
+  const mountAdd      = useMountOnce(addOpen);
+  const mountSettings = useMountOnce(settingsOpen);
+  const mountEdit     = useMountOnce(editTaskId !== null);
+  const mountAi       = useMountOnce(aiOpen);
 
   const refreshAll = useCallback(() => {
     refreshTasks();
@@ -98,8 +138,8 @@ export default function App() {
     return countdowns.filter(c => c.task.category === filter);
   }, [countdowns, filter]);
 
-  const nowBkk = new Date(Date.now() + 7 * 60 * 60 * 1000);
-  const greeting = nowBkk.getUTCHours() < 12 ? t("greeting.morning") : nowBkk.getUTCHours() < 18 ? t("greeting.afternoon") : t("greeting.evening");
+  const hr = bangkokHour();
+  const greeting = hr < 12 ? t("greeting.morning") : hr < 18 ? t("greeting.afternoon") : t("greeting.evening");
 
   const priorityCount = countdowns.filter(c => c.task.is_priority).length;
   const urgentCount = countdowns.filter(c => c.task.is_urgent).length;
@@ -108,7 +148,7 @@ export default function App() {
 
   return (
     <div className="w-screen h-screen text-white overflow-hidden rounded-2xl border flex flex-col" style={{ background: "var(--color-bg)", borderColor: "var(--color-border)" }}>
-      <DebugOverlay countdowns={countdowns} />
+      {/* <DebugOverlay countdowns={countdowns} /> — debug tool, re-enable if needed */}
       {/* Drag region: left greeting text area only — buttons are on right side */}
       <div data-tauri-drag-region className="absolute top-0 left-0 w-52 h-20 cursor-grab" style={{ zIndex: 20 }} />
 
@@ -116,11 +156,13 @@ export default function App() {
       <div className="absolute inset-0 overflow-hidden pointer-events-none rounded-2xl">
         <div className="absolute -top-20 -right-20 w-72 h-72 bg-purple-500/10 rounded-full blur-3xl" />
         <div className="absolute -bottom-20 -left-20 w-72 h-72 bg-indigo-500/10 rounded-full blur-3xl" />
-        <motion.div
-          animate={{ scale: [1, 1.1, 1], opacity: [0.03, 0.08, 0.03] }}
-          transition={{ duration: 8, repeat: Infinity }}
-          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-purple-600/10 rounded-full blur-3xl"
-        />
+        {/* This blob used to pulse forever with scale and opacity keyframes.
+            blur-3xl is a 64px gaussian over a 384px circle, which the compositor
+            caches for free while it holds still — but animating scale forces the
+            whole blur to be recomputed every frame, 60 times a second, all day.
+            That was the WebView2 GPU process sitting at 90% with no video
+            playing at all. The blob stays, it just stops breathing. */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-purple-600/10 rounded-full blur-3xl" />
       </div>
 
       <div className="relative z-10 flex flex-col h-full p-6">
@@ -129,7 +171,7 @@ export default function App() {
         <div className="flex items-center justify-between mb-5">
           <div>
             <p className="text-white/40 text-xs">
-              {nowBkk.toLocaleDateString(getLang() === "th" ? "th-TH" : "en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "Asia/Bangkok" })}
+              {new Date().toLocaleDateString(getLang() === "th" ? "th-TH" : "en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "Asia/Bangkok" })}
             </p>
             <h1 className="text-xl font-bold text-white">{greeting} 👋</h1>
           </div>
@@ -311,10 +353,10 @@ export default function App() {
               </div>
           </div>
           <div style={{ display: view === "calendar" ? "flex" : "none" }} className="flex-1 overflow-hidden min-h-0">
-            <CalendarView onBack={() => setView("tasks")} isVisible={view === "calendar"} refreshKey={calendarKey} onTaskChanged={refreshTasks} />
+            {mountCalendar && <CalendarView onBack={() => setView("tasks")} isVisible={view === "calendar"} refreshKey={calendarKey} onTaskChanged={refreshTasks} />}
           </div>
           <div style={{ display: view === "finance" ? "flex" : "none" }} className="flex-1 overflow-hidden min-h-0">
-            <FinanceView onBack={() => setView("tasks")} isVisible={view === "finance"} refreshKey={financeKey} />
+            {mountFinance && <FinanceView onBack={() => setView("tasks")} isVisible={view === "finance"} refreshKey={financeKey} />}
           </div>
         </div>
 
@@ -335,10 +377,10 @@ export default function App() {
         </div>
       </div>
 
-      <AddTaskModal open={addOpen} onClose={() => setAddOpen(false)} onTaskAdded={refreshAll} />
-      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      <EditTaskModal taskId={editTaskId} initialTask={editTask} onClose={() => { setEditTaskId(null); setEditTask(null); }} onSaved={() => { setEditTaskId(null); setEditTask(null); setTimeout(refreshAll, 100); }} />
-      <UnifiedAIChat
+      {mountAdd && <AddTaskModal open={addOpen} onClose={() => setAddOpen(false)} onTaskAdded={refreshAll} />}
+      {mountSettings && <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />}
+      {mountEdit && <EditTaskModal taskId={editTaskId} initialTask={editTask} onClose={() => { setEditTaskId(null); setEditTask(null); }} onSaved={() => { setEditTaskId(null); setEditTask(null); setTimeout(refreshAll, 100); }} />}
+      {mountAi && <UnifiedAIChat
         open={aiOpen}
         onClose={() => setAiOpen(false)}
         onTaskAdded={() => {
@@ -350,7 +392,7 @@ export default function App() {
           setTimeout(refreshAll, 150);
         }}
         onFinanceChanged={() => setFinanceKey(k => k + 1)}
-      />
+      />}
     </div>
   );
 }

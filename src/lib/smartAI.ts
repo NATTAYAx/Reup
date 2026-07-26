@@ -8,6 +8,7 @@
 // · Multi-task via ส่วน/แล้วก็/นอกจากนี้
 // ============================================================
 import { Category, ResetType } from "../types";
+import { todayBangkok, bangkokNow } from "./dateUtil";
 
 // ─── Types ───────────────────────────────────────────────────
 export interface ParsedTask {
@@ -285,9 +286,7 @@ function nextWeekdayDate(targetDay: number): string {
 }
 
 function toDateStr(d: Date): string {
-  // Use Bangkok local date (UTC+7), not UTC — prevents date rollback at midnight
-  const bkk = new Date(d.getTime() + 7 * 60 * 60 * 1000);
-  return bkk.toISOString().split("T")[0];
+  return todayBangkok(d);
 }
 
 /** Format ISO date "YYYY-MM-DD" → "DD/MM/YYYY" for user-facing replies */
@@ -308,8 +307,7 @@ interface DateResult {
 
 function extractSpecificDate(text: string): DateResult | null {
   // Bangkok-aware "now" so วันนี้/พรุ่งนี้ are correct past midnight UTC
-  const nowMs = Date.now() + 7 * 60 * 60 * 1000;
-  const today = new Date(nowMs);
+  const today = bangkokNow();
 
   // ── 0. Thai/English relative minutes/hours → event_window + exact UTC deadline ─────
   // "อีก 5 นาที", "อีกครึ่งชั่วโมง", "in 10 minutes" etc.

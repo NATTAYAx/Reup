@@ -123,6 +123,9 @@ Always prefer the user's language in the "reply" field.
 // ─── Call Gemini ──────────────────────────────────────────────
 interface GeminiOptions {
   context?: string; // extra context like spending summary
+  /** Skip the local-first shortcut and always ask the model. For a "try again
+   *  with the real AI" button when the offline parser got it wrong. */
+  forceRemote?: boolean;
 }
 
 export async function callGemini(
@@ -224,26 +227,53 @@ export interface AIServiceResult {
   response: GeminiResponse;
 }
 
+/**
+ * Confidence at or above this and the offline parser answers on its own.
+ *
+ * Why local-first instead of Gemini-first, which is what this used to do:
+ *
+ *   Quota. The Gemini free tier rations REQUESTS PER DAY, not tokens. Every
+ *   sentence that went to the model burned one of a small daily allowance,
+ *   including "เพิ่มงาน HSR รีเซ็ตตีสี่ทุกวัน" which the local parser has
+ *   handled perfectly since before Gemini was wired in at all.
+ *
+ *   Speed. The local path answers in a millisecond. The remote path costs a
+ *   network round trip, and up to 8 seconds when the network is unhappy.
+ *
+ *   Offline. The result is identical with the network unplugged.
+ *
+ * The bar is set high on purpose. smartParse reports 0.95+ when it recognises a
+ * known game preset and 0.9 when an edit has both a target and a new time, but
+ * only 0.85 for a delete, because matching a task by name is exactly where a
+ * model with real context does better. So deletes and anything vaguer still go
+ * to Gemini.
+ */
+const LOCAL_CONFIDENCE_FLOOR = 0.9;
+
 export async function processMessage(
   userMessage: string,
   options: GeminiOptions = {}
 ): Promise<AIServiceResult> {
-  const key = getGeminiKey();
-  const online = key ? await isOnline() : false;
+  const local = localParse(userMessage);
 
-  if (online && key) {
+  if (!options.forceRemote && local.confidence >= LOCAL_CONFIDENCE_FLOOR) {
+    return { source: "local", response: local.response };
+  }
+
+  const key = getGeminiKey();
+  // navigator.onLine only tells us whether a network adapter exists, so it can
+  // say yes on a dead connection. It is worth checking anyway because when it
+  // says no, it is right, and we skip an 8 second timeout.
+  if (key && navigator.onLine) {
     try {
       const response = await callGemini(userMessage, options);
       return { source: "gemini", response };
     } catch (e: any) {
       console.warn("[geminiService] Gemini failed, falling back to local:", e.message);
-      // Fall through to local
     }
   }
 
-  // ── Offline / no key / Gemini failed → local fallback ────────
-  const localResult = localParse(userMessage);
-  return { source: "local", response: localResult };
+  return { source: "local", response: local.response };
 }
 
 // ─── Enhanced local parser (offline fallback) ─────────────────
@@ -253,13 +283,40 @@ export async function processMessage(
 //   • Better game preset matching
 //   • Fuzzy time extraction (โมง, นาฬิกา, etc.)
 
-function localParse(text: string): GeminiResponse {
+interface LocalResult {
+  response: GeminiResponse;
+  /** 0-1. Drives whether this answer is good enough to skip the API entirely. */
+  confidence: number;
+}
+
+/** How much to trust a locally-parsed finance action, judged on what it
+ *  actually managed to extract rather than on the wording of the input. */
+function financeConfidence(r: GeminiFinanceResponse): number {
+  switch (r.intent) {
+    case "query_spending":
+      return 0.95; // reads numbers out of the DB, there is nothing to misparse
+    case "log_expense":
+      return r.amount && r.amount > 0 ? 0.92 : 0.2;
+    case "log_income":
+      return r.incomeAmount && r.incomeAmount > 0 ? 0.92 : 0.2;
+    case "delete_expense":
+    case "edit_expense":
+      return r.keyword ? 0.6 : 0.2; // matching by keyword is worth a model
+    default:
+      return 0.3;
+  }
+}
+
+function localParse(text: string): LocalResult {
   // ── Finance detection ─────────────────────────────────────────
   const isFinance =
     /ใช้ไป|ใช้จ่าย|จ่าย|ซื้อ|กิน.*บาท|บาท|฿|expense|spent|paid|spending|สรุป.*เงิน|ยอดเงิน|รับเงิน|เงินเดือน|income|รายได้/i.test(text) &&
     !/รีเซ็ต|reset|daily|game|เกม|task|งาน.*ส่ง|การบ้าน/i.test(text);
 
-  if (isFinance) return localParseFinance(text);
+  if (isFinance) {
+    const response = localParseFinance(text);
+    return { response, confidence: financeConfidence(response) };
+  }
 
   // ── Task detection ────────────────────────────────────────────
   return localParseTask(text);
@@ -328,27 +385,35 @@ function localParseFinance(text: string): GeminiFinanceResponse {
   };
 }
 
-function localParseTask(text: string): GeminiTaskResponse {
-  // Use existing smartParse as the core engine for tasks
+function localParseTask(text: string): LocalResult {
+  // Use existing smartParse as the core engine for tasks. It already scores its
+  // own certainty, so that score is carried straight through instead of being
+  // recomputed here from the outside.
   const result: AIResult = smartParse(text);
 
   if (result.intent !== "add") {
     return {
-      domain: "task",
-      intent: result.intent as any,
-      reply: result.reply,
-      tasks: [],
-      targetTaskName: result.targetTaskName,
-      newTime: result.newTime,
-      newPriority: result.newPriority,
+      confidence: result.confidence ?? 0.3,
+      response: {
+        domain: "task",
+        intent: result.intent as any,
+        reply: result.reply,
+        tasks: [],
+        targetTaskName: result.targetTaskName,
+        newTime: result.newTime,
+        newPriority: result.newPriority,
+      },
     };
   }
 
   return {
-    domain: "task",
-    intent: "add",
-    reply: result.reply,
-    tasks: result.tasks,
+    confidence: result.confidence ?? 0.3,
+    response: {
+      domain: "task",
+      intent: "add",
+      reply: result.reply,
+      tasks: result.tasks,
+    },
   };
 }
 

@@ -6,6 +6,8 @@ use tauri::{
 };
 use tauri_plugin_autostart::MacosLauncher;
 
+mod wallpaper;
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct NotificationPayload {
     task_name: String,
@@ -176,9 +178,24 @@ fn set_tray_icon(app: AppHandle, rgba: Vec<u8>, width: u32, height: u32) -> Resu
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let ctx = tauri::generate_context!();
+
+    // `game-scheduler.exe --wallpaper <path>` = the wallpaper child process.
+    // It runs a separate Tauri app with one window and nothing else, so
+    // parenting that window to explorer's WorkerW can never freeze this app.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--wallpaper") {
+        let path = args.get(i + 1).cloned().unwrap_or_default();
+        wallpaper::run_wallpaper_process(ctx, path);
+        return;
+    }
+
     tauri::Builder::default()
         .manage(Arc::new(Mutex::new(Vec::<NotificationPayload>::new())) as PendingQueue)
+        .manage(wallpaper::WallpaperProc::new())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_wallpaper::init())
         .plugin(tauri_plugin_sql::Builder::new().build())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![])))
@@ -212,7 +229,10 @@ pub fn run() {
                             let _ = win.hide();
                         }
                     }
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        wallpaper::kill_wallpaper_process(app);
+                        app.exit(0);
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray: &tauri::tray::TrayIcon, event| {
@@ -235,6 +255,14 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // Bring the wallpaper back if its process dies on its own.
+            wallpaper::spawn_wallpaper_guard(app.handle().clone());
+
+            // NOTE: the fullscreen watcher now lives inside the wallpaper
+            // child process (see wallpaper.rs) — it owns that window, so it
+            // can pause playback itself with no cross-process IPC.
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -250,7 +278,12 @@ pub fn run() {
             close_notification_window,
             overlay_ready,
             set_tray_icon,
+            wallpaper::attach_wallpaper,
+            wallpaper::start_wallpaper,
+            wallpaper::stop_wallpaper,
+            wallpaper::swap_wallpaper,
+            wallpaper::pick_video,
         ])
-        .run(tauri::generate_context!())
+        .run(ctx)
         .expect("error while running tauri application");
 }

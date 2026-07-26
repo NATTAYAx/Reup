@@ -1,6 +1,7 @@
 import Database from "@tauri-apps/plugin-sql";
 import { getDb as getSharedDb } from "./database";
 import { t } from "./i18n";
+import { todayBangkok, monthBangkok } from "./dateUtil";
 
 // All finance tables are now created inside database.ts initializeSchema,
 // so financeDatabase.ts just needs to call getDb() — no schema init needed here.
@@ -81,7 +82,7 @@ export async function addExpense(expense: {
 export async function getExpensesByMonth(month: string): Promise<Expense[]> {
   const d = await getDb();
   return await d.select<Expense[]>(
-    "SELECT * FROM expenses WHERE strftime('%Y-%m', date) = ? ORDER BY date DESC, created_at DESC",
+    "SELECT * FROM expenses WHERE deleted = 0 AND strftime('%Y-%m', date) = ? ORDER BY date DESC, created_at DESC",
     [month]
   );
 }
@@ -89,7 +90,7 @@ export async function getExpensesByMonth(month: string): Promise<Expense[]> {
 export async function getExpensesByDate(date: string): Promise<Expense[]> {
   const d = await getDb();
   return await d.select<Expense[]>(
-    "SELECT * FROM expenses WHERE date = ? ORDER BY created_at DESC",
+    "SELECT * FROM expenses WHERE deleted = 0 AND date = ? ORDER BY created_at DESC",
     [date]
   );
 }
@@ -97,13 +98,13 @@ export async function getExpensesByDate(date: string): Promise<Expense[]> {
 export async function getExpensesLast30Days(): Promise<Expense[]> {
   const d = await getDb();
   return await d.select<Expense[]>(
-    "SELECT * FROM expenses WHERE date >= date('now', '-30 days') ORDER BY date DESC"
+    "SELECT * FROM expenses WHERE deleted = 0 AND date >= date('now', '-30 days') ORDER BY date DESC"
   );
 }
 
 export async function deleteExpense(id: number): Promise<void> {
   const d = await getDb();
-  await d.execute("DELETE FROM expenses WHERE id = ?", [id]);
+  await d.execute("UPDATE expenses SET deleted = 1 WHERE id = ?", [id]);
 }
 
 export async function updateExpense(id: number, fields: {
@@ -129,12 +130,12 @@ export async function aiDeleteExpenseByKeyword(keyword: string): Promise<string>
   const d = await getDb();
   const rows = await d.select<{ id: number; amount: number; note: string; category: string }[]>(
     `SELECT id, amount, note, category FROM expenses
-     WHERE LOWER(note) LIKE ? OR LOWER(category) LIKE ?
+     WHERE deleted = 0 AND (LOWER(note) LIKE ? OR LOWER(category) LIKE ?)
      ORDER BY created_at DESC LIMIT 1`,
     [`%${keyword.toLowerCase()}%`, `%${keyword.toLowerCase()}%`]
   );
   if (rows.length === 0) throw new Error(`ไม่พบรายการที่มี "${keyword}"`);
-  await d.execute("DELETE FROM expenses WHERE id = ?", [rows[0].id]);
+  await d.execute("UPDATE expenses SET deleted = 1 WHERE id = ?", [rows[0].id]);
   return `${rows[0].note || rows[0].category} ฿${rows[0].amount}`;
 }
 
@@ -145,7 +146,7 @@ export async function aiEditExpenseByKeyword(keyword: string, fields: {
   const d = await getDb();
   const rows = await d.select<{ id: number; amount: number; note: string; category: string }[]>(
     `SELECT id, amount, note, category FROM expenses
-     WHERE LOWER(note) LIKE ? OR LOWER(category) LIKE ?
+     WHERE deleted = 0 AND (LOWER(note) LIKE ? OR LOWER(category) LIKE ?)
      ORDER BY created_at DESC LIMIT 1`,
     [`%${keyword.toLowerCase()}%`, `%${keyword.toLowerCase()}%`]
   );
@@ -154,10 +155,24 @@ export async function aiEditExpenseByKeyword(keyword: string, fields: {
   return rows[0].note || rows[0].category;
 }
 
+/** Categories ordered by when they were last used, most recent first.
+ *  The add sheet lists them in this order so the two or three categories a
+ *  person actually uses drift to the front instead of being hunted for in a
+ *  nine-button grid every single time. Needs no schema: the answer is already
+ *  in the expenses table. */
+export async function getRecentCategories(): Promise<string[]> {
+  const d = await getDb();
+  const rows = await d.select<{ category: string }[]>(
+    `SELECT category FROM expenses WHERE deleted = 0
+      GROUP BY category ORDER BY MAX(created_at) DESC`,
+  );
+  return rows.map(r => r.category);
+}
+
 export async function getTotalByCategory(month: string): Promise<{ category: string; total: number }[]> {
   const d = await getDb();
   return await d.select<{ category: string; total: number }[]>(
-    "SELECT category, SUM(amount) as total FROM expenses WHERE strftime('%Y-%m', date) = ? GROUP BY category ORDER BY total DESC",
+    "SELECT category, SUM(amount) as total FROM expenses WHERE deleted = 0 AND strftime('%Y-%m', date) = ? GROUP BY category ORDER BY total DESC",
     [month]
   );
 }
@@ -165,7 +180,7 @@ export async function getTotalByCategory(month: string): Promise<{ category: str
 export async function getDailyTotals(month: string): Promise<{ date: string; total: number }[]> {
   const d = await getDb();
   return await d.select<{ date: string; total: number }[]>(
-    "SELECT date, SUM(amount) as total FROM expenses WHERE strftime('%Y-%m', date) = ? GROUP BY date ORDER BY date ASC",
+    "SELECT date, SUM(amount) as total FROM expenses WHERE deleted = 0 AND strftime('%Y-%m', date) = ? GROUP BY date ORDER BY date ASC",
     [month]
   );
 }
@@ -173,7 +188,7 @@ export async function getDailyTotals(month: string): Promise<{ date: string; tot
 export async function getMonthTotal(month: string): Promise<number> {
   const d = await getDb();
   const rows = await d.select<{ total: number }[]>(
-    "SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE strftime('%Y-%m', date) = ?",
+    "SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE deleted = 0 AND strftime('%Y-%m', date) = ?",
     [month]
   );
   return rows[0]?.total ?? 0;
@@ -182,13 +197,9 @@ export async function getMonthTotal(month: string): Promise<number> {
 export async function getTodayTotal(todayOverride?: string): Promise<number> {
   const d = await getDb();
   // Use caller-supplied date (Bangkok local) or derive it here
-  const today = todayOverride ?? (() => {
-    const now = new Date();
-    const bkk = new Date(now.getTime() + 7 * 60 * 60 * 1000);
-    return bkk.toISOString().split("T")[0];
-  })();
+  const today = todayOverride ?? todayBangkok();
   const rows = await d.select<{ total: number }[]>(
-    "SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE date = ?",
+    "SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE deleted = 0 AND date = ?",
     [today]
   );
   return rows[0]?.total ?? 0;
@@ -238,27 +249,26 @@ export async function addToGoal(id: number, amount: number): Promise<void> {
 export async function getGoals(): Promise<SavingGoal[]> {
   const d = await getDb();
   return await d.select<SavingGoal[]>(
-    "SELECT * FROM saving_goals ORDER BY is_completed ASC, created_at DESC"
+    "SELECT * FROM saving_goals WHERE deleted = 0 ORDER BY is_completed ASC, created_at DESC"
   );
 }
 
 export async function deleteGoal(id: number): Promise<void> {
   const d = await getDb();
-  await d.execute("DELETE FROM saving_goals WHERE id = ?", [id]);
+  await d.execute("UPDATE saving_goals SET deleted = 1 WHERE id = ?", [id]);
 }
 
 // ─── AI-callable helpers ──────────────────────────────────────────────────────
 
 /** Log an expense by natural language parse result */
 export async function aiLogExpense(amount: number, category: ExpenseCategory, note: string): Promise<void> {
-  const today = new Date().toISOString().split("T")[0];
+  const today = todayBangkok();
   await addExpense({ amount, category, note, date: today });
 }
 
 /** Get a spending summary string for the AI to read */
 export async function getSpendingSummary(): Promise<string> {
-  const now = new Date();
-  const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const month = monthBangkok();
   const [monthTotal, todayTotal, catTotals] = await Promise.all([
     getMonthTotal(month),
     getTodayTotal(),

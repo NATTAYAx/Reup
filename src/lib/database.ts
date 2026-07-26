@@ -1,4 +1,5 @@
 import Database from "@tauri-apps/plugin-sql";
+import { applySyncMigrations } from "./syncMeta";
 
 let db: Database | null = null;
 let dbReadyPromise: Promise<Database> | null = null;
@@ -105,6 +106,20 @@ async function initializeSchema(db: Database): Promise<void> {
       created_at TEXT DEFAULT (datetime('now'))
     )
   `);
+
+  // ── App settings (key-value) ───────────────────────────────
+  // Generic store for app preferences like wallpaper path/enabled.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    )
+  `);
+
+  // Give every row a device-independent identity and a modification time, so
+  // the phone app can eventually sync with this one. See src/lib/syncMeta.ts.
+  // Runs last, after every table exists. Idempotent, so it is safe every boot.
+  await applySyncMigrations(db);
 }
 
 
@@ -154,19 +169,25 @@ export async function addIncome(data: { amount: number; source: string; note: st
 
 export async function getIncomeByMonth(month: string): Promise<any[]> {
   const db = await getDb();
-  return await db.select("SELECT * FROM income WHERE strftime('%Y-%m', date) = ? ORDER BY date DESC", [month]);
+  return await db.select(
+    "SELECT * FROM income WHERE deleted = 0 AND strftime('%Y-%m', date) = ? ORDER BY date DESC",
+    [month],
+  );
 }
 
 export async function getMonthIncome(month: string): Promise<number> {
   const db = await getDb();
   const rows = await db.select<{total:number}[]>(
-    "SELECT COALESCE(SUM(amount),0) as total FROM income WHERE strftime('%Y-%m', date) = ?", [month]);
+    "SELECT COALESCE(SUM(amount),0) as total FROM income WHERE deleted = 0 AND strftime('%Y-%m', date) = ?",
+    [month]);
   return rows[0]?.total ?? 0;
 }
 
 export async function deleteIncome(id: number): Promise<void> {
   const db = await getDb();
-  await db.execute('DELETE FROM income WHERE id = ?', [id]);
+  // Tombstone, not a real delete: a row that simply vanishes tells the other
+  // device nothing, so it would be re-uploaded on the next sync.
+  await db.execute('UPDATE income SET deleted = 1 WHERE id = ?', [id]);
 }
 
 export async function getAllTasks(): Promise<any[]> {
@@ -381,4 +402,26 @@ export async function updateTaskUrgent(name: string, value: 0 | 1): Promise<void
   if (result.rowsAffected === 0) {
     throw new Error(`No task found with name "${name}"`);
   }
+}
+// ─── App settings (key-value store) ────────────────────────────────────────
+export async function getSetting(key: string): Promise<string | null> {
+  return dbQueue(async () => {
+    const db = await getDb();
+    const rows = await db.select<{ value: string }[]>(
+      "SELECT value FROM app_settings WHERE key = ?",
+      [key]
+    );
+    return rows.length > 0 ? rows[0].value : null;
+  });
+}
+
+export async function setSetting(key: string, value: string): Promise<void> {
+  return dbQueue(async () => {
+    const db = await getDb();
+    await db.execute(
+      `INSERT INTO app_settings (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      [key, value]
+    );
+  });
 }

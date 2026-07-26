@@ -4,7 +4,12 @@ import { X, Save, Power, Image, Palette, Upload, Sparkles, Check, RotateCcw, Bel
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { isMuted, setMuted } from "../lib/notifier";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { getSetting, setSetting } from "../lib/database";
 import { getLang, setLang, t, type Lang } from "../lib/i18n";
+import { loadToastStyle, saveToastStyle, type ToastStyle } from "../lib/toastStyle";
+import { Toast } from "./ToastCard";
+import { paletteFromVideo } from "../lib/videoPalette";
 
 interface Props {
   open: boolean;
@@ -193,6 +198,23 @@ export default function SettingsModal({ open, onClose }: Props) {
   const [pendingIconUrl, setPendingIconUrl] = useState<string | null>(null);
   const [customSound, setCustomSound]   = useState<string | null>(null);
   const [soundName, setSoundName]       = useState<string>("");
+  const [toastStyle, setToastStyle]     = useState<ToastStyle>(() => loadToastStyle());
+  // Montage of the frames the palette was read from, so the result is not a
+  // black box the user has to take on faith.
+  const [wpMontage, setWpMontage]       = useState<string | null>(null);
+  // Wallpaper state
+  const [wpPath, setWpPath]             = useState<string>("");
+  const [wpEnabled, setWpEnabled]       = useState(false);
+  const [wpBusy, setWpBusy]             = useState(false);
+  const [wpError, setWpError]           = useState<string>("");
+
+  // Status words from the backend ("swapped" / "started" / "stopped")
+  // clear themselves; real errors stay put.
+  const flashStatus = (m: string) => {
+    setWpError(m);
+    setTimeout(() => setWpError(v => (v === m ? "" : v)), 3000);
+  };
+
   const iconRef  = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLInputElement>(null);
   const soundRef = useRef<HTMLInputElement>(null);
@@ -213,8 +235,122 @@ export default function SettingsModal({ open, onClose }: Props) {
       const snd = loadCustomSound();
       setCustomSound(snd);
       setSoundName(snd ? (localStorage.getItem("gamesched_notif_sound_name") || "Custom sound") : "");
+      setToastStyle(loadToastStyle());
+      // Load wallpaper settings from DB
+      setWpBusy(false); // clear any stuck busy state from a previous session
+      getSetting("wallpaper_path").then(p => { if (p) setWpPath(p); }).catch(() => {});
+      getSetting("wallpaper_enabled").then(v => setWpEnabled(v === "1")).catch(() => {});
     }
   }, [open]);
+
+  // ── Wallpaper handlers ──────────────────────────────────────────────
+  // Native drag-drop + wallpaper status listeners.
+  useEffect(() => {
+    if (!open) return;
+    let unlisten: (() => void) | undefined;
+    let unlistenStatus: (() => void) | undefined;
+    let disposed = false;
+    (async () => {
+      try {
+        const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+        const wv = getCurrentWebviewWindow();
+        const un = await wv.onDragDropEvent((event: any) => {
+          if (event.payload?.type !== "drop") return;
+          const paths: string[] = event.payload.paths || [];
+          const vid = paths.find(p => /\.(mp4|webm|mkv|mov)$/i.test(p));
+          if (!vid) { setWpError("ไม่ใช่ไฟล์วิดีโอ (mp4/webm/mkv/mov)"); return; }
+          setWpPath(vid);
+          setWpError("");
+          setSetting("wallpaper_path", vid).catch(() => {});
+          if (wpEnabled) {
+            invoke<string>("swap_wallpaper", { path: vid })
+              .then(r => flashStatus(String(r)))
+              .catch(e => setWpError("swap failed: " + String(e)));
+          }
+        });
+        if (disposed) un(); else unlisten = un;
+
+        const { listen } = await import("@tauri-apps/api/event");
+        const un2 = await listen("wallpaper-status", (e: any) => {
+          setWpError(String(e.payload));
+        });
+        if (disposed) un2(); else unlistenStatus = un2;
+      } catch (e) { console.warn("wallpaper listeners failed:", e); }
+    })();
+    return () => { disposed = true; unlisten?.(); unlistenStatus?.(); };
+  }, [open, wpEnabled]);
+
+  const pickWallpaper = async () => {
+    try {
+      let selected: string | null = null;
+      try {
+        selected = await invoke<string | null>("pick_video");
+      } catch (e) {
+        console.warn("pick_video failed, falling back to JS dialog:", e);
+        if (typeof openDialog === "function") {
+          const r = await openDialog({
+            multiple: false,
+            title: "Select a video",
+            filters: [{ name: "Video", extensions: ["mp4", "webm", "mkv", "mov"] }],
+          });
+          selected = typeof r === "string" ? r : null;
+        } else {
+          throw new Error("no dialog available");
+        }
+      }
+      if (typeof selected === "string" && selected) {
+        setWpPath(selected);
+        await setSetting("wallpaper_path", selected);
+        if (wpEnabled) {
+          // "swapped" = pushed live down the pipe, "restarted" = child was gone
+          try {
+            const r = await invoke<string>("swap_wallpaper", { path: selected });
+            flashStatus(String(r));
+          } catch (e) {
+            setWpError("swap failed: " + String(e));
+          }
+        } else {
+          setWpError("");
+        }
+      } else {
+        setWpError("");
+      }
+    } catch (err) {
+      console.error("pickWallpaper failed:", err);
+      setWpError("error: " + String(err));
+    }
+  };
+
+  const toggleWallpaper = async () => {
+    if (wpBusy) return;
+    setWpBusy(true);
+    const invokeWithTimeout = (cmd: string, args?: any) =>
+      Promise.race([
+        invoke(cmd, args),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 5000)),
+      ]);
+    try {
+      if (!wpEnabled) {
+        if (!wpPath) { setWpBusy(false); return; }
+        // Flip UI first so it feels instant; revert on failure.
+        setWpEnabled(true);
+        await setSetting("wallpaper_enabled", "1");
+        const r = await invokeWithTimeout("start_wallpaper", { path: wpPath });
+        flashStatus(String(r));
+      } else {
+        setWpEnabled(false);
+        await setSetting("wallpaper_enabled", "0");
+        const r = await invokeWithTimeout("stop_wallpaper");
+        flashStatus(String(r));
+      }
+    } catch (err) {
+      console.error("toggleWallpaper failed:", err);
+      setWpError(String(err));
+      // Re-sync UI with what we tried; keep the setting as saved.
+    } finally {
+      setWpBusy(false);
+    }
+  };
 
   const handleLangChange = (newLang: Lang) => {
     if (newLang === lang) return;
@@ -534,10 +670,10 @@ export default function SettingsModal({ open, onClose }: Props) {
       img.src = url;
     });
 
-  // ── Main upload handler ───────────────────────────────────────────────────────
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // ── Theme generation from any image ───────────────────────────────────────────
+  // Shared by the "upload an image" flow and the "use my wallpaper" button.
+  // Returns the theme so a caller can apply it straight away.
+  const generateThemeFromFile = async (file: File): Promise<AppTheme | null> => {
     setAiError(""); setAiTheme(null);
 
     const reader = new FileReader();
@@ -601,16 +737,51 @@ Rules:
           if (parsed.primary && parsed.accent && parsed.name) {
             setAiTheme(parsed);
             setAiLoading(false);
-            return;
+            return parsed;
           }
         }
       }
     } catch(e) { console.warn("AI failed, using canvas:", e); }
 
     // Step 3 — canvas fallback
-    if (canvasResult) { setAiTheme(canvasResult.theme); }
-    else { setAiError("Could not extract colors from this image."); }
+    if (canvasResult) {
+      setAiTheme(canvasResult.theme);
+      setAiLoading(false);
+      return canvasResult.theme;
+    }
+    setAiError("Could not extract colors from this image.");
     setAiLoading(false);
+    return null;
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await generateThemeFromFile(file);
+  };
+
+  // ── Theme from the live wallpaper ─────────────────────────────────────────────
+  // Deliberately NOT the image pipeline. See src/lib/videoPalette.ts for why:
+  // one frame is not a video, and the image extractor has hue rules baked in
+  // from one particular picture.
+  const handleThemeFromWallpaper = async () => {
+    if (!wpPath) return;
+    setWpError("");
+    setAiLoading(true);
+    try {
+      const { theme, montage } = await paletteFromVideo(wpPath);
+      setWpMontage(montage);
+      applyAndSave(theme);
+    } catch (err) {
+      setWpError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const handleToastStyle = (v: ToastStyle) => {
+    setToastStyle(v);
+    saveToastStyle(v);
   };
   return (
     <AnimatePresence>
@@ -708,6 +879,50 @@ Rules:
                               </button>
                             ))}
                           </div>
+                        </div>
+                        {/* Toast style */}
+                        <div className="border-t border-white/8 pt-3">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Sparkles size={13} className="text-white/40" />
+                            <span className="text-white/60 text-xs font-semibold">{t("settings.toastStyle")}</span>
+                          </div>
+                          <div className="grid grid-cols-3 gap-1.5">
+                            {([
+                              { key: "card"    as ToastStyle, label: t("settings.styleCard") },
+                              { key: "ring"    as ToastStyle, label: t("settings.styleRing") },
+                              { key: "minimal" as ToastStyle, label: t("settings.styleMinimal") },
+                            ]).map(opt => (
+                              <button
+                                key={opt.key}
+                                onClick={() => handleToastStyle(opt.key)}
+                                className={`py-2 rounded-lg text-[11px] font-semibold transition-all ${
+                                  toastStyle === opt.key
+                                    ? "theme-btn text-white"
+                                    : "bg-white/8 text-white/40 hover:bg-white/15 hover:text-white"
+                                }`}
+                              >
+                                {opt.label}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="mt-2 flex justify-center" style={{ zoom: 0.8 }}>
+                            <Toast
+                              preview
+                              style={toastStyle}
+                              theme={currentTheme}
+                              data={{
+                                id: "preview",
+                                task_name: t("settings.previewTask"),
+                                urgency: "warning",
+                                time_left: "2h 15m",
+                                category: "game",
+                                durationMs: 6000,
+                              }}
+                            />
+                          </div>
+                          <p className="text-white/25 text-[10px] mt-1.5 leading-relaxed">
+                            {t("settings.toastStyleHint")}
+                          </p>
                         </div>
                         {/* Custom sound */}
                         <div className="border-t border-white/8 pt-3">
@@ -982,6 +1197,105 @@ Rules:
                         </button>
                       </motion.div>
                     )}
+                  </div>
+
+                  {/* ── Live Wallpaper ── */}
+                  <div className="pt-2 border-t border-white/10">
+                    <p className="text-white/40 text-xs font-semibold uppercase tracking-widest mb-2 px-1">
+                      {getLang() === "th" ? "วอลเปเปอร์เคลื่อนไหว" : "Live Wallpaper"}
+                    </p>
+                    <div className="p-3 rounded-2xl border border-white/10 bg-white/5 space-y-3">
+                      {/* Enable toggle — matches other settings switches */}
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Image size={15} className="text-white/50" />
+                          <span className="text-white/80 text-sm font-medium">
+                            {getLang() === "th" ? "เปิดวอลเปเปอร์" : "Enable wallpaper"}
+                          </span>
+                        </div>
+                        <button
+                          onClick={toggleWallpaper}
+                          disabled={!wpPath || wpBusy}
+                          className={`w-12 h-6 rounded-full transition-all relative ${
+                            !wpPath ? "bg-white/10 cursor-not-allowed" : wpBusy ? "bg-white/30" : wpEnabled ? "bg-green-500" : "bg-white/20"
+                          }`}
+                        >
+                          <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${wpEnabled ? "left-7" : "left-1"}`} />
+                        </button>
+                      </div>
+
+                      {/* File picker / drag-drop zone */}
+                      <button
+                        onClick={pickWallpaper}
+                        className="w-full py-4 bg-white/5 border border-dashed border-white/20 rounded-xl text-white/70 text-sm hover:text-white hover:border-white/40 transition-all flex flex-col items-center justify-center gap-1.5"
+                      >
+                        <Upload size={16} />
+                        <span>
+                          {wpPath
+                            ? getLang() === "th" ? "เปลี่ยนวิดีโอ" : "Change video"
+                            : getLang() === "th" ? "เลือกวิดีโอ" : "Choose video"}
+                        </span>
+                        <span className="text-white/30 text-[10px]">
+                          {getLang() === "th" ? "หรือลากไฟล์มาวางที่นี่" : "or drag a file here"}
+                        </span>
+                      </button>
+
+                      {/* Current file name */}
+                      {wpPath && (
+                        <div className="flex items-center gap-2 px-1">
+                          <div className="w-1.5 h-1.5 rounded-full bg-green-400 flex-shrink-0" />
+                          <p className="text-white/50 text-xs truncate" title={wpPath}>
+                            {wpPath.split(/[\\/]/).pop()}
+                          </p>
+                        </div>
+                      )}
+
+                      {/* Theme from wallpaper */}
+                      <button
+                        onClick={handleThemeFromWallpaper}
+                        disabled={!wpPath || aiLoading}
+                        className="w-full py-2.5 rounded-xl text-white text-sm font-semibold transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                        style={{ background: `linear-gradient(135deg, ${currentTheme.primary}, ${currentTheme.secondary})` }}
+                      >
+                        <Sparkles size={14} />
+                        {aiLoading ? t("settings.wpThemeWorking") : t("settings.wpThemeBtn")}
+                      </button>
+                      <p className="text-white/25 text-[10px] px-1 leading-relaxed">
+                        {t("settings.wpThemeHint")}
+                      </p>
+
+                      {wpMontage && (
+                        <div className="flex items-stretch gap-2">
+                          <img
+                            src={wpMontage}
+                            alt="sampled frames"
+                            className="w-9 rounded-lg border border-white/10 object-cover"
+                            style={{ maxHeight: 72 }}
+                          />
+                          <div className="flex-1 min-w-0 flex flex-col justify-between">
+                            <div className="grid grid-cols-4 gap-1">
+                              {[currentTheme.bg, currentTheme.secondary, currentTheme.primary, currentTheme.accent].map((c, i) => (
+                                <div key={i} className="h-6 rounded-md" style={{ background: c, border: "1px solid rgba(255,255,255,0.10)" }} />
+                              ))}
+                            </div>
+                            <p className="text-white/40 text-[10px] mt-1 truncate">{currentTheme.name}</p>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Error message */}
+                      {wpError && (
+                        <p className="text-red-400 text-[10px] px-1 leading-relaxed break-all">
+                          {wpError}
+                        </p>
+                      )}
+
+                      <p className="text-white/25 text-[10px] px-1 leading-relaxed">
+                        {getLang() === "th"
+                          ? "รองรับ mp4, webm หยุดเล่นเองตอนเปิดแอปเต็มจอ เพื่อไม่แย่งเครื่องตอนเล่นเกม"
+                          : "Supports mp4, webm. Auto-pauses during fullscreen apps to save resources while gaming."}
+                      </p>
+                    </div>
                   </div>
 
                   {/* Reset to default */}

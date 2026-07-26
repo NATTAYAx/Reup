@@ -5,6 +5,7 @@
 import { useState, useRef, useEffect } from "react";
 import { motion } from "framer-motion";
 import { X, Send, Sparkles, Brain, Wallet, CheckCircle, Wifi, WifiOff, Key } from "lucide-react";
+import { todayBangkok } from "../lib/dateUtil";
 import {
   saveHabit, getTopHabits, QUICK_PRESETS,
   pushHistory, clearHistory, smartParse,
@@ -39,11 +40,6 @@ interface ChatMessage {
   domain?: Domain;
   source?: "gemini" | "local"; // shows which backend answered
 }
-
-const getTodayBangkok = () => {
-  const bkk = new Date(Date.now() + 7 * 3600000);
-  return bkk.toISOString().split("T")[0];
-};
 
 const fmt = (n: number) => `฿${n.toLocaleString("th-TH")}`;
 
@@ -136,7 +132,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
       const mightBeFinance = /ใช้จ่าย|สรุป|เดือนนี้|ยอด|บาท|฿|summary|spending|income|รายได้/i.test(msg);
       if (mightBeFinance) {
         try {
-          const today = getTodayBangkok();
+          const today = todayBangkok();
           const month = today.slice(0, 7);
           const [todayAmt, monthAmt, summary] = await Promise.all([
             getTodayTotal(today), getMonthTotal(month), getSpendingSummary(),
@@ -168,7 +164,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
           return;
         }
         if (fr.intent === "log_income" && fr.incomeAmount) {
-          const today = getTodayBangkok();
+          const today = todayBangkok();
           await addIncome({
             amount: fr.incomeAmount,
             source: "other",

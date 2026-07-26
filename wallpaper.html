@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    * { margin: 0; padding: 0; }
+    html, body {
+      width: 100vw; height: 100vh;
+      overflow: hidden; background: #000;
+    }
+    #wp {
+      width: 100vw; height: 100vh;
+      object-fit: cover;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <!-- muted + loop + autoplay = silent looping video wallpaper.
+       GPU decodes it via the system video pipeline, so CPU stays near-idle. -->
+  <video id="wp" autoplay loop muted playsinline></video>
+
+  <script type="module">
+    import { convertFileSrc } from "@tauri-apps/api/core";
+    import { listen } from "@tauri-apps/api/event";
+
+    const video = document.getElementById("wp");
+    let currentPath = null;
+
+    // True ONLY when the fullscreen watcher deliberately paused us. Every other
+    // pause is something we did not ask for, and the watchdog below undoes it.
+    let intentionallyPaused = false;
+
+    function resume() {
+      if (intentionallyPaused) return;
+      const p = video.play();
+      if (p && p.catch) p.catch(() => {});
+    }
+
+    function playPath(path) {
+      if (!path || path === currentPath) return;
+      currentPath = path;
+      const src = convertFileSrc(path);
+      console.log("[wallpaper] loading:", src);
+      // Marked on the element itself so the Rust side can tell, from eval,
+      // whether this clip is already loaded and skip a pointless reload.
+      video.dataset.wpPath = path;
+      video.src = src;
+      video.load();
+      resume();
+    }
+
+    // Exposed so the Rust side can push a new clip with eval(), which does not
+    // depend on the event system or on listen() having registered in time.
+    window.__setWallpaper = playPath;
+
+    video.addEventListener("error", () => {
+      console.error("[wallpaper] <video> error:", video.error);
+    });
+    video.addEventListener("loadeddata", () => {
+      console.log("[wallpaper] video loaded OK, playing.");
+    });
+    video.addEventListener("ended", resume);
+    video.addEventListener("stalled", resume);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) resume();
+    });
+
+    // 1) Primary: read the path from the URL query — available immediately,
+    //    no event-timing risk.
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const p = params.get("path");
+      if (p) playPath(decodeURIComponent(p));
+    } catch (e) { console.error("[wallpaper] url parse failed:", e); }
+
+    // 2) Fallback + live swap: receive a path pushed from the app.
+    listen("set-wallpaper", (e) => playPath(e.payload));
+
+    // Pause/resume from the fullscreen watcher.
+    listen("wallpaper-pause", () => { intentionallyPaused = true; video.pause(); });
+    listen("wallpaper-resume", () => { intentionallyPaused = false; resume(); });
+
+    // ── Watchdog ────────────────────────────────────────────────────────────
+    // A wallpaper window is covered by other windows almost all the time, so
+    // Windows and WebView2 both like to stop feeding it frames, and the video
+    // comes back as a frozen picture. The browser flags in wallpaper.rs stop
+    // most of that; this is the safety net for the rest.
+    //
+    // Every 2s: if we should be playing but the clock is not moving, nudge it.
+    // If nudging does not help after a few tries, reload the file.
+    let lastTime = -1;
+    let stuckTicks = 0;
+
+    setInterval(() => {
+      if (intentionallyPaused || !currentPath) return;
+
+      if (video.paused) { resume(); return; }
+
+      if (video.currentTime === lastTime) {
+        stuckTicks++;
+        if (stuckTicks === 2) {
+          console.warn("[wallpaper] clock stopped, nudging");
+          resume();
+        } else if (stuckTicks >= 5) {
+          console.warn("[wallpaper] still stuck, reloading source");
+          stuckTicks = 0;
+          video.load();
+          resume();
+        }
+      } else {
+        stuckTicks = 0;
+      }
+      lastTime = video.currentTime;
+    }, 2000);
+  </script>
+</body>
+</html>
