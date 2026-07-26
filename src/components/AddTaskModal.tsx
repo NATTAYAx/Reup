@@ -6,7 +6,6 @@ import { Category, ResetType } from "../types";
 import TimePicker from "./TimePicker";
 import DatePicker from "./DatePicker";
 import TaskImagePicker from "./TaskImagePicker";
-import AIChatModal from "./AIChatModal";
 import { t } from "../lib/i18n";
 import { todayBangkok } from "../lib/dateUtil";
 
@@ -14,6 +13,10 @@ interface Props {
   open: boolean;
   onClose: () => void;
   onTaskAdded: () => void;
+  /** Opens the app's single assistant. This screen used to embed a second,
+   *  older one that never reached Gemini and only understood tasks, so the same
+   *  sentence typed here and in the header chat gave different answers. */
+  onOpenAI: () => void;
 }
 
 const EMPTY_FORM = {
@@ -33,9 +36,8 @@ const EMPTY_FORM = {
   cover_image: null as string | null,
 };
 
-export default function AddTaskModal({ open, onClose, onTaskAdded }: Props) {
+export default function AddTaskModal({ open, onClose, onTaskAdded, onOpenAI }: Props) {
   const [form, setForm] = useState(EMPTY_FORM);
-  const [showAI, setShowAI] = useState(false);
 
   const set = (key: string, value: any) => setForm(f => ({ ...f, [key]: value }));
 
@@ -64,7 +66,6 @@ export default function AddTaskModal({ open, onClose, onTaskAdded }: Props) {
     }
   };
 
-  const needsTime = ["daily", "weekly", "biweekly", "custom_days"].includes(form.reset_type);
 
   return (
     <>
@@ -95,7 +96,7 @@ export default function AddTaskModal({ open, onClose, onTaskAdded }: Props) {
 
               {/* AI chat button */}
               <button
-                onClick={() => { onClose(); setShowAI(true); }}
+                onClick={() => { onClose(); onOpenAI(); }}
                 className="w-full mb-5 py-3 px-4 bg-gradient-to-r from-purple-600/20 to-indigo-600/20 border border-purple-500/30 rounded-2xl flex items-center gap-3 hover:border-purple-500/60 hover:from-purple-600/30 hover:to-indigo-600/30 transition-all group"
               >
                 <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center flex-shrink-0">
@@ -167,9 +168,23 @@ export default function AddTaskModal({ open, onClose, onTaskAdded }: Props) {
                   </div>
                 </div>
 
-                {needsTime && (
-                  <TimePicker value={form.reset_time} onChange={v => set("reset_time", v)} />
-                )}
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center justify-between px-1">
+                    <label className="text-white/40 text-xs">{t("task.timeLabel")}</label>
+                    <button type="button"
+                      onClick={() => set("reset_time", form.reset_time ? "" : "00:00")}
+                      className={`text-[11px] rounded-full px-2.5 py-0.5 border transition-colors ${
+                        !form.reset_time
+                          ? "border-purple-500/60 text-purple-300 bg-purple-500/15"
+                          : "border-white/10 text-white/40 hover:text-white"
+                      }`}>
+                      {t("task.allDay")}
+                    </button>
+                  </div>
+                  {form.reset_time
+                    ? <TimePicker value={form.reset_time} onChange={v => set("reset_time", v)} />
+                    : <p className="text-white/25 text-[11px] px-1">{t("task.allDayHint")}</p>}
+                </div>
 
                 {form.reset_type === "weekly" && (
                   <div className="flex flex-col gap-1">
@@ -259,11 +274,6 @@ export default function AddTaskModal({ open, onClose, onTaskAdded }: Props) {
         )}
       </AnimatePresence>
 
-      <AIChatModal
-        open={showAI}
-        onClose={() => setShowAI(false)}
-        onTaskAdded={onTaskAdded}
-      />
     </>
   );
 }

@@ -4,22 +4,66 @@ import { t } from "./i18n";
 
 const TIMEZONE = "Asia/Bangkok";
 
+// ─── One rule for time, applied to every kind of task ─────────────────────────
+//
+// reset_time used to mean something only for the repeating kinds. A one-off task
+// threw the time away — the parser nulled it, the form hid the field, and this
+// file never read it — so "ประชุมทีม พฤหัส บ่ายสอง" quietly became a task due at
+// 23:59. Ten hours late, with nothing anywhere saying so.
+//
+// Now reset_time is meaningful for ALL kinds, and follows the same rule every
+// calendar uses:
+//
+//   reset_time is null  →  all day, due at 23:59:59 that day
+//   reset_time is set   →  due at exactly that time
+//
+// Existing rows are untouched by this: repeating tasks already carry a time and
+// keep behaving identically, one-off tasks carry null and still mean end of day.
+// The change is only that the second case is now a choice rather than the only
+// possibility.
+
+/** A wall-clock moment in Bangkok, as a real Date. */
+function bangkokMoment(dateStr: string, time?: string | null): Date | null {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  if (!y || !m || !d) return null;
+  const hhmm = parseHHMM(time);
+  if (!hhmm) {
+    // 23:59:59 Bangkok is 16:59:59 UTC.
+    return new Date(Date.UTC(y, m - 1, d, 16, 59, 59));
+  }
+  // Date.UTC rolls the day back on its own when the hour goes negative.
+  return new Date(Date.UTC(y, m - 1, d, hhmm.h - 7, hhmm.m, 0));
+}
+
+function parseHHMM(time?: string | null): { h: number; m: number } | null {
+  if (!time) return null;
+  const match = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
+  if (!match) return null;
+  const h = Number(match[1]);
+  const m = Number(match[2]);
+  if (h > 23 || m > 59) return null;
+  return { h, m };
+}
+
+/** Repeating kinds need a concrete time to aim at; with none, aim at end of day. */
+const timeOrEndOfDay = (time?: string | null) => (parseHHMM(time) ? time!.trim() : "23:59");
+
 export function getNextReset(task: Task): Date | null {
   const now = new Date();
   const nowBangkok = toZonedTime(now, TIMEZONE);
 
   switch (task.reset_type) {
     case "daily":
-      return getNextDaily(nowBangkok, task.reset_time!);
+      return getNextDaily(nowBangkok, timeOrEndOfDay(task.reset_time));
 
     case "weekly":
-      return getNextWeekly(nowBangkok, task.reset_day!, task.reset_time!);
+      return getNextWeekly(nowBangkok, task.reset_day!, timeOrEndOfDay(task.reset_time));
 
     case "biweekly":
-      return getNextCycle(nowBangkok, task.anchor_date!, 14, task.reset_time!);
+      return getNextCycle(nowBangkok, task.anchor_date!, 14, timeOrEndOfDay(task.reset_time));
 
     case "custom_days":
-      return getNextCycle(nowBangkok, task.anchor_date!, task.reset_interval_days!, task.reset_time!);
+      return getNextCycle(nowBangkok, task.anchor_date!, task.reset_interval_days!, timeOrEndOfDay(task.reset_time));
 
     case "one_time": {
       // one_time is kept for backward-compat with old DB rows only.
@@ -53,8 +97,7 @@ export function getNextReset(task: Task): Date | null {
       // Case 2: date-only string "YYYY-MM-DD" (from manual AddTaskModal date picker)
       // Treat as end of that day in Bangkok time (23:59:59 UTC+7 = 16:59:59 UTC)
       if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-        const [y, m, d] = raw.split("-").map(Number);
-        return new Date(Date.UTC(y, m - 1, d, 16, 59, 59));
+        return bangkokMoment(raw, task.reset_time);
       }
       // Case 3: datetime with T but no Z/offset — treat as Bangkok local, append +07:00
       const ev = raw.includes('T') ? raw : raw.replace(' ', 'T');
@@ -69,11 +112,9 @@ export function getNextReset(task: Task): Date | null {
 
     case "specific_date": {
       if (!task.specific_date) return null;
-      const [y, m, d] = task.specific_date.split("-").map(Number);
-      // End of that day in Bangkok time (UTC+7) — task stays visible until user marks done
-      // Using Date.UTC + offset so it correctly represents 23:59:59 Bangkok time
-      const bkkEndOfDay = new Date(Date.UTC(y, m - 1, d, 16, 59, 59)); // 23:59:59 BKK = 16:59:59 UTC
-      return bkkEndOfDay;
+      // With a time it is an appointment, without one it is a deadline for the
+      // day. Both are one-off tasks; only the precision differs.
+      return bangkokMoment(task.specific_date, task.reset_time);
     }
 
     default:

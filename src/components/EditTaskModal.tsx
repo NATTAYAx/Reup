@@ -128,7 +128,6 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
   // KEY: completely remove from DOM when no taskId
   if (!taskId) return null;
 
-  const needsTime = form && ["daily","weekly","biweekly","custom_days"].includes(form.reset_type);
 
   return (
     <div
@@ -198,7 +197,23 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
                 </select>
               </div>
             </div>
-            {needsTime && <TimePicker value={form.reset_time ?? "00:00"} onChange={v => set("reset_time", v)}/>}
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between px-1">
+                <label className="text-white/40 text-xs">{t("task.timeLabel")}</label>
+                <button type="button"
+                  onClick={() => set("reset_time", form.reset_time ? "" : "00:00")}
+                  className={`text-[11px] rounded-full px-2.5 py-0.5 border transition-colors ${
+                    !form.reset_time
+                      ? "border-purple-500/60 text-purple-300 bg-purple-500/15"
+                      : "border-white/10 text-white/40 hover:text-white"
+                  }`}>
+                  {t("task.allDay")}
+                </button>
+              </div>
+              {form.reset_time
+                ? <TimePicker value={form.reset_time} onChange={v => set("reset_time", v)} />
+                : <p className="text-white/25 text-[11px] px-1">{t("task.allDayHint")}</p>}
+            </div>
             {form.reset_type === "weekly" && (
               <div className="flex flex-col gap-1">
                 <label className="text-white/40 text-xs px-1">{t("editTask.labelResetDay")}</label>

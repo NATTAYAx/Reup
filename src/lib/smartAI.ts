@@ -625,6 +625,28 @@ const THAI_NOISE = [
 function cleanName(raw: string, lang: "th" | "en" | "mixed", isPreset = false): string {
   let s = raw;
   for (const p of THAI_NOISE) s = s.replace(p, "");
+
+  // The instruction is not part of the name. "เพิ่มงานประชุมทีม พฤหัส" was
+  // being stored as a task literally called "เพิ่มงานประชุมทีม พฤหัส", verb
+  // and all, because nothing stripped the command the sentence opens with.
+  const beforeVerb = s;
+  s = s.replace(
+    /^\s*(?:ช่วย|ขอ)?\s*(?:เพิ่ม|สร้าง|ตั้ง|จด|บันทึก|ใส่|add|create|new|make|set|remind\s+me\s+to)\s*/i,
+    "",
+  );
+
+  // Only once a verb was actually removed is a following "งาน"/"task" a
+  // label rather than part of the name. Thai compounds make this genuinely
+  // ambiguous — "งานบ้าน" is housework, not a task called "บ้าน" — so the
+  // common compounds are protected by name. The field stays editable, which
+  // is the real safety net for anything this list misses.
+  if (s !== beforeVerb) {
+    const COMPOUND = /^(?:บ้าน|เลี้ยง|แต่ง|ศพ|วิจัย|กลุ่ม|อดิเรก|ประจำ|ฝีมือ)/;
+    const withoutLabel = s.replace(/^\s*(?:งาน|เรื่อง|task|todo)\s*/i, "");
+    if (withoutLabel.trim().length > 1 && !COMPOUND.test(withoutLabel.trim())) {
+      s = withoutLabel;
+    }
+  }
   // Strip Thai helper/filler words that aren't part of the task name
   s = s.replace(/^มี\s*(?=งาน|เรื่อง|ของ|การ)/, ""); // "มีงาน" → "งาน"
   s = s.replace(/ต้อง(?=ส่ง|ทำ|ไป|เรียน|จ่าย|ซื้อ)/g, ""); // "ต้องส่ง" → "ส่ง"
@@ -755,7 +777,11 @@ function parseSegment(
 
   const task: ParsedTask = {
     name, description, category: sharedCategory, reset_type,
-    reset_time: reset_type === "specific_date" ? null : reset_time,
+    // Was: nulled whenever reset_type was "specific_date". That silently
+    // discarded "บ่ายสอง" out of "ประชุมทีม พฤหัส บ่ายสอง" — the user named a
+    // time and the app threw it away without a word. A one-off task may
+    // carry a time now; null still means all day. See countdown.ts.
+    reset_time,
     reset_day: null,
     reset_interval_days: reset_type === "custom_days" ? 30 : null,
     anchor_date: null,
@@ -1007,7 +1033,11 @@ export function smartParse(input: string): AIResult {
   const description = times.length >= 2 ? `${times[0].time} – ${times[1].time}` : "";
   const task: ParsedTask = {
     name, description, category: sharedCategory, reset_type,
-    reset_time: reset_type === "specific_date" ? null : reset_time,
+    // Was: nulled whenever reset_type was "specific_date". That silently
+    // discarded "บ่ายสอง" out of "ประชุมทีม พฤหัส บ่ายสอง" — the user named a
+    // time and the app threw it away without a word. A one-off task may
+    // carry a time now; null still means all day. See countdown.ts.
+    reset_time,
     reset_day: null,
     reset_interval_days: reset_type === "custom_days" ? 30 : null,
     anchor_date: null,

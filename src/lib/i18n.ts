@@ -367,6 +367,27 @@ const translations = {
   "finance.projected":    { en: "Projected",     th: "คาดทั้งเดือน" },
   "finance.noPrevMonth":  { en: "no data",       th: "ไม่มีข้อมูล" },
   "finance.expenseWord":  { en: "Expense",       th: "รายจ่าย" },
+  "settings.autostartDevOnly": { en: "Not available in a dev build — use the installed app.", th: "ใช้ไม่ได้ในโหมด dev ให้ตั้งจากตัวที่ติดตั้งแล้ว" },
+  "ai.section":     { en: "AI assistant",      th: "ผู้ช่วย AI" },
+  "ai.provider":    { en: "Provider",          th: "ผู้ให้บริการ" },
+  "ai.model":       { en: "Model",             th: "โมเดล" },
+  "ai.baseUrl":     { en: "Endpoint",          th: "ที่อยู่เซิร์ฟเวอร์" },
+  "ai.apiKey":      { en: "API key",           th: "คีย์ API" },
+  "ai.getKey":      { en: "Get a key",         th: "ขอคีย์" },
+  "ai.settingsSaved": { en: "Saved",           th: "บันทึกแล้ว" },
+  "ai.dailyCap":    { en: "Daily request cap", th: "จำกัดคำขอต่อวัน" },
+  "ai.capHint":     { en: "0 means no limit. Beyond it the offline parser answers instead.", th: "ใส่ 0 คือไม่จำกัด เกินแล้วจะใช้ตัวแยกในเครื่องตอบแทน" },
+  "ai.usedToday":   { en: "Used today",        th: "ใช้ไปวันนี้" },
+  "ai.requests":    { en: "requests",          th: "ครั้ง" },
+  "ai.localOnly":   { en: "No key: the offline parser handles everything.", th: "ไม่ใส่คีย์ก็ใช้ได้ ตัวแยกในเครื่องจะทำงานแทนทั้งหมด" },
+  "ai.baseUrlHint": { en: "Works with OpenRouter, Groq, LM Studio, Ollama.", th: "ใช้กับ OpenRouter, Groq, LM Studio, Ollama ได้" },
+  "greeting.night":  { en: "Still up",  th: "ยังไม่นอนอีก" },
+
+  "settings.version": { en: "Version",   th: "เวอร์ชัน" },
+
+  "task.timeLabel":  { en: "Time",     th: "เวลา" },
+  "task.allDay":     { en: "All day",  th: "ทั้งวัน" },
+  "task.allDayHint": { en: "Due at the end of that day.", th: "ครบกำหนดตอนสิ้นวัน" },
 } as const;
 
 type TranslationKey = keyof typeof translations;

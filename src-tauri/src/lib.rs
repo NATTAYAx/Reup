@@ -191,6 +191,21 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        // MUST be registered first — the plugin docs are explicit that plugins
+        // run in registration order, and this one has to win the race before
+        // anything else in the app starts.
+        //
+        // Without it a second double-click started a whole second copy: two tray
+        // icons, two notifiers firing the same reminders twice, two SQLite
+        // handles on one file, and two wallpaper children fighting over WorkerW.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // Launching again should surface the copy already running.
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
         .manage(Arc::new(Mutex::new(Vec::<NotificationPayload>::new())) as PendingQueue)
         .manage(wallpaper::WallpaperProc::new())
         .plugin(tauri_plugin_opener::init())

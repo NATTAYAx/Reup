@@ -12,18 +12,25 @@
 // ============================================================
 
 import { smartParse, AIResult } from "./smartAI";
+import {
+  PROVIDERS, getProviderId, getApiKey, setApiKey, getModel, getBaseUrl,
+  isOverDailyCap, recordUsage, type TokenUsage,
+} from "./aiProviders";
+
+export type { TokenUsage } from "./aiProviders";
 
 // ─── Key storage ─────────────────────────────────────────────
-const KEY_STORAGE = "gamesched_gemini_key";
+// Thin wrappers kept so existing callers do not change. The store itself is
+// per-provider and lives in aiProviders.ts.
 
 export function getGeminiKey(): string {
-  return localStorage.getItem(KEY_STORAGE) ?? "";
+  return getApiKey();
 }
 export function setGeminiKey(key: string) {
-  localStorage.setItem(KEY_STORAGE, key.trim());
+  setApiKey(key);
 }
 export function clearGeminiKey() {
-  localStorage.removeItem(KEY_STORAGE);
+  setApiKey("");
 }
 
 // ─── Online check ────────────────────────────────────────────
@@ -58,7 +65,7 @@ For TASK operations return:
       "description": "...",
       "category": "game" | "school" | "work" | "personal",
       "reset_type": "daily" | "weekly" | "biweekly" | "custom_days" | "event_window" | "specific_date",
-      "reset_time": "HH:MM" or null,
+      "reset_time": "HH:MM" or null,   // null = all day (due 23:59). Set it whenever the user names a time, INCLUDING for specific_date.
       "reset_day": 0-6 or null,
       "reset_interval_days": number or null,
       "anchor_date": "YYYY-MM-DD" or null,
@@ -117,63 +124,117 @@ THAI KEYWORDS:
 - สำคัญ/จำเป็น → is_priority: 1
 - วันจันทร์=1, อังคาร=2, พุธ=3, พฤหัส=4, ศุกร์=5, เสาร์=6, อาทิตย์=0
 
+USING THE CONTEXT BLOCK:
+The context you are given lists the user's CURRENT tasks and spending. Use it.
+- For delete / edit_time / edit_priority, "targetTaskName" MUST be copied
+  EXACTLY as it appears in the task list, character for character. The app
+  matches on that string, so a paraphrase silently deletes nothing.
+- If the user names something loosely ("เดลี่", "ตัวรีเซ็ตตีสี่", "the maple one"),
+  resolve it against the list yourself and return the exact name.
+- If nothing in the list plausibly matches, do NOT guess. Return domain "chat"
+  and ask which one they mean, listing the closest names.
+- Never invent a task that is not in the list.
+
 Always prefer the user's language in the "reply" field.
 `.trim();
 
 // ─── Call Gemini ──────────────────────────────────────────────
+export interface ChatTurn {
+  role: "user" | "ai";
+  text: string;
+}
+
+/** Which slice of the app's state the model needs to answer this message. */
+export type ContextKind = "task" | "finance" | "both";
+
 interface GeminiOptions {
   context?: string; // extra context like spending summary
+  /** Recent turns, oldest first. Without these the model sees each message in
+   *  isolation, so "อันนั้นแหละ เปลี่ยนเป็นสามทุ่ม" has no antecedent and the
+   *  app has to guess at follow-ups with its own regexes instead. */
+  history?: ChatTurn[];
+  /** Called ONLY when a request is actually going to be sent, and told which
+   *  half of the app the message is about. Two reasons it is a callback rather
+   *  than a string:
+   *
+   *  1. Building it costs four database queries. Passing a ready-made string
+   *     meant paying for them on every message, including the majority that
+   *     the offline parser answers on its own without any request at all.
+   *  2. A message about coffee does not need the task list expanded, and a
+   *     message about a game reset does not need the spending breakdown. The
+   *     kind comes from the offline parser's own classification, which is a
+   *     thousand lines of real parsing rather than a keyword regex — the thing
+   *     that used to gate this and left the model blind. */
+  buildContext?: (kind: ContextKind) => Promise<string | undefined>;
   /** Skip the local-first shortcut and always ask the model. For a "try again
    *  with the real AI" button when the offline parser got it wrong. */
   forceRemote?: boolean;
 }
 
+/** Usage from the most recent remote call, or null if none was reported. */
+let lastUsage: TokenUsage | null = null;
+
+/**
+ * One request to whichever provider the user configured.
+ *
+ * The name is kept for the callers that already import it, but nothing about
+ * Gemini lives in here any more — the wire format, the endpoint and the model
+ * all come from src/lib/aiProviders.ts. Swapping to an OpenAI key, an Anthropic
+ * key, or a model running locally through Ollama changes a dropdown, not code.
+ */
 export async function callGemini(
   userMessage: string,
   options: GeminiOptions = {}
 ): Promise<GeminiResponse> {
-  const key = getGeminiKey();
+  const providerId = getProviderId();
+  const provider = PROVIDERS[providerId];
+  const key = getApiKey(providerId);
   if (!key) throw new Error("NO_KEY");
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`;
+  // A ceiling that holds no matter how the provider bills. Without it a stuck
+  // retry loop or a long afternoon of chatting is only discovered on the bill.
+  if (isOverDailyCap()) throw new Error("DAILY_CAP");
 
-  const systemWithContext = options.context
+  const system = options.context
     ? `${SYSTEM_PROMPT}\n\nCONTEXT: ${options.context}`
     : SYSTEM_PROMPT;
 
-  const body = {
-    system_instruction: { parts: [{ text: systemWithContext }] },
-    contents: [{ role: "user", parts: [{ text: userMessage }] }],
-    generationConfig: {
-      temperature: 0.2,      // low = more consistent JSON
-      maxOutputTokens: 600,
-      responseMimeType: "application/json",
-    },
-  };
+  // Four turns is enough to resolve "that one" and "change it to nine". Replies
+  // are clipped harder than questions because they are mostly confirmations
+  // whose tail carries nothing worth paying for. This is also what keeps the
+  // request a FIXED size: a five-message chat and a five-hundred-message chat
+  // send exactly the same number of tokens.
+  const history = (options.history ?? []).slice(-4).map(turn => ({
+    role: turn.role,
+    text: turn.text.slice(0, turn.role === "user" ? 300 : 160),
+  }));
 
   const ctrl = new AbortController();
-  const tid = setTimeout(() => ctrl.abort(), 8000); // 8s timeout
+  const tid = setTimeout(() => ctrl.abort(), 12000);
 
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
+    const reply = await provider.send(
+      {
+        system,
+        history,
+        message: userMessage,
+        maxOutputTokens: 600,
+        model: getModel(providerId),
+        apiKey: key,
+        baseUrl: provider.configurableBaseUrl ? getBaseUrl(providerId) : undefined,
+      },
+      ctrl.signal,
+    );
     clearTimeout(tid);
 
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      const msg = (err as any)?.error?.message ?? res.statusText;
-      throw new Error(`GEMINI_ERROR: ${msg}`);
+    lastUsage = reply.usage;
+    recordUsage(reply.usage);
+    if (reply.usage) {
+      console.info(`[ai:${providerId}] in ${reply.usage.input} / out ${reply.usage.output} tokens`);
     }
 
-    const data = await res.json();
-    const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-
-    // Strip possible markdown fences just in case
-    const clean = raw.replace(/```json\s*/gi, "").replace(/```/g, "").trim();
+    // Providers without a JSON mode wrap their answer in a markdown fence.
+    const clean = reply.text.replace(/```json\s*/gi, "").replace(/```/g, "").trim();
     return JSON.parse(clean) as GeminiResponse;
   } catch (e: any) {
     clearTimeout(tid);
@@ -225,6 +286,8 @@ export type GeminiResponse =
 export interface AIServiceResult {
   source: "gemini" | "local";
   response: GeminiResponse;
+  /** Present only when the request actually went to Gemini. */
+  usage?: TokenUsage | null;
 }
 
 /**
@@ -266,8 +329,16 @@ export async function processMessage(
   // says no, it is right, and we skip an 8 second timeout.
   if (key && navigator.onLine) {
     try {
-      const response = await callGemini(userMessage, options);
-      return { source: "gemini", response };
+      let context = options.context;
+      if (!context && options.buildContext) {
+        const d = local.response.domain;
+        // "chat" means the offline parser did not recognise it, which is exactly
+        // when the model needs the whole picture.
+        const kind: ContextKind = d === "finance" ? "finance" : d === "task" ? "task" : "both";
+        context = await options.buildContext(kind);
+      }
+      const response = await callGemini(userMessage, { ...options, context });
+      return { source: "gemini", response, usage: lastUsage };
     } catch (e: any) {
       console.warn("[geminiService] Gemini failed, falling back to local:", e.message);
     }

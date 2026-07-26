@@ -6,6 +6,7 @@ import { useState, useRef, useEffect } from "react";
 import { motion } from "framer-motion";
 import { X, Send, Sparkles, Brain, Wallet, CheckCircle, Wifi, WifiOff, Key } from "lucide-react";
 import { todayBangkok } from "../lib/dateUtil";
+import { getAllTasks } from "../lib/database";
 import {
   saveHabit, getTopHabits, QUICK_PRESETS,
   pushHistory, clearHistory, smartParse,
@@ -22,7 +23,9 @@ import {
 import {
   processMessage, getGeminiKey, setGeminiKey, isOnline,
   GeminiTaskResponse, GeminiFinanceResponse,
+  type ContextKind, type TokenUsage,
 } from "../lib/geminiService";
+import { getUsageToday, type DailyUsage } from "../lib/aiProviders";
 import { t } from "../lib/i18n";
 
 interface Props {
@@ -53,6 +56,10 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  // Real token count of the last Gemini call, shown in the footer so the cost
+  // of a conversation is something you can watch rather than worry about.
+  const [lastUsage, setLastUsage] = useState<TokenUsage | null>(null);
+  const [today, setToday] = useState<DailyUsage>(() => getUsageToday());
   const [habits, setHabits] = useState(getTopHabits(3));
   const [online, setOnline] = useState(true);
   const [showKeyInput, setShowKeyInput] = useState(false);
@@ -61,6 +68,9 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
   const inputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const isConfirming = useRef(false);
+  // When the conversation was last touched, so a stale one can be retired
+  // without throwing away a live one.
+  const lastActivity = useRef<number>(Date.now());
 
   const [pendingTask, setPendingTask] = useState<{
     type: "add" | "delete" | "edit_time" | "edit_priority";
@@ -86,12 +96,18 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
   // Check online status on open
   useEffect(() => {
     if (open) {
-      clearHistory();
-      const key = getGeminiKey();
-      const greeting = key
-        ? t("ai.unifiedGreeting")
-        : `${t("ai.unifiedGreeting")}\n\n💡 เพิ่ม Gemini API key เพื่อให้ AI เข้าใจภาษาไทยได้ดีขึ้น (ฟรี)`;
-      setMessages([{ role: "ai", text: greeting }]);
+      // Only start over once the last exchange has gone cold. Wiping on every
+      // open meant closing the panel for ten seconds threw away exactly the
+      // context that follow-ups like "เปลี่ยนเป็นสามโมงแทน" depend on.
+      const STALE_MS = 30 * 60 * 1000;
+      if (Date.now() - lastActivity.current > STALE_MS) {
+        clearHistory();
+        const key = getGeminiKey();
+        const greeting = key
+          ? t("ai.unifiedGreeting")
+          : `${t("ai.unifiedGreeting")}\n\n💡 เพิ่ม Gemini API key เพื่อให้ AI เข้าใจภาษาไทยได้ดีขึ้น (ฟรี)`;
+        setMessages([{ role: "ai", text: greeting }]);
+      }
       setPendingTask(null);
       setPendingFinance(null);
       setHabits(getTopHabits(3));
@@ -117,6 +133,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
     setInput("");
     addMsg({ role: "user", text: msg });
     setLoading(true);
+    lastActivity.current = Date.now();
 
     const isCorrection = isCorrectionMessage(msg) && (pendingTask !== null || pendingFinance !== null);
     if (!isCorrection) {
@@ -127,25 +144,98 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
     await new Promise(r => setTimeout(r, 400));
 
     try {
-      // ── Build context for finance queries ───────────────────
-      let context: string | undefined;
-      const mightBeFinance = /ใช้จ่าย|สรุป|เดือนนี้|ยอด|บาท|฿|summary|spending|income|รายได้/i.test(msg);
-      if (mightBeFinance) {
+      // ── Context, built only if a request is really going to be sent ──
+      // Four database queries per message was the old shape, paid even when the
+      // offline parser answered instantly and nothing left the machine. Now the
+      // service asks for this only on the way to Gemini, and says which half it
+      // needs so a coffee receipt does not carry the whole task list with it.
+      const buildContext = async (kind: ContextKind): Promise<string | undefined> => {
         try {
           const today = todayBangkok();
           const month = today.slice(0, 7);
-          const [todayAmt, monthAmt, summary] = await Promise.all([
-            getTodayTotal(today), getMonthTotal(month), getSpendingSummary(),
-          ]);
-          context = `User spending — Today: ${fmt(todayAmt)}, This month: ${fmt(monthAmt)}, Breakdown: ${summary}`;
-        } catch { /* ignore */ }
-      }
+          const parts: string[] = [`Today is ${today} (Asia/Bangkok).`];
+
+          const tasks = await getAllTasks();
+          if (kind === "finance") {
+            // Names only. Cheap, but still enough to resolve "ลบอันนั้น" if the
+            // offline parser guessed the domain wrong.
+            parts.push(tasks.length
+              ? `The user's task names: ${tasks.slice(0, 40).map((tk: any) => `"${tk.name}"`).join(", ")}`
+              : `The user has no tasks yet.`);
+          } else {
+            const lines = tasks.slice(0, 40).map((tk: any) => {
+              const bits = [
+                `"${tk.name}"`,
+                tk.category,
+                tk.reset_type,
+                tk.reset_time ? `at ${tk.reset_time}` : null,
+                tk.is_priority ? "priority" : null,
+                tk.is_urgent ? "urgent" : null,
+              ].filter(Boolean);
+              return `- ${bits.join(", ")}`;
+            }).join("\n");
+            parts.push(tasks.length
+              ? `The user's CURRENT tasks (use these exact names):\n${lines}`
+              : `The user has no tasks yet.`);
+          }
+
+          if (kind !== "task") {
+            const [todayAmt, monthAmt, summary] = await Promise.all([
+              getTodayTotal(today), getMonthTotal(month), getSpendingSummary(),
+            ]);
+            parts.push(`Spending — today ${fmt(todayAmt)}, this month ${fmt(monthAmt)}. Breakdown: ${summary}`);
+          }
+
+          // A draft awaiting confirmation is not in the database yet, so it
+          // cannot show up in the task list above. Without this the model is
+          // asked to correct something it has no record of.
+          if (pendingTask) {
+            parts.push(
+              `UNSAVED draft awaiting the user's confirmation: ${JSON.stringify(pendingTask)}. ` +
+              `If this message corrects it, return the corrected version of THAT action, not a new task.`,
+            );
+          }
+          if (pendingFinance) {
+            parts.push(`UNSAVED finance draft awaiting confirmation: ${JSON.stringify(pendingFinance)}.`);
+          }
+
+          return parts.join("\n\n");
+        } catch (e) {
+          console.warn("[UnifiedAIChat] could not build context:", e);
+          return undefined;
+        }
+      };
+
+      // Recent turns so follow-ups like "อันนั้นแหละ" have something to refer to.
+      const history = messages.slice(-4).map(m => ({
+        role: m.role === "user" ? ("user" as const) : ("ai" as const),
+        text: m.text,
+      }));
 
       // ── Call AI (Gemini or local) ────────────────────────────
-      const { source, response } = await processMessage(msg, { context });
+      // NOT "&& something is pending". The real flow is: confirm a task, think
+      // again, then type a correction — by which point nothing is pending and
+      // the task is already saved. A sentence opening with
+      // "เปลี่ยน / แก้ / ไม่ใช่ / actually" refers to something earlier by
+      // definition, and the offline parser scores each sentence ALONE. It saw a
+      // time in "เปลี่ยนเป็นสามโมงแทน", called it a confident new task, and
+      // created a task with that whole sentence as its name.
+      const needsConversation =
+        isCorrectionMessage(msg) || pendingTask !== null || pendingFinance !== null;
 
-      // Update online status indicator
-      setOnline(source === "gemini");
+      const { source, response, usage } = await processMessage(msg, {
+        buildContext, history, forceRemote: needsConversation,
+      });
+      setLastUsage(usage ?? null);
+      setToday(getUsageToday());
+
+      // Do NOT derive connectivity from where a single answer came from. A
+      // message the offline parser handled is not evidence of being offline, yet
+      // this flipped the header badge to "Offline" after every locally-answered
+      // message, which reads as the app losing its connection. Each bubble
+      // already carries its own source label, so the header only ever gets
+      // better news, never worse.
+      if (source === "gemini") setOnline(true);
 
       // ── Route by domain ──────────────────────────────────────
       if (response.domain === "chat") {
@@ -261,8 +351,13 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
         await updateTaskPriority(pendingTask.targetName, pendingTask.newPriority ? 1 : 0);
       }
       setPendingTask(null);
-      onClose();
-      setTimeout(() => onTaskAdded(), 80);
+      // Deliberately NOT closing. Closing here was the root of the follow-up
+      // bug: it ended the conversation, the open-effect then wiped every
+      // message, and the next sentence arrived with nothing before it. A chat
+      // that hangs up after each sentence cannot have follow-ups. The finance
+      // path never closed either, so this was inconsistent as well.
+      addMsg({ role: "ai", text: t("ai.saved"), domain: "task" });
+      onTaskAdded();
     } catch (e: any) {
       addMsg({ role: "ai", text: `❌ ${e.message ?? "ไม่สำเร็จ"}` });
       setPendingTask(null);
@@ -324,6 +419,23 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
                   {online && hasKey ? <Wifi size={9} /> : <WifiOff size={9} />}
                   {online && hasKey ? "Gemini" : "Offline"}
                 </span>
+                {/* What the last request actually cost, straight from Gemini's
+                    own usageMetadata. Nothing shows until a request is really
+                    sent, so a run of locally-answered messages leaves it blank —
+                    which is itself the useful signal. */}
+                {lastUsage && (
+                  <span className="text-white/25" title="tokens in / out (last call)">
+                    {lastUsage.input}↑ {lastUsage.output}↓
+                  </span>
+                )}
+                {/* Running total for today, which is the number that answers
+                    "what is this costing me" for a provider that bills by use.
+                    Resets on its own at midnight. */}
+                {today.requests > 0 && (
+                  <span className="text-white/25" title="today: requests · tokens in / out">
+                    · {today.requests}× {today.input + today.output}tk
+                  </span>
+                )}
               </p>
             </div>
           </div>

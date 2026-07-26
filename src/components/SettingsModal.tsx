@@ -8,6 +8,12 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getSetting, setSetting } from "../lib/database";
 import { getLang, setLang, t, type Lang } from "../lib/i18n";
 import { loadToastStyle, saveToastStyle, type ToastStyle } from "../lib/toastStyle";
+import {
+  PROVIDERS, getProviderId, setProviderId, getApiKey, setApiKey,
+  getModel, setModel, getBaseUrl, setBaseUrl,
+  getDailyRequestCap, setDailyRequestCap, getUsageToday,
+  type ProviderId, type DailyUsage,
+} from "../lib/aiProviders";
 import { Toast } from "./ToastCard";
 import { paletteFromVideo } from "../lib/videoPalette";
 
@@ -183,6 +189,7 @@ const PRESET_THEMES: AppTheme[] = [
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function SettingsModal({ open, onClose }: Props) {
   const [autostart, setAutostart]       = useState(false);
+  const [autostartNote, setAutostartNote] = useState("");
   const [activeTab, setActiveTab]       = useState<"general" | "appearance">("general");
   const [currentTheme, setCurrentTheme] = useState<AppTheme>(loadTheme);
   const [customIcon, setCustomIcon]     = useState<string | null>(null);
@@ -202,6 +209,39 @@ export default function SettingsModal({ open, onClose }: Props) {
   // Montage of the frames the palette was read from, so the result is not a
   // black box the user has to take on faith.
   const [wpMontage, setWpMontage]       = useState<string | null>(null);
+
+  // ── AI provider settings ────────────────────────────────────────────────
+  const [aiProvider, setAiProvider] = useState<ProviderId>(() => getProviderId());
+  const [aiModel, setAiModel]       = useState<string>(() => getModel());
+  const [aiBaseUrl, setAiBaseUrl]   = useState<string>(() => getBaseUrl());
+  const [aiKey, setAiKey]           = useState<string>(() => getApiKey());
+  const [aiCap, setAiCap]           = useState<string>(() => String(getDailyRequestCap()));
+  const [aiUsage, setAiUsage]       = useState<DailyUsage>(() => getUsageToday());
+  const [aiSaved, setAiSaved]       = useState(false);
+
+  // Switching provider pulls that provider's own saved key and its default
+  // model, so going Gemini → OpenAI → Gemini does not lose either key.
+  const switchProvider = (id: ProviderId) => {
+    setProviderId(id);
+    setAiProvider(id);
+    setAiKey(getApiKey(id));
+    const def = PROVIDERS[id].defaultModel;
+    setModel(def);
+    setAiModel(def);
+    const base = PROVIDERS[id].defaultBaseUrl ?? "";
+    setBaseUrl(base);
+    setAiBaseUrl(base);
+  };
+
+  const saveAiSettings = () => {
+    setApiKey(aiKey, aiProvider);
+    setModel(aiModel);
+    setBaseUrl(aiBaseUrl);
+    setDailyRequestCap(parseInt(aiCap || "0", 10) || 0);
+    setAiUsage(getUsageToday());
+    setAiSaved(true);
+    setTimeout(() => setAiSaved(false), 1500);
+  };
   // Wallpaper state
   const [wpPath, setWpPath]             = useState<string>("");
   const [wpEnabled, setWpEnabled]       = useState(false);
@@ -236,6 +276,12 @@ export default function SettingsModal({ open, onClose }: Props) {
       setCustomSound(snd);
       setSoundName(snd ? (localStorage.getItem("gamesched_notif_sound_name") || "Custom sound") : "");
       setToastStyle(loadToastStyle());
+      setAiProvider(getProviderId());
+      setAiModel(getModel());
+      setAiBaseUrl(getBaseUrl());
+      setAiKey(getApiKey());
+      setAiCap(String(getDailyRequestCap()));
+      setAiUsage(getUsageToday());
       // Load wallpaper settings from DB
       setWpBusy(false); // clear any stuck busy state from a previous session
       getSetting("wallpaper_path").then(p => { if (p) setWpPath(p); }).catch(() => {});
@@ -370,10 +416,24 @@ export default function SettingsModal({ open, onClose }: Props) {
   };
 
   const toggleAutostart = async () => {
+    // The autostart plugin registers whichever executable is running right now.
+    // Turning this on from `pnpm tauri dev` writes target\\debug\\game-scheduler.exe
+    // into the Windows Run key. At the next boot Windows launches that build, it
+    // tries to reach the Vite server on localhost:1420 which is not running, and
+    // the user gets a blank window with DevTools on top instead of the app. So a
+    // dev build is not allowed to touch the startup entry at all.
+    if (import.meta.env.DEV) {
+      setAutostartNote(t("settings.autostartDevOnly"));
+      setTimeout(() => setAutostartNote(""), 5000);
+      return;
+    }
     try {
       if (autostart) { await disable(); setAutostart(false); }
       else           { await enable();  setAutostart(true);  }
-    } catch (err) { console.error("Autostart error:", err); }
+    } catch (err) {
+      console.error("Autostart error:", err);
+      setAutostartNote(String(err));
+    }
   };
 
   const handleSoundUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -838,6 +898,9 @@ Rules:
                       <div>
                         <p className="text-white text-sm font-semibold">{t("settings.autostart")}</p>
                         <p className="text-white/40 text-xs">{t("settings.autostartSub")}</p>
+                        {autostartNote && (
+                          <p className="text-amber-400/80 text-[10px] mt-0.5 leading-snug">{autostartNote}</p>
+                        )}
                       </div>
                     </div>
                     <button
@@ -1015,8 +1078,86 @@ Rules:
                     </div>
                   </div>
 
+                  {/* ── AI assistant ─────────────────────────────────────── */}
+                  <div className="bg-white/5 rounded-2xl p-4 border border-white/10 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <Sparkles size={15} className="text-white/50" />
+                      <span className="text-white text-sm font-semibold">{t("ai.section")}</span>
+                      {aiSaved && <span className="text-emerald-400 text-[11px] ml-auto">{t("ai.settingsSaved")}</span>}
+                    </div>
+
+                    <div>
+                      <p className="text-white/40 text-[11px] mb-1.5">{t("ai.provider")}</p>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {(Object.keys(PROVIDERS) as ProviderId[]).map(id => (
+                          <button key={id} onClick={() => switchProvider(id)}
+                            className={`py-2 rounded-lg text-[11px] font-semibold transition-all ${
+                              aiProvider === id
+                                ? "theme-btn text-white"
+                                : "bg-white/8 text-white/40 hover:bg-white/15 hover:text-white"
+                            }`}>
+                            {PROVIDERS[id].label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div>
+                      <p className="text-white/40 text-[11px] mb-1.5">{t("ai.model")}</p>
+                      <input value={aiModel} onChange={e => setAiModel(e.target.value)}
+                        placeholder={PROVIDERS[aiProvider].defaultModel}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white text-xs placeholder-white/25 focus:outline-none focus:border-white/30" />
+                    </div>
+
+                    {PROVIDERS[aiProvider].configurableBaseUrl && (
+                      <div>
+                        <p className="text-white/40 text-[11px] mb-1.5">{t("ai.baseUrl")}</p>
+                        <input value={aiBaseUrl} onChange={e => setAiBaseUrl(e.target.value)}
+                          placeholder={PROVIDERS[aiProvider].defaultBaseUrl}
+                          className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white text-xs placeholder-white/25 focus:outline-none focus:border-white/30" />
+                        <p className="text-white/25 text-[10px] mt-1">{t("ai.baseUrlHint")}</p>
+                      </div>
+                    )}
+
+                    <div>
+                      <div className="flex items-baseline justify-between mb-1.5">
+                        <p className="text-white/40 text-[11px]">{t("ai.apiKey")}</p>
+                        <a href={PROVIDERS[aiProvider].keyUrl} target="_blank" rel="noreferrer"
+                          className="text-white/30 hover:text-white text-[10px] transition-colors">
+                          {t("ai.getKey")}
+                        </a>
+                      </div>
+                      <input type="password" value={aiKey} onChange={e => setAiKey(e.target.value)}
+                        placeholder="sk-..." autoComplete="off"
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white text-xs placeholder-white/25 focus:outline-none focus:border-white/30" />
+                      <p className="text-white/25 text-[10px] mt-1">{t("ai.localOnly")}</p>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <p className="text-white/40 text-[11px]">{t("ai.dailyCap")}</p>
+                        <span className="text-white/25 text-[10px] ml-auto">
+                          {t("ai.usedToday")} {aiUsage.requests} {t("ai.requests")} · {aiUsage.input + aiUsage.output} tk
+                        </span>
+                      </div>
+                      <input type="number" inputMode="numeric" min={0}
+                        value={aiCap} onChange={e => setAiCap(e.target.value)}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-white/30" />
+                      <p className="text-white/25 text-[10px] mt-1">{t("ai.capHint")}</p>
+                    </div>
+
+                    <button onClick={saveAiSettings}
+                      className="w-full py-2.5 theme-btn rounded-xl text-white text-sm font-semibold">
+                      {t("settings.done")}
+                    </button>
+                  </div>
+
                   <p className="text-white/30 text-xs text-center">
                     {t("settings.trayHint")}
+                  </p>
+
+                  <p className="text-white/20 text-[10px] text-center">
+                    {t("settings.version")} {__APP_VERSION__}
                   </p>
 
                   <button

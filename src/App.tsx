@@ -139,7 +139,14 @@ export default function App() {
   }, [countdowns, filter]);
 
   const hr = bangkokHour();
-  const greeting = hr < 12 ? t("greeting.morning") : hr < 18 ? t("greeting.afternoon") : t("greeting.evening");
+  // hr < 12 meant 01:54 greeted you with "good morning". Anyone awake at that
+  // hour knows it is not morning, and for this app in particular the small
+  // hours are prime time — game resets land at 04:00.
+  const greeting =
+    hr < 5  ? t("greeting.night")
+    : hr < 12 ? t("greeting.morning")
+    : hr < 18 ? t("greeting.afternoon")
+    : t("greeting.evening");
 
   const priorityCount = countdowns.filter(c => c.task.is_priority).length;
   const urgentCount = countdowns.filter(c => c.task.is_urgent).length;
@@ -377,7 +384,8 @@ export default function App() {
         </div>
       </div>
 
-      {mountAdd && <AddTaskModal open={addOpen} onClose={() => setAddOpen(false)} onTaskAdded={refreshAll} />}
+      {mountAdd && <AddTaskModal open={addOpen} onClose={() => setAddOpen(false)}
+        onTaskAdded={refreshAll} onOpenAI={() => { setAddOpen(false); setAiOpen(true); }} />}
       {mountSettings && <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />}
       {mountEdit && <EditTaskModal taskId={editTaskId} initialTask={editTask} onClose={() => { setEditTaskId(null); setEditTask(null); }} onSaved={() => { setEditTaskId(null); setEditTask(null); setTimeout(refreshAll, 100); }} />}
       {mountAi && <UnifiedAIChat
