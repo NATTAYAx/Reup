@@ -116,6 +116,33 @@ async function initializeSchema(db: Database): Promise<void> {
     )
   `);
 
+  // Categories are user data, not a constant in the source. See the header of
+  // the category section in financeDatabase.ts for why. label is NULLABLE and
+  // null means "built-in, translate it", which keeps the nine defaults
+  // bilingual while letting anything the user makes carry a literal name.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS expense_categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key TEXT NOT NULL UNIQUE,
+      label TEXT,
+      emoji TEXT NOT NULL DEFAULT '📦',
+      color TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_hidden INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+
+  // A bank reference is the one thing on a slip worth keeping: short, opaque,
+  // no account numbers or names in it, and it is what makes photographing the
+  // same slip twice detectable instead of silently doubling a month's total.
+  // Added separately from CREATE TABLE so existing databases get it too.
+  try {
+    await db.execute("ALTER TABLE expenses ADD COLUMN slip_ref TEXT");
+  } catch (_) { /* already there */ }
+  await db.execute(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_slip_ref ON expenses(slip_ref) WHERE slip_ref IS NOT NULL",
+  );
+
   // Give every row a device-independent identity and a modification time, so
   // the phone app can eventually sync with this one. See src/lib/syncMeta.ts.
   // Runs last, after every table exists. Idempotent, so it is safe every boot.

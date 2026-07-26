@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Clock, ChevronUp, ChevronDown } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { usePlacement } from "../lib/usePlacement";
 
 interface Props {
   value: string; // "HH:MM" 24h format
@@ -10,6 +11,8 @@ interface Props {
 export default function TimePicker({ value, onChange }: Props) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const place = usePlacement(open, ref, panelRef, { height: 260, width: 260 });
 
   const [rawHour, rawMinute] = value.split(":").map(Number);
   const isPM = rawHour >= 12;
@@ -98,7 +101,10 @@ export default function TimePicker({ value, onChange }: Props) {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -6, scale: 0.98 }}
             transition={{ duration: 0.12 }}
-            className="absolute z-50 top-full mt-2 left-0 right-0 bg-gray-900 border border-white/10 rounded-2xl p-5 shadow-2xl shadow-black/70"
+            ref={panelRef}
+            className={`absolute z-50 left-0 right-0 bg-gray-900 border border-white/10 rounded-2xl p-5 shadow-2xl shadow-black/70 max-h-[85vh] overflow-y-auto ${
+              place.up ? "bottom-full mb-2" : "top-full mt-2"
+            }`}
           >
             <div className="flex items-center justify-center gap-2">
 

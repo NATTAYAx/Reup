@@ -12,6 +12,7 @@
 // ============================================================
 
 import { smartParse, AIResult } from "./smartAI";
+import { cacheLookup, cacheStore, recordCall } from "./aiMemory";
 import {
   PROVIDERS, getProviderId, getApiKey, setApiKey, getModel, getBaseUrl,
   isOverDailyCap, recordUsage, type TokenUsage,
@@ -47,96 +48,219 @@ export async function isOnline(): Promise<boolean> {
 // Tells Gemini exactly what JSON shape to return so we can
 // parse it reliably into AIResult / finance actions.
 
-const SYSTEM_PROMPT = `
+// ─── System prompt, assembled per message ─────────────────────────────────────
+//
+// It used to be one 944-token block sent with every single request, carrying the
+// full task JSON schema, the full finance JSON schema, the game reset presets
+// and a Thai keyword table — even when the message was "กาแฟ 60".
+//
+// Splitting it costs nothing in accuracy, because the offline parser has
+// already worked out which half the message belongs to before a request is
+// built. A finance message no longer pays for the game presets, and a task
+// message no longer pays for the finance schema.
+//
+// Worth knowing: Thai text costs roughly twice as many tokens per character as
+// English on these tokenizers, so a Thai-heavy prompt is more expensive than its
+// length suggests. That is the reason this was worth splitting at all.
+
+const PROMPT_BASE = `
 You are a smart assistant for a personal task and finance tracker app.
+
 The user is Thai, so they may write in Thai, English, or mix both (Thaiglish).
+
 Today's timezone is Asia/Bangkok (UTC+7).
+
+
 
 ALWAYS respond with a single JSON object. No markdown fences. No extra text.
 
-For TASK operations return:
-{
-  "domain": "task",
-  "intent": "add" | "delete" | "edit_time" | "edit_priority",
-  "reply": "<friendly reply in the SAME language the user used>",
-  "tasks": [
-    {
-      "name": "...",
-      "description": "...",
-      "category": "game" | "school" | "work" | "personal",
-      "reset_type": "daily" | "weekly" | "biweekly" | "custom_days" | "event_window" | "specific_date",
-      "reset_time": "HH:MM" or null,   // null = all day (due 23:59). Set it whenever the user names a time, INCLUDING for specific_date.
-      "reset_day": 0-6 or null,
-      "reset_interval_days": number or null,
-      "anchor_date": "YYYY-MM-DD" or null,
-      "event_start": "YYYY-MM-DD" or null,
-      "event_end": "YYYY-MM-DD" or null,
-      "specific_date": "YYYY-MM-DD" or null,
-      "is_priority": 0 or 1,
-      "is_urgent": 0 or 1
-    }
-  ],
-  "targetTaskName": "..." or null,
-  "newTime": "HH:MM" or null,
-  "newPriority": true | false | null
-}
 
-For FINANCE operations return:
-{
-  "domain": "finance",
-  "intent": "log_expense" | "delete_expense" | "edit_expense" | "query_spending" | "log_income",
-  "reply": "<friendly reply>",
-  "amount": number or null,
-  "category": "food" | "transport" | "entertainment" | "shopping" | "health" | "education" | "bills" | "game" | "other" | null,
-  "note": "..." or null,
-  "keyword": "..." or null,
-  "newAmount": number or null,
-  "incomeAmount": number or null,
-  "incomeNote": "..." or null,
-  "querySummary": true or false
-}
+
+
+
+
+
+
+
+
 
 For UNKNOWN / CONVERSATION return:
+
 {
+
   "domain": "chat",
+
   "intent": "chat",
+
   "reply": "<friendly reply in the same language>"
+
 }
 
-GAME PRESETS (use these exact values if mentioned):
-- Honkai Star Rail / HSR → daily, reset_time: "04:00", category: game
-- Twisted Wonderland / TWST → daily, reset_time: "14:00", category: game  
-- MapleStory daily → daily, reset_time: "00:00", category: game
-- MapleStory weekly boss → weekly, reset_day: 1, reset_time: "00:00", category: game
-- My Hero Ultra Rumble / MHUR → daily, reset_time: "00:00", category: game
-- Memory of Chaos / MoC → biweekly, reset_time: "04:00", anchor_date: "2024-01-01"
-- Apocalyptic Shadow → biweekly, reset_time: "04:00", anchor_date: "2024-01-15"
-- Pure Fiction → biweekly, reset_time: "04:00", anchor_date: "2024-01-08"
 
-THAI KEYWORDS:
-- ทุกวัน/รายวัน → daily
-- ทุกอาทิตย์/รายสัปดาห์ → weekly
-- สองอาทิตย์ → biweekly
-- งาน/ประชุม/ส่ง → work
-- เรียน/การบ้าน/สอบ → school
-- เกม/รีเซ็ต/บอส → game
-- ด่วน/เร่งด่วน → is_urgent: 1
-- สำคัญ/จำเป็น → is_priority: 1
-- วันจันทร์=1, อังคาร=2, พุธ=3, พฤหัส=4, ศุกร์=5, เสาร์=6, อาทิตย์=0
+
+
+
+
+
+
+
+
 
 USING THE CONTEXT BLOCK:
+
 The context you are given lists the user's CURRENT tasks and spending. Use it.
+
 - For delete / edit_time / edit_priority, "targetTaskName" MUST be copied
+
   EXACTLY as it appears in the task list, character for character. The app
+
   matches on that string, so a paraphrase silently deletes nothing.
+
 - If the user names something loosely ("เดลี่", "ตัวรีเซ็ตตีสี่", "the maple one"),
+
   resolve it against the list yourself and return the exact name.
+
 - If nothing in the list plausibly matches, do NOT guess. Return domain "chat"
+
   and ask which one they mean, listing the closest names.
+
 - Never invent a task that is not in the list.
+
+
 
 Always prefer the user's language in the "reply" field.
 `.trim();
+
+const PROMPT_TASK = `
+For TASK operations return:
+
+{
+
+  "domain": "task",
+
+  "intent": "add" | "delete" | "edit_time" | "edit_priority",
+
+  "reply": "<friendly reply in the SAME language the user used>",
+
+  "tasks": [
+
+    {
+
+      "name": "...",
+
+      "description": "...",
+
+      "category": "game" | "school" | "work" | "personal",
+
+      "reset_type": "daily" | "weekly" | "biweekly" | "custom_days" | "event_window" | "specific_date",
+
+      "reset_time": "HH:MM" or null,   // null = all day (due 23:59). Set it whenever the user names a time, INCLUDING for specific_date.
+
+      "reset_day": 0-6 or null,
+
+      "reset_interval_days": number or null,
+
+      "anchor_date": "YYYY-MM-DD" or null,
+
+      "event_start": "YYYY-MM-DD" or null,
+
+      "event_end": "YYYY-MM-DD" or null,
+
+      "specific_date": "YYYY-MM-DD" or null,
+
+      "is_priority": 0 or 1,
+
+      "is_urgent": 0 or 1
+
+    }
+
+  ],
+
+  "targetTaskName": "..." or null,
+
+  "newTime": "HH:MM" or null,
+
+  "newPriority": true | false | null
+
+}
+
+GAME PRESETS (use these exact values if mentioned):
+
+- Honkai Star Rail / HSR → daily, reset_time: "04:00", category: game
+
+- Twisted Wonderland / TWST → daily, reset_time: "14:00", category: game  
+
+- MapleStory daily → daily, reset_time: "00:00", category: game
+
+- MapleStory weekly boss → weekly, reset_day: 1, reset_time: "00:00", category: game
+
+- My Hero Ultra Rumble / MHUR → daily, reset_time: "00:00", category: game
+
+- Memory of Chaos / MoC → biweekly, reset_time: "04:00", anchor_date: "2024-01-01"
+
+- Apocalyptic Shadow → biweekly, reset_time: "04:00", anchor_date: "2024-01-15"
+
+- Pure Fiction → biweekly, reset_time: "04:00", anchor_date: "2024-01-08"
+
+THAI KEYWORDS:
+
+- ทุกวัน/รายวัน → daily
+
+- ทุกอาทิตย์/รายสัปดาห์ → weekly
+
+- สองอาทิตย์ → biweekly
+
+- งาน/ประชุม/ส่ง → work
+
+- เรียน/การบ้าน/สอบ → school
+
+- เกม/รีเซ็ต/บอส → game
+
+- ด่วน/เร่งด่วน → is_urgent: 1
+
+- สำคัญ/จำเป็น → is_priority: 1
+
+- วันจันทร์=1, อังคาร=2, พุธ=3, พฤหัส=4, ศุกร์=5, เสาร์=6, อาทิตย์=0
+`.trim();
+
+const PROMPT_FINANCE = `
+For FINANCE operations return:
+
+{
+
+  "domain": "finance",
+
+  "intent": "log_expense" | "delete_expense" | "edit_expense" | "query_spending" | "log_income",
+
+  "reply": "<friendly reply>",
+
+  "amount": number or null,
+
+  "category": "<one of the category keys listed in CONTEXT>" or null,   // the set is user-editable, never assume the nine defaults
+
+  "note": "..." or null,
+
+  "keyword": "..." or null,
+
+  "newAmount": number or null,
+
+  "incomeAmount": number or null,
+
+  "incomeNote": "..." or null,
+
+  "querySummary": true or false
+
+}
+`.trim();
+
+/** Only the halves this message can possibly need. */
+function buildSystemPrompt(kind: ContextKind): string {
+  const parts = [PROMPT_BASE];
+  if (kind !== "finance") parts.push(PROMPT_TASK);
+  if (kind !== "task") parts.push(PROMPT_FINANCE);
+  return parts.join("\n\n");
+}
+
 
 // ─── Call Gemini ──────────────────────────────────────────────
 export interface ChatTurn {
@@ -166,6 +290,9 @@ interface GeminiOptions {
    *     thousand lines of real parsing rather than a keyword regex — the thing
    *     that used to gate this and left the model blind. */
   buildContext?: (kind: ContextKind) => Promise<string | undefined>;
+  /** Which halves of the system prompt this message needs. Set by
+   *  processMessage from the offline parser's own classification. */
+  kind?: ContextKind;
   /** Skip the local-first shortcut and always ask the model. For a "try again
    *  with the real AI" button when the offline parser got it wrong. */
   forceRemote?: boolean;
@@ -195,9 +322,8 @@ export async function callGemini(
   // retry loop or a long afternoon of chatting is only discovered on the bill.
   if (isOverDailyCap()) throw new Error("DAILY_CAP");
 
-  const system = options.context
-    ? `${SYSTEM_PROMPT}\n\nCONTEXT: ${options.context}`
-    : SYSTEM_PROMPT;
+  const base = buildSystemPrompt(options.kind ?? "both");
+  const system = options.context ? `${base}\n\nCONTEXT: ${options.context}` : base;
 
   // Four turns is enough to resolve "that one" and "change it to nine". Replies
   // are clipped harder than questions because they are mostly confirmations
@@ -284,7 +410,7 @@ export type GeminiResponse =
 // Callers don't need to know which backend was used.
 
 export interface AIServiceResult {
-  source: "gemini" | "local";
+  source: "gemini" | "local" | "cache";
   response: GeminiResponse;
   /** Present only when the request actually went to Gemini. */
   usage?: TokenUsage | null;
@@ -323,21 +449,43 @@ export async function processMessage(
     return { source: "local", response: local.response };
   }
 
+  // Before spending a request: has this exact sentence already been answered?
+  // Only intents whose answer depends on the sentence alone are ever stored,
+  // so a cache hit here cannot be stale in a way that matters.
+  const cached = cacheLookup(userMessage);
+  if (cached) {
+    return { source: "cache", response: cached };
+  }
+
   const key = getGeminiKey();
   // navigator.onLine only tells us whether a network adapter exists, so it can
   // say yes on a dead connection. It is worth checking anyway because when it
   // says no, it is right, and we skip an 8 second timeout.
   if (key && navigator.onLine) {
     try {
+      const d = local.response.domain;
+      // "chat" means the offline parser did not recognise it, which is exactly
+      // when the model needs both halves.
+      const kind: ContextKind = d === "finance" ? "finance" : d === "task" ? "task" : "both";
+
       let context = options.context;
       if (!context && options.buildContext) {
-        const d = local.response.domain;
-        // "chat" means the offline parser did not recognise it, which is exactly
-        // when the model needs the whole picture.
-        const kind: ContextKind = d === "finance" ? "finance" : d === "task" ? "task" : "both";
         context = await options.buildContext(kind);
       }
-      const response = await callGemini(userMessage, { ...options, context });
+      const response = await callGemini(userMessage, { ...options, context, kind });
+
+      // Everything that got out is written down, so next week it is possible to
+      // see WHICH sentences keep escaping instead of only how many did.
+      recordCall({
+        text: userMessage,
+        domain: (response as any)?.domain ?? "?",
+        intent: (response as any)?.intent ?? "?",
+        localConfidence: local.confidence,
+        input: lastUsage?.input ?? 0,
+        output: lastUsage?.output ?? 0,
+      });
+      cacheStore(userMessage, response);
+
       return { source: "gemini", response, usage: lastUsage };
     } catch (e: any) {
       console.warn("[geminiService] Gemini failed, falling back to local:", e.message);

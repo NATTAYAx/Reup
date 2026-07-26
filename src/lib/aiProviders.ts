@@ -24,8 +24,18 @@ export interface ProviderTurn {
   text: string;
 }
 
+/** An image sent alongside the message, for reading a payment slip. */
+export interface ProviderImage {
+  /** e.g. "image/jpeg" */
+  mime: string;
+  /** base64 WITHOUT the data: prefix */
+  base64: string;
+}
+
 export interface ProviderRequest {
   system: string;
+  /** Optional. All three providers accept images, each in its own shape. */
+  image?: ProviderImage;
   history: ProviderTurn[];
   message: string;
   maxOutputTokens: number;
@@ -86,7 +96,15 @@ const gemini: Provider = {
             role: t.role === "user" ? "user" : "model",
             parts: [{ text: t.text }],
           })),
-          { role: "user", parts: [{ text: req.message }] },
+          {
+            role: "user",
+            parts: req.image
+              ? [
+                  { inline_data: { mime_type: req.image.mime, data: req.image.base64 } },
+                  { text: req.message },
+                ]
+              : [{ text: req.message }],
+          },
         ],
         generationConfig: {
           temperature: 0.2,
@@ -141,7 +159,18 @@ const openai: Provider = {
             role: t.role === "user" ? "user" : "assistant",
             content: t.text,
           })),
-          { role: "user", content: req.message },
+          {
+            role: "user",
+            content: req.image
+              ? [
+                  { type: "text", text: req.message },
+                  {
+                    type: "image_url",
+                    image_url: { url: `data:${req.image.mime};base64,${req.image.base64}` },
+                  },
+                ]
+              : req.message,
+          },
         ],
       }),
     });
@@ -187,7 +216,18 @@ const anthropic: Provider = {
             role: t.role === "user" ? "user" : "assistant",
             content: t.text,
           })),
-          { role: "user", content: req.message },
+          {
+            role: "user",
+            content: req.image
+              ? [
+                  {
+                    type: "image",
+                    source: { type: "base64", media_type: req.image.mime, data: req.image.base64 },
+                  },
+                  { type: "text", text: req.message },
+                ]
+              : req.message,
+          },
         ],
       }),
     });

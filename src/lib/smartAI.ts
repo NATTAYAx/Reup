@@ -9,6 +9,7 @@
 // ============================================================
 import { Category, ResetType } from "../types";
 import { todayBangkok, bangkokNow } from "./dateUtil";
+import { matchLearnedPreset } from "./aiMemory";
 
 // ─── Types ───────────────────────────────────────────────────
 export interface ParsedTask {
@@ -696,6 +697,8 @@ function normalizeInput(s: string): string {
 }
 
 // ─── Game presets ─────────────────────────────────────────────
+// Built-ins. Anything the user confirms from a model answer joins these at
+// runtime through matchLearnedPreset — see src/lib/aiMemory.ts.
 const GAME_PRESETS: Record<string, Partial<ParsedTask>> = {
   "honkai star rail": { name: "Honkai Star Rail Daily", category: "game", reset_type: "daily", reset_time: "04:00", description: "Daily stamina & missions" },
   "hsr": { name: "Honkai Star Rail Daily", category: "game", reset_type: "daily", reset_time: "04:00", description: "Daily stamina & missions" },
@@ -940,7 +943,14 @@ export function smartParse(input: string): AIResult {
 
   // ── Game presets ──────────────────────────────────────────
   const lower = input.toLowerCase();
-  for (const [key, preset] of Object.entries(GAME_PRESETS)) {
+  // A preset learned from a confirmed answer is checked first: it came from
+  // this user's own data, so it beats a generic built-in on a tie.
+  const learned = matchLearnedPreset(input);
+  const presetEntries: [string, Partial<ParsedTask>][] = learned
+    ? [[learned.key, learned.task as Partial<ParsedTask>], ...Object.entries(GAME_PRESETS)]
+    : Object.entries(GAME_PRESETS);
+
+  for (const [key, preset] of presetEntries) {
     if (lower.includes(key.toLowerCase())) {
       // User-specified time always wins over the preset default
       const userTimes = extractAllTimes(input);

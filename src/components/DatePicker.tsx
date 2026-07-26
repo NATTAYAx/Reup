@@ -1,19 +1,44 @@
 import { useState, useRef, useEffect } from "react";
 import { Calendar, ChevronLeft, ChevronRight } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { getLang } from "../lib/i18n";
+import { usePlacement } from "../lib/usePlacement";
 
 interface Props {
   value: string;       // "YYYY-MM-DD" or ""
   onChange: (value: string) => void;
   placeholder?: string;
   label?: string;
+  /** Renders as a small chip instead of a full-width field. The finance sheets
+   *  sit beside "today" and "yesterday" buttons and a full-width field would
+   *  not belong there — which is why they were using a bare <input type="date">
+   *  and getting Chromium's white system calendar in the middle of a dark app.
+   *  The popover is identical either way. */
+  compact?: boolean;
+  /** Shown on the chip when nothing is picked yet. */
+  compactLabel?: string;
 }
 
-const MONTHS = [
+const MONTHS_EN = [
   "January","February","March","April","May","June",
   "July","August","September","October","November","December",
 ];
-const DAYS = ["Su","Mo","Tu","We","Th","Fr","Sa"];
+const MONTHS_TH = [
+  "มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน",
+  "กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม",
+];
+const DAYS_EN = ["Su","Mo","Tu","We","Th","Fr","Sa"];
+const DAYS_TH = ["อา","จ","อ","พ","พฤ","ศ","ส"];
+
+// The rest of the app shows Buddhist years in Thai, so this has to as well —
+// a calendar that disagrees with the list beside it is worse than no calendar.
+const isThai = () => getLang() === "th";
+const MONTHS = new Proxy([] as string[], {
+  get: (_t, prop) => (isThai() ? MONTHS_TH : MONTHS_EN)[prop as any],
+});
+const DAYS = new Proxy([] as string[], {
+  get: (_t, prop) => (isThai() ? DAYS_TH : DAYS_EN)[prop as any],
+});
 
 function parseDate(val: string): Date | null {
   if (!val) return null;
@@ -28,12 +53,20 @@ function toDateStr(d: Date): string {
 function formatDisplay(val: string): string {
   const d = parseDate(val);
   if (!d) return "";
+  if (isThai()) {
+    return d.toLocaleDateString("th-TH-u-ca-buddhist", {
+      day: "numeric", month: "short", year: "numeric",
+    });
+  }
   return d.toLocaleDateString("en-US", { day: "numeric", month: "short", year: "numeric" });
 }
 
-export default function DatePicker({ value, onChange, placeholder = "Pick a date", label }: Props) {
+export default function DatePicker({ value, onChange, placeholder = "Pick a date", label, compact = false, compactLabel }: Props) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  // w-72 wide; the panel is header + year row + six week rows + footer.
+  const place = usePlacement(open, ref, panelRef, { height: 340, width: 288 });
 
   const today = new Date();
   today.setHours(0,0,0,0);
@@ -111,19 +144,34 @@ export default function DatePicker({ value, onChange, placeholder = "Pick a date
   return (
     <div ref={ref} className="relative">
       {/* Trigger */}
-      <button
-        type="button"
-        onClick={() => setOpen(o => !o)}
-        className={`w-full flex items-center gap-3 bg-white/5 border rounded-xl px-4 py-3 text-white text-sm transition-all ${
-          open ? "border-purple-500" : "border-white/10 hover:border-white/20"
-        }`}
-      >
-        <Calendar size={15} className="text-white/40 flex-shrink-0" />
-        <span className={`font-medium tracking-wide flex-1 text-left ${displayStr ? "text-white" : "text-white/30"}`}>
-          {displayStr || placeholder}
-        </span>
-        {label && <span className="ml-auto text-white/30 text-xs">{label}</span>}
-      </button>
+      {compact ? (
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          className={`text-[11px] rounded-full px-3 py-1 border flex items-center gap-1 whitespace-nowrap transition-colors ${
+            open || displayStr
+              ? "border-white/30 text-white"
+              : "border-white/10 text-white/50 hover:text-white"
+          }`}
+        >
+          <Calendar size={11} />
+          {displayStr || compactLabel || placeholder}
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          className={`w-full flex items-center gap-3 bg-white/5 border rounded-xl px-4 py-3 text-white text-sm transition-all ${
+            open ? "border-purple-500" : "border-white/10 hover:border-white/20"
+          }`}
+        >
+          <Calendar size={15} className="text-white/40 flex-shrink-0" />
+          <span className={`font-medium tracking-wide flex-1 text-left ${displayStr ? "text-white" : "text-white/30"}`}>
+            {displayStr || placeholder}
+          </span>
+          {label && <span className="ml-auto text-white/30 text-xs">{label}</span>}
+        </button>
+      )}
 
       {/* Dropdown calendar */}
       <AnimatePresence>
@@ -133,7 +181,10 @@ export default function DatePicker({ value, onChange, placeholder = "Pick a date
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -6, scale: 0.98 }}
             transition={{ duration: 0.12 }}
-            className="absolute z-50 top-full mt-2 left-0 bg-gray-900 border border-white/10 rounded-2xl p-4 shadow-2xl shadow-black/70 w-72"
+            ref={panelRef}
+            className={`absolute z-50 bg-gray-900 border border-white/10 rounded-2xl p-4 shadow-2xl shadow-black/70 w-72 max-h-[85vh] overflow-y-auto ${
+              place.up ? "bottom-full mb-2" : "top-full mt-2"
+            } ${place.right ? "right-0" : "left-0"}`}
           >
             {/* Month/year header */}
             <div className="flex items-center justify-between mb-3">
@@ -154,7 +205,7 @@ export default function DatePicker({ value, onChange, placeholder = "Pick a date
                 }}
                 className="text-white font-semibold text-sm hover:text-purple-400 transition-colors px-2"
               >
-                {MONTHS[viewMonth]} {viewYear}
+                {MONTHS[viewMonth]} {isThai() ? viewYear + 543 : viewYear}
               </button>
 
               <button

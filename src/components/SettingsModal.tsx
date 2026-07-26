@@ -14,6 +14,10 @@ import {
   getDailyRequestCap, setDailyRequestCap, getUsageToday,
   type ProviderId, type DailyUsage,
 } from "../lib/aiProviders";
+import {
+  summariseEscapes, getLearnedPresets, forgetPreset, cacheSize, merchantCount,
+  type EscapeSummary, type LearnedPreset,
+} from "../lib/aiMemory";
 import { Toast } from "./ToastCard";
 import { paletteFromVideo } from "../lib/videoPalette";
 
@@ -218,6 +222,15 @@ export default function SettingsModal({ open, onClose }: Props) {
   const [aiCap, setAiCap]           = useState<string>(() => String(getDailyRequestCap()));
   const [aiUsage, setAiUsage]       = useState<DailyUsage>(() => getUsageToday());
   const [aiSaved, setAiSaved]       = useState(false);
+  const [escapes, setEscapes]       = useState<EscapeSummary[]>([]);
+  const [learned, setLearned]       = useState<LearnedPreset[]>([]);
+  const [memStats, setMemStats]     = useState({ cache: 0, shops: 0 });
+
+  const refreshMemory = () => {
+    setEscapes(summariseEscapes(7).slice(0, 6));
+    setLearned(getLearnedPresets());
+    setMemStats({ cache: cacheSize(), shops: merchantCount() });
+  };
 
   // Switching provider pulls that provider's own saved key and its default
   // model, so going Gemini → OpenAI → Gemini does not lose either key.
@@ -282,6 +295,7 @@ export default function SettingsModal({ open, onClose }: Props) {
       setAiKey(getApiKey());
       setAiCap(String(getDailyRequestCap()));
       setAiUsage(getUsageToday());
+      refreshMemory();
       // Load wallpaper settings from DB
       setWpBusy(false); // clear any stuck busy state from a previous session
       getSetting("wallpaper_path").then(p => { if (p) setWpPath(p); }).catch(() => {});
@@ -1150,6 +1164,56 @@ Rules:
                       className="w-full py-2.5 theme-btn rounded-xl text-white text-sm font-semibold">
                       {t("settings.done")}
                     </button>
+
+                    {/* What the app has stopped needing to ask about. The point
+                        of this panel is that these numbers should climb while
+                        the request count stays flat. */}
+                    <div className="border-t border-white/8 pt-3 space-y-2">
+                      <p className="text-white/50 text-xs font-semibold">{t("ai.memory")}</p>
+                      <div className="grid grid-cols-3 gap-1.5 text-center">
+                        {[
+                          { n: learned.length,   l: t("ai.learnedCount") },
+                          { n: memStats.cache,   l: t("ai.cachedCount") },
+                          { n: memStats.shops,   l: t("ai.merchants") },
+                        ].map((x, i) => (
+                          <div key={i} className="rounded-lg bg-white/5 py-1.5">
+                            <p className="text-white text-sm font-bold leading-none">{x.n}</p>
+                            <p className="text-white/35 text-[9px] mt-0.5">{x.l}</p>
+                          </div>
+                        ))}
+                      </div>
+
+                      {learned.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {learned.slice(-8).map(p => (
+                            <span key={p.key}
+                              className="text-[10px] rounded-full border border-white/10 text-white/50 px-2 py-0.5 flex items-center gap-1">
+                              {p.key}
+                              <button
+                                onClick={() => { forgetPreset(p.key); refreshMemory(); }}
+                                title={t("ai.forget")}
+                                className="text-white/25 hover:text-red-400">×</button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      <p className="text-white/40 text-[11px] pt-1">{t("ai.escapes")}</p>
+                      {escapes.length === 0 ? (
+                        <p className="text-white/25 text-[10px]">{t("ai.noEscapes")}</p>
+                      ) : (
+                        <div className="space-y-1">
+                          {escapes.map(e => (
+                            <div key={e.pattern} className="flex items-baseline gap-2 text-[10px]">
+                              <span className="text-white/60 flex-1 min-w-0 truncate">{e.example}</span>
+                              <span className="text-white/30 shrink-0">{e.count}×</span>
+                              <span className="text-white/30 shrink-0 w-14 text-right">{e.tokens}tk</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <p className="text-white/25 text-[10px] leading-relaxed">{t("ai.escapesHint")}</p>
+                    </div>
                   </div>
 
                   <p className="text-white/30 text-xs text-center">

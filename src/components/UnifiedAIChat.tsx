@@ -18,7 +18,7 @@ import {
 import {
   aiLogExpense, aiDeleteExpenseByKeyword, aiEditExpenseByKeyword,
   getSpendingSummary, getTodayTotal, getMonthTotal,
-  EXPENSE_CATEGORIES, ExpenseCategory,
+  loadCategories, getCategoryList, type CategoryRow, ExpenseCategory,
 } from "../lib/financeDatabase";
 import {
   processMessage, getGeminiKey, setGeminiKey, isOnline,
@@ -26,6 +26,7 @@ import {
   type ContextKind, type TokenUsage,
 } from "../lib/geminiService";
 import { getUsageToday, type DailyUsage } from "../lib/aiProviders";
+import { learnPreset } from "../lib/aiMemory";
 import { t } from "../lib/i18n";
 
 interface Props {
@@ -41,7 +42,7 @@ interface ChatMessage {
   role: "user" | "ai";
   text: string;
   domain?: Domain;
-  source?: "gemini" | "local"; // shows which backend answered
+  source?: "gemini" | "local" | "cache"; // shows which backend answered
 }
 
 const fmt = (n: number) => `฿${n.toLocaleString("th-TH")}`;
@@ -59,6 +60,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
   // Real token count of the last Gemini call, shown in the footer so the cost
   // of a conversation is something you can watch rather than worry about.
   const [lastUsage, setLastUsage] = useState<TokenUsage | null>(null);
+  const [categories, setCategories] = useState<CategoryRow[]>(() => getCategoryList());
   const [today, setToday] = useState<DailyUsage>(() => getUsageToday());
   const [habits, setHabits] = useState(getTopHabits(3));
   const [online, setOnline] = useState(true);
@@ -116,6 +118,9 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
       setTimeout(() => inputRef.current?.focus(), 100);
       // Check connectivity
       isOnline().then(setOnline);
+      // The category set is user-editable now, so re-read it each time the
+      // panel opens rather than trusting a snapshot from app start.
+      loadCategories().then(() => setCategories(getCategoryList())).catch(() => {});
     }
   }, [open]);
 
@@ -180,6 +185,10 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
           }
 
           if (kind !== "task") {
+            parts.push(
+              `Expense categories the user actually has (return one of these keys): ` +
+              getCategoryList().map(c => `${c.key} (${c.label})`).join(", "),
+            );
             const [todayAmt, monthAmt, summary] = await Promise.all([
               getTodayTotal(today), getMonthTotal(month), getSpendingSummary(),
             ]);
@@ -342,7 +351,14 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
     isConfirming.current = true;
     try {
       if (pendingTask.type === "add" && pendingTask.tasks) {
-        for (const task of pendingTask.tasks) await createTask(task);
+        for (const task of pendingTask.tasks) {
+          await createTask(task);
+          // A confirmation is the user saying "yes, that reading was right".
+          // That is the only reliable training signal this app will ever get,
+          // so it is kept: the subject becomes a preset and the same game is
+          // recognised offline from then on, whatever the wording next time.
+          learnPreset(task);
+        }
       } else if (pendingTask.type === "delete" && pendingTask.targetName) {
         await deleteTaskByName(pendingTask.targetName);
       } else if (pendingTask.type === "edit_time" && pendingTask.targetName && pendingTask.newTime) {
@@ -605,7 +621,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
                   <div className="flex items-start gap-2">
                     <span className="text-white/30 text-xs w-14 flex-shrink-0 pt-1.5">Category</span>
                     <div className="flex flex-wrap gap-1 flex-1">
-                      {EXPENSE_CATEGORIES.map(cat => (
+                      {categories.map((cat: CategoryRow) => (
                         <button key={cat.key}
                           onClick={() => setPendingFinance(p => p ? { ...p, category: cat.key } : p)}
                           className={`px-2 py-1 rounded-lg text-xs font-semibold transition-all flex items-center gap-1 ${

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowLeft, Plus, Trash2, Target, Edit3,
-  ChevronLeft, ChevronRight, X, Check, AlertTriangle, CalendarDays, BarChart3,
+  ChevronLeft, ChevronRight, X, Check, AlertTriangle, CalendarDays, BarChart3, ScanLine,
   TrendingUp, TrendingDown, Wallet,
 } from "lucide-react";
 import {
@@ -10,10 +10,16 @@ import {
   getMonthTotal, getTodayTotal, setBudget, getBudgetsForMonth,
   createGoal, addToGoal, getGoals, deleteExpense, deleteGoal, updateExpense,
   getRecentCategories,
-  EXPENSE_CATEGORIES, Expense, Budget, SavingGoal, ExpenseCategory,
+  loadCategories, getCategoryList, getAllCategoriesCached, lookupCategory,
+  createCategory, updateCategory, setCategoryHidden, moveCategory, type CategoryRow,
+  Expense, Budget, SavingGoal, ExpenseCategory,
 } from "../lib/financeDatabase";
 import { getMonthIncome, getIncomeByMonth, addIncome, deleteIncome } from "../lib/database";
 import { t, getLang } from "../lib/i18n";
+import DatePicker from "./DatePicker";
+import { scanImage, getLastRawReply, type ScannedItem } from "../lib/slipScanner";
+import { slipAlreadyRecorded, looksLikeDuplicate } from "../lib/financeDatabase";
+import { learnMerchant, recallMerchant } from "../lib/aiMemory";
 import { todayBangkok, monthBangkok } from "../lib/dateUtil";
 
 interface Props {
@@ -80,37 +86,10 @@ function SparkBars({ month, data }: { month: string; data: { date: string; total
   );
 }
 
-// ─── Date field ───────────────────────────────────────────────────────────────
-// A bare <input type="date"> styled to look like a chip does NOT open the
-// calendar when clicked — Chromium only opens it from the native glyph, which is
-// invisible here. showPicker() is the supported way to open it from anything
-// else, so the whole chip becomes the trigger.
-function DateField({ value, onChange, children, className }: {
-  value: string;
-  onChange: (v: string) => void;
-  children: React.ReactNode;
-  className?: string;
-}) {
-  const ref = useRef<HTMLInputElement>(null);
-  const open = () => {
-    const el = ref.current as (HTMLInputElement & { showPicker?: () => void }) | null;
-    if (!el) return;
-    try {
-      if (typeof el.showPicker === "function") { el.showPicker(); return; }
-    } catch { /* not user-activated, fall through */ }
-    el.focus();
-    el.click();
-  };
-  return (
-    <div className="relative">
-      <input ref={ref} type="date" value={value}
-        onChange={e => onChange(e.target.value)}
-        onClick={open}
-        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
-      <div className={className}>{children}</div>
-    </div>
-  );
-}
+// The native date field is gone from this screen. Chromium's own calendar is
+// drawn by the system: white panel, blue selection, and no CSS reaches inside
+// it. The app already had a themed DatePicker that the task forms use, so the
+// finance sheets use the same one, in its compact chip form.
 
 // ─── Month calendar ───────────────────────────────────────────────────────────
 // Built entirely from the per-day totals already loaded for the month, so this
@@ -184,6 +163,18 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
   const [budgets, setBudgets]       = useState<Budget[]>([]);
   const [goals, setGoals]           = useState<SavingGoal[]>([]);
   const [recentCats, setRecentCats] = useState<string[]>([]);
+  // Categories come from the database now, so they are state like anything else
+  // the user can change rather than a constant imported at the top of the file.
+  const [categories, setCategories] = useState<CategoryRow[]>(() => getCategoryList());
+  const [showCats, setShowCats] = useState(false);
+  const [allCats, setAllCats] = useState<CategoryRow[]>([]);
+  const [newCat, setNewCat] = useState({ label: "", emoji: "📦" });
+
+  const refreshCats = async () => {
+    await loadCategories();
+    setCategories(getCategoryList());
+    setAllCats(getAllCategoriesCached());
+  };
   const [loading, setLoading]       = useState(true);
 
   // How the month is being looked at. All three modes read data that is already
@@ -205,7 +196,103 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
   const [showAddExpense, setShowAddExpense] = useState(false);
   const [expForm, setExpForm] = useState(() => ({
     amount: "", category: "food" as ExpenseCategory, note: "", date: todayBangkok(),
+    slipRef: null as string | null, merchant: null as string | null,
   }));
+  const slipRef = useRef<HTMLInputElement>(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanMsg, setScanMsg] = useState("");
+
+  /** A row read out of an image, waiting to be confirmed. */
+  interface ReviewRow extends ScannedItem {
+    id: number;
+    keep: boolean;
+    maybeDup: boolean;
+  }
+  const [review, setReview] = useState<ReviewRow[] | null>(null);
+
+  // One image can be a single slip or eight rows of a Shopee list, so the
+  // result is always reviewed rather than saved. The model misreads a smudged
+  // digit occasionally, and eight wrong expenses appearing unannounced is far
+  // worse than eight that took one extra tap.
+  const handleImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setScanning(true);
+    setScanMsg("");
+    try {
+      const result = await scanImage(file, categories.map(c => ({ key: c.key, label: c.label })));
+      if (result.items.length === 0) {
+        setScanMsg(t("finance.scanNone"));
+        return;
+      }
+
+      const rows: ReviewRow[] = [];
+      for (let i = 0; i < result.items.length; i++) {
+        const it = result.items[i];
+        // Two kinds of duplicate. A reference match is exact, so that row is
+        // switched off. A same-day same-amount match is only a hint — buying
+        // the same coffee twice in one day is real — so it is flagged and left
+        // for the user to judge.
+        const exact = it.reference ? await slipAlreadyRecorded(it.reference) : false;
+        const soft = !exact && it.date && it.amount
+          ? await looksLikeDuplicate(it.date, it.amount)
+          : false;
+        rows.push({
+          ...it,
+          id: i,
+          // A top-up moves money between the user's own accounts. Counting it
+          // as spending double-counts the same baht when it is finally spent.
+          keep: !exact && !soft && it.kind !== "topup",
+          maybeDup: exact || soft,
+          // A shop categorised before beats the model's guess for this image.
+          category: (it.merchant && recallMerchant(it.merchant)) || it.category,
+        });
+      }
+      setReview(rows);
+      setScanMsg(
+        t("finance.scanFound", { n: String(rows.length) }) +
+        (result.truncated ? ` · ${t("finance.scanPartial")}` : ""),
+      );
+    } catch (err: any) {
+      const code = String(err?.message ?? "");
+      // Showing what actually came back beats a generic failure: a wrong key, a
+      // refused request and a model answering in prose all look identical
+      // otherwise, and each needs a different fix.
+      const raw = getLastRawReply();
+      setScanMsg(
+        code.includes("NO_KEY") ? t("finance.scanNoKey")
+        : code.includes("DAILY_CAP") ? t("finance.scanCapped")
+        : code.includes("BAD_JSON") && raw ? `${t("finance.scanRaw")} ${raw.slice(0, 120)}`
+        : `${t("finance.scanFailed")} (${code.replace("AI_ERROR: ", "").slice(0, 90)})`,
+      );
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const saveReviewed = async () => {
+    if (!review) return;
+    for (const row of review) {
+      if (!row.keep || row.amount == null) continue;
+      await addExpense({
+        amount: row.amount,
+        // "other", not the most recently used category. Falling back to that
+        // filed a row the model could not classify under whatever happened to
+        // be at the front of the picker, which is a wrong number in a real
+        // category rather than an honest unknown in a bucket meant for them.
+        category: (row.category ?? "other") as ExpenseCategory,
+        note: row.merchant ?? "",
+        date: row.date ?? todayDate,
+        slipRef: row.reference,
+      });
+      if (row.merchant && row.category) learnMerchant(row.merchant, row.category);
+    }
+    setReview(null);
+    setScanMsg("");
+    setShowAddExpense(false);
+    load();
+  };
 
   const [showAddGoal, setShowAddGoal] = useState(false);
   const [goalForm, setGoalForm] = useState({ name: "", target: "", deadline: "", emoji: "🎯" });
@@ -253,6 +340,8 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
         getIncomeByMonth(currentMonth),
         getMonthTotal(prev),
       ]);
+      await loadCategories();
+      setCategories(getCategoryList());
       setExpenses(exp);
       setCatTotals(cats);
       setDailyData(daily);
@@ -299,11 +388,14 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
   };
 
   const openAddExpense = () => {
+    setScanMsg("");
     setExpForm({
       amount: "",
       category: (orderedCats[0]?.key ?? "food") as ExpenseCategory,
       note: "",
       date: todayDate,
+      slipRef: null,
+      merchant: null,
     });
     setShowAddExpense(true);
   };
@@ -311,8 +403,15 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
   const handleAddExpense = async () => {
     const amt = parseFloat(expForm.amount);
     if (!amt || amt <= 0) return;
-    await addExpense({ amount: amt, category: expForm.category, note: expForm.note, date: expForm.date });
-    setExpForm({ amount: "", category: "food", note: "", date: todayDate });
+    await addExpense({
+      amount: amt, category: expForm.category, note: expForm.note,
+      date: expForm.date, slipRef: expForm.slipRef,
+    });
+    // Whatever category it was saved under is the right one for that shop,
+    // including when the user overrode the model's guess.
+    if (expForm.merchant) learnMerchant(expForm.merchant, expForm.category);
+    setExpForm({ amount: "", category: "food", note: "", date: todayDate, slipRef: null, merchant: null });
+    setScanMsg("");
     setShowAddExpense(false);
     load();
   };
@@ -357,12 +456,12 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
   // Categories most recently used first, then the rest in their declared order.
   const orderedCats = useMemo(() => {
     const rank = new Map(recentCats.map((c, i) => [c, i]));
-    return [...EXPENSE_CATEGORIES].sort((a, b) => {
+    return [...categories].sort((a: CategoryRow, b: CategoryRow) => {
       const ra = rank.has(a.key) ? rank.get(a.key)! : 999;
       const rb = rank.has(b.key) ? rank.get(b.key)! : 999;
       return ra - rb;
     });
-  }, [recentCats]);
+  }, [recentCats, categories]);
 
   const pickDay = (iso: string) => {
     setSelectedDay(iso);
@@ -423,7 +522,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
   }, [currentMonth, todayDate, monthTotal, prevMonthTotal]);
 
   const catRows = useMemo(() => {
-    const rows = EXPENSE_CATEGORIES.map(cat => {
+    const rows = categories.map((cat: CategoryRow) => {
       const spent = catTotals.find(c => c.category === cat.key)?.total ?? 0;
       const budget = budgets.find(b => b.category === cat.key)?.limit_amount ?? null;
       const shareOfSpend = monthTotal > 0 ? spent / monthTotal : 0;
@@ -440,7 +539,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
       if (b.spent !== a.spent) return b.spent - a.spent;
       return (b.budget ?? 0) - (a.budget ?? 0);
     });
-  }, [catTotals, budgets, monthTotal]);
+  }, [catTotals, budgets, monthTotal, categories]);
 
   // Categories with nothing in them are kept out of the way until asked for.
   // Nine always-visible rows were pushing goals and transactions off screen.
@@ -671,12 +770,18 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                     ))}
                   </div>
                 )}
-                {(hiddenCatCount > 0 || showAllCats) && (
-                  <button onClick={() => setShowAllCats(v => !v)}
-                    className="text-white/30 hover:text-white text-[10px] transition-colors mt-2">
-                    {showAllCats ? t("finance.hideCats") : `${t("finance.showAllCats")} (+${hiddenCatCount})`}
+                <div className="flex items-center gap-3 mt-2">
+                  {(hiddenCatCount > 0 || showAllCats) && (
+                    <button onClick={() => setShowAllCats(v => !v)}
+                      className="text-white/30 hover:text-white text-[10px] transition-colors">
+                      {showAllCats ? t("finance.hideCats") : `${t("finance.showAllCats")} (+${hiddenCatCount})`}
+                    </button>
+                  )}
+                  <button onClick={async () => { await refreshCats(); setShowCats(true); }}
+                    className="text-white/30 hover:text-white text-[10px] transition-colors ml-auto">
+                    {t("finance.manageCats")}
                   </button>
-                )}
+                </div>
               </div>
 
               {/* Daily trend across the whole month */}
@@ -739,7 +844,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
               <div className="space-y-0.5">
                 {listRows.map(r => {
                   const cat = r.kind === "expense"
-                    ? EXPENSE_CATEGORIES.find(c => c.key === r.category)
+                    ? lookupCategory(r.category)
                     : undefined;
                   return (
                     <div key={`${r.kind}-${r.id}`}
@@ -800,6 +905,93 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                 <button onClick={() => setShowAddExpense(false)} className="text-white/40 hover:text-white"><X size={16} /></button>
               </div>
 
+              <button onClick={() => slipRef.current?.click()} disabled={scanning}
+                className="w-full mb-3 py-2 rounded-xl border border-white/12 text-white/70 text-xs font-semibold flex items-center justify-center gap-2 hover:text-white hover:border-white/25 transition-colors disabled:opacity-40">
+                <ScanLine size={14} />
+                {scanning ? t("finance.scanning") : t("finance.scanImage")}
+              </button>
+              <input ref={slipRef} type="file" accept="image/*" className="hidden" onChange={handleImage} />
+              {scanMsg && <p className="text-amber-300/80 text-[11px] mb-2 px-1">{scanMsg}</p>}
+
+              {/* Review list. Shown instead of the manual form when an image
+                  produced rows: a Shopee list gives eight of them, and typing
+                  those in by hand is exactly what this feature exists to
+                  avoid. Rows the app is unsure about arrive unticked. */}
+              {review && (
+                <div className="mb-3">
+                  <div className="flex items-center gap-2 mb-2">
+                    <button onClick={() => setReview(r => r && r.map(x => ({ ...x, keep: true })))}
+                      className="text-white/40 hover:text-white text-[10px]">{t("finance.selectAll")}</button>
+                    <button onClick={() => setReview(r => r && r.map(x => ({ ...x, keep: false })))}
+                      className="text-white/40 hover:text-white text-[10px]">{t("finance.selectNone")}</button>
+                    <button onClick={() => { setReview(null); setScanMsg(""); }}
+                      className="text-white/30 hover:text-white text-[10px] ml-auto">{t("finance.editCancel")}</button>
+                  </div>
+
+                  <div className="max-h-52 overflow-y-auto finance-scroll space-y-1.5 pr-1">
+                    {review.map(row => (
+                      <div key={row.id}
+                        className={`rounded-xl border p-2 ${row.keep ? "border-white/15" : "border-white/6 opacity-50"}`}>
+                        <div className="flex items-center gap-2">
+                          <input type="checkbox" checked={row.keep}
+                            onChange={e => setReview(r => r && r.map(x => x.id === row.id ? { ...x, keep: e.target.checked } : x))}
+                            className="accent-purple-500" />
+                          {/* Editable, because a misread is the normal case, not
+                              the exception. Reading a wrong value and being
+                              unable to correct it is worse than typing it. */}
+                          <input value={row.merchant ?? ""}
+                            onChange={e => setReview(r => r && r.map(x => x.id === row.id ? { ...x, merchant: e.target.value } : x))}
+                            placeholder={t("finance.notePH")}
+                            className="flex-1 min-w-0 bg-transparent border-b border-white/10 text-white text-xs px-0.5 py-0.5 placeholder-white/25 focus:outline-none focus:border-white/40" />
+                          {/* The symbol sits outside the input so the field
+                              stays a real number input: typing "฿" into one
+                              would silently clear it. */}
+                          <div className="flex items-baseline gap-0.5 border-b border-white/10 focus-within:border-white/40">
+                            <span className="text-white/40 text-xs">฿</span>
+                            <input type="number" inputMode="decimal" value={row.amount ?? ""}
+                              onChange={e => setReview(r => r && r.map(x => x.id === row.id ? { ...x, amount: parseFloat(e.target.value) || null } : x))}
+                              className="w-16 bg-transparent text-white text-xs font-semibold text-right px-0.5 py-0.5 focus:outline-none" />
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 mt-1.5 pl-6">
+                          <DatePicker compact
+                            value={row.date ?? ""}
+                            onChange={v => setReview(r => r && r.map(x => x.id === row.id ? { ...x, date: v } : x))}
+                            compactLabel={t("finance.noDate")} />
+                          {row.maybeDup && (
+                            <span className="text-amber-300/80 text-[10px]">{t("finance.maybeDup")}</span>
+                          )}
+                          {row.kind === "topup" && (
+                            <span className="text-amber-300/80 text-[10px]">{t("finance.scanTopup")}</span>
+                          )}
+                          <select
+                            value={row.category ?? ""}
+                            onChange={e => setReview(r => r && r.map(x => x.id === row.id ? { ...x, category: e.target.value || null } : x))}
+                            className={`ml-auto bg-white/5 border rounded-md text-[10px] px-1 py-0.5 focus:outline-none ${
+                              row.category ? "border-white/10 text-white/70" : "border-amber-400/40 text-amber-300"
+                            }`}>
+                            <option value="" className="bg-gray-900">{t("finance.pickCat")}</option>
+                            {categories.map(c => (
+                              <option key={c.key} value={c.key} className="bg-gray-900">{c.emoji} {c.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <button onClick={saveReviewed}
+                    disabled={!review.some(r => r.keep)}
+                    className="w-full mt-2 py-2.5 theme-btn rounded-xl text-white text-sm font-semibold disabled:opacity-40">
+                    {t("finance.addSelected")} ({review.filter(r => r.keep).length})
+                  </button>
+                </div>
+              )}
+
+              {/* The manual form is hidden while a scan is being reviewed. Two
+                  amount fields on screen at once, only one of which the save
+                  button reads, is a trap. */}
+              {!review && (<>
               {/* Amount is the only thing that always has to be typed, so it is
                   focused on open and given the whole first line. */}
               <div className="flex items-baseline gap-2 border-b border-white/15 pb-2 mb-3">
@@ -851,24 +1043,85 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                     {opt.label}
                   </button>
                 ))}
-                <DateField value={expForm.date}
-                  onChange={v => setExpForm(f => ({ ...f, date: v }))}
-                  className={`text-[11px] rounded-full px-3 py-1 border flex items-center gap-1 ${
-                    expForm.date !== todayDate && expForm.date !== shiftDay(todayDate, -1)
-                      ? "border-white/30 text-white"
-                      : "border-white/10 text-white/50"
-                  }`}>
-                  <CalendarDays size={11} />
-                  {expForm.date !== todayDate && expForm.date !== shiftDay(todayDate, -1)
-                    ? toThaiDisplay(expForm.date)
-                    : t("finance.pickDate")}
-                </DateField>
+                <DatePicker compact
+                  value={expForm.date !== todayDate && expForm.date !== shiftDay(todayDate, -1) ? expForm.date : ""}
+                  onChange={v => v && setExpForm(f => ({ ...f, date: v }))}
+                  compactLabel={t("finance.pickDate")} />
               </div>
 
               <button onClick={handleAddExpense}
                 className="w-full py-2.5 theme-btn rounded-xl text-white text-sm font-semibold flex items-center justify-center gap-2">
                 <Plus size={15} /> {t("finance.saveTxBtn")}
               </button>
+              </>)}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Manage categories ────────────────────────────────────────────── */}
+      <AnimatePresence>
+        {showCats && isVisible && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            onClick={() => setShowCats(false)}>
+            <motion.div initial={{ y: 24, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 24, opacity: 0 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-gray-900 border border-white/10 rounded-2xl p-4 w-full max-w-md max-h-[80vh] flex flex-col">
+
+              <div className="flex items-center justify-between mb-3 shrink-0">
+                <h3 className="text-white font-semibold text-sm">{t("finance.manageCats")}</h3>
+                <button onClick={() => setShowCats(false)} className="text-white/40 hover:text-white"><X size={16} /></button>
+              </div>
+
+              <div className="flex-1 min-h-0 overflow-y-auto finance-scroll space-y-1.5 pr-1">
+                {allCats.map((c, i) => (
+                  <div key={c.id} className={`flex items-center gap-1.5 ${c.is_hidden ? "opacity-40" : ""}`}>
+                    <input value={c.emoji}
+                      onChange={e => updateCategory(c.id, { emoji: e.target.value.slice(0, 2) }).then(refreshCats)}
+                      className="w-9 bg-white/5 border border-white/10 rounded-lg px-1 py-1.5 text-center text-sm focus:outline-none focus:border-white/30" />
+                    <input defaultValue={c.label}
+                      onBlur={e => { if (e.target.value !== c.label) updateCategory(c.id, { label: e.target.value }).then(refreshCats); }}
+                      className="flex-1 min-w-0 bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-white text-xs focus:outline-none focus:border-white/30" />
+                    <button onClick={() => moveCategory(c.id, -1).then(refreshCats)} disabled={i === 0}
+                      className="text-white/30 hover:text-white disabled:opacity-20 p-1"><ChevronLeft size={13} className="rotate-90" /></button>
+                    <button onClick={() => moveCategory(c.id, 1).then(refreshCats)} disabled={i === allCats.length - 1}
+                      className="text-white/30 hover:text-white disabled:opacity-20 p-1"><ChevronRight size={13} className="rotate-90" /></button>
+                    <button onClick={() => setCategoryHidden(c.id, !c.is_hidden).then(refreshCats)}
+                      className="text-white/30 hover:text-white text-[10px] px-1.5 whitespace-nowrap">
+                      {c.is_hidden ? t("finance.showCat") : t("finance.hideCat")}
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div className="border-t border-white/8 pt-3 mt-3 shrink-0">
+                <div className="flex items-center gap-1.5">
+                  <input value={newCat.emoji}
+                    onChange={e => setNewCat(v => ({ ...v, emoji: e.target.value.slice(0, 2) }))}
+                    className="w-9 bg-white/5 border border-white/10 rounded-lg px-1 py-1.5 text-center text-sm focus:outline-none focus:border-white/30" />
+                  <input value={newCat.label}
+                    onChange={e => setNewCat(v => ({ ...v, label: e.target.value }))}
+                    onKeyDown={e => {
+                      if (e.key === "Enter" && newCat.label.trim()) {
+                        createCategory(newCat.label, newCat.emoji)
+                          .then(refreshCats).then(() => setNewCat({ label: "", emoji: "📦" }));
+                      }
+                    }}
+                    placeholder={t("finance.catNamePH")}
+                    className="flex-1 min-w-0 bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-white text-xs placeholder-white/25 focus:outline-none focus:border-white/30" />
+                  <button
+                    onClick={() => {
+                      if (!newCat.label.trim()) return;
+                      createCategory(newCat.label, newCat.emoji)
+                        .then(refreshCats).then(() => setNewCat({ label: "", emoji: "📦" }));
+                    }}
+                    className="theme-btn text-white text-xs rounded-lg px-3 py-1.5 flex items-center gap-1">
+                    <Plus size={12} /> {t("finance.newCat")}
+                  </button>
+                </div>
+                <p className="text-white/25 text-[10px] mt-2 leading-relaxed">{t("finance.catHint")}</p>
+              </div>
             </motion.div>
           </motion.div>
         )}
@@ -926,18 +1179,10 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                     {opt.label}
                   </button>
                 ))}
-                <DateField value={incForm.date}
-                  onChange={v => setIncForm(f => ({ ...f, date: v }))}
-                  className={`text-[11px] rounded-full px-3 py-1 border flex items-center gap-1 ${
-                    incForm.date !== todayDate && incForm.date !== shiftDay(todayDate, -1)
-                      ? "border-white/30 text-white"
-                      : "border-white/10 text-white/50"
-                  }`}>
-                  <CalendarDays size={11} />
-                  {incForm.date !== todayDate && incForm.date !== shiftDay(todayDate, -1)
-                    ? toThaiDisplay(incForm.date)
-                    : t("finance.pickDate")}
-                </DateField>
+                <DatePicker compact
+                  value={incForm.date !== todayDate && incForm.date !== shiftDay(todayDate, -1) ? incForm.date : ""}
+                  onChange={v => v && setIncForm(f => ({ ...f, date: v }))}
+                  compactLabel={t("finance.pickDate")} />
               </div>
 
               <button onClick={handleAddIncome}
@@ -960,7 +1205,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
               className="bg-gray-900 border border-white/10 rounded-2xl p-4 w-full max-w-xs">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-white font-semibold text-sm">
-                  {t("finance.budgetFor")} {EXPENSE_CATEGORIES.find(c => c.key === editBudget.cat)?.label}
+                  {t("finance.budgetFor")} {lookupCategory(editBudget.cat).label}
                 </h3>
                 <button onClick={() => setEditBudget(null)} className="text-white/40 hover:text-white"><X size={16} /></button>
               </div>
@@ -1006,12 +1251,10 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                   onChange={e => setGoalForm(f => ({ ...f, target: e.target.value }))}
                   placeholder={t("finance.goalAmtPH")}
                   className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white text-xs placeholder-white/25 focus:outline-none focus:border-white/30" />
-                <DateField value={goalForm.deadline}
+                <DatePicker
+                  value={goalForm.deadline}
                   onChange={v => setGoalForm(f => ({ ...f, deadline: v }))}
-                  className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white text-xs flex items-center gap-2">
-                  <CalendarDays size={12} className="text-white/40" />
-                  {goalForm.deadline ? toThaiDisplay(goalForm.deadline) : t("finance.goalDeadlinePH")}
-                </DateField>
+                  placeholder={t("finance.goalDeadlinePH")} />
                 <button onClick={handleAddGoal}
                   className="w-full py-2.5 theme-btn rounded-xl text-white text-sm font-semibold flex items-center justify-center gap-2">
                   <Target size={14} /> {t("finance.createGoalBtn")}

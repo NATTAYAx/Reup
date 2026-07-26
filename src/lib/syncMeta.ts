@@ -68,6 +68,9 @@ export const SYNC_TABLES: SyncTable[] = [
   { name: "expenses",     needsDeleted: true,  hasCreatedAt: true  },
   { name: "budgets",      needsDeleted: false, hasCreatedAt: false },
   { name: "saving_goals", needsDeleted: true,  hasCreatedAt: true  },
+  // Hidden is not deleted, so the tombstone here is only for a category a
+  // future version might truly remove. It costs one column to have it ready.
+  { name: "expense_categories", needsDeleted: true, hasCreatedAt: false },
 ];
 
 /** ALTER TABLE ADD COLUMN throws if the column is already there. That is the

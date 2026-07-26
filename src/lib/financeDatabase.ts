@@ -35,28 +35,194 @@ export interface SavingGoal {
   created_at: string;
 }
 
-export type ExpenseCategory =
-  | "food"
-  | "transport"
-  | "entertainment"
-  | "shopping"
-  | "health"
-  | "education"
-  | "bills"
-  | "game"
-  | "other";
+// ─── Expense categories ───────────────────────────────────────────────────────
+//
+// These used to be a TypeScript union of nine strings and a const array, which
+// meant the set of categories was a property of the SOURCE CODE. You could not
+// add "freelance expenses", could not rename "game" to something that made
+// sense to you, and could not hide "education" after graduating. The one thing
+// a spending tracker has to adapt to is how a particular person spends.
+//
+// They live in a table now. Two details make the move safe:
+//
+//   label is NULLABLE. Null means "this is a built-in, translate it" and the
+//   label comes from i18n as before, so the nine defaults stay bilingual. Only
+//   a category the user renamed or created carries a literal label.
+//
+//   Nothing is ever deleted, only hidden. Old expenses still point at the key,
+//   and a spending history that silently loses its labels is worse than a
+//   cluttered picker.
 
-export const EXPENSE_CATEGORIES: { key: ExpenseCategory; label: string; emoji: string; color: string }[] = [
-  { key: "food",          get label() { return t("finance.cat.food"); },          emoji: "🍜", color: "from-orange-500 to-amber-500" },
-  { key: "transport",     get label() { return t("finance.cat.transport"); },     emoji: "🚌", color: "from-blue-500 to-cyan-500" },
-  { key: "entertainment", get label() { return t("finance.cat.entertainment"); }, emoji: "🎬", color: "from-pink-500 to-rose-500" },
-  { key: "shopping",      get label() { return t("finance.cat.shopping"); },      emoji: "🛍️", color: "from-purple-500 to-violet-500" },
-  { key: "health",        get label() { return t("finance.cat.health"); },        emoji: "💊", color: "from-green-500 to-emerald-500" },
-  { key: "education",     get label() { return t("finance.cat.education"); },     emoji: "📚", color: "from-indigo-500 to-blue-500" },
-  { key: "bills",         get label() { return t("finance.cat.bills"); },         emoji: "📋", color: "from-gray-500 to-slate-500" },
-  { key: "game",          get label() { return t("finance.cat.game"); },          emoji: "🎮", color: "from-purple-600 to-indigo-600" },
-  { key: "other",         get label() { return t("finance.cat.other"); },         emoji: "📦", color: "from-gray-400 to-gray-500" },
+export type ExpenseCategory = string;
+
+export interface CategoryRow {
+  id: number;
+  key: string;
+  label: string;      // already resolved: stored label, or the translation
+  emoji: string;
+  color: string;
+  sort_order: number;
+  is_hidden: number;
+}
+
+/** The built-in nine. Seeded once, then owned by the user. */
+export const DEFAULT_CATEGORIES: { key: string; emoji: string; color: string }[] = [
+  { key: "food",          emoji: "🍜",  color: "from-orange-500 to-amber-500" },
+  { key: "transport",     emoji: "🚌",  color: "from-blue-500 to-cyan-500" },
+  { key: "entertainment", emoji: "🎬",  color: "from-pink-500 to-rose-500" },
+  { key: "shopping",      emoji: "🛍️", color: "from-purple-500 to-violet-500" },
+  { key: "health",        emoji: "💊",  color: "from-green-500 to-emerald-500" },
+  { key: "education",     emoji: "📚",  color: "from-indigo-500 to-blue-500" },
+  { key: "bills",         emoji: "📋",  color: "from-gray-500 to-slate-500" },
+  { key: "game",          emoji: "🎮",  color: "from-purple-600 to-indigo-600" },
+  { key: "other",         emoji: "📦",  color: "from-gray-400 to-gray-500" },
 ];
+
+const BUILT_IN_KEYS = new Set(DEFAULT_CATEGORIES.map(c => c.key));
+
+/** Resolve a stored row into something renderable. */
+function resolveLabel(key: string, label: string | null): string {
+  if (label) return label;
+  if (BUILT_IN_KEYS.has(key)) return t(`finance.cat.${key}` as any);
+  return key;
+}
+
+// A synchronous cache, because a hundred table rows each need a label and an
+// emoji while rendering and none of them can await. Refreshed whenever the
+// table changes; falls back to the defaults before the first load completes.
+let categoryCache: CategoryRow[] = DEFAULT_CATEGORIES.map((c, i) => ({
+  id: -1 - i, key: c.key, label: "", emoji: c.emoji, color: c.color,
+  sort_order: i, is_hidden: 0,
+}));
+
+/** Visible categories, in the user's order. Synchronous — safe inside render. */
+export function getCategoryList(): CategoryRow[] {
+  return categoryCache
+    .filter(c => !c.is_hidden)
+    .map(c => ({ ...c, label: c.label || resolveLabel(c.key, null) }));
+}
+
+/** Every category including hidden ones, for the management screen. */
+export function getAllCategoriesCached(): CategoryRow[] {
+  return categoryCache.map(c => ({ ...c, label: c.label || resolveLabel(c.key, null) }));
+}
+
+/** Look one up by key. Falls back to a neutral row so an expense whose category
+ *  was hidden or renamed still renders instead of disappearing. */
+export function lookupCategory(key: string): CategoryRow {
+  const found = categoryCache.find(c => c.key === key);
+  if (found) return { ...found, label: found.label || resolveLabel(found.key, null) };
+  return {
+    id: -999, key, label: key, emoji: "💸",
+    color: "from-gray-400 to-gray-500", sort_order: 999, is_hidden: 0,
+  };
+}
+
+/** Read the table into the cache. Call once at startup and after any edit. */
+export async function loadCategories(): Promise<CategoryRow[]> {
+  const d = await getDb();
+  await seedCategoriesIfEmpty(d);
+  const rows = await d.select<any[]>(
+    `SELECT id, key, label, emoji, color, sort_order, is_hidden
+       FROM expense_categories WHERE deleted = 0
+      ORDER BY sort_order ASC, id ASC`,
+  );
+  categoryCache = rows.map(r => ({
+    id: r.id,
+    key: r.key,
+    label: r.label ?? "",
+    emoji: r.emoji ?? "📦",
+    color: r.color ?? "from-gray-400 to-gray-500",
+    sort_order: r.sort_order ?? 0,
+    is_hidden: r.is_hidden ?? 0,
+  }));
+  return getAllCategoriesCached();
+}
+
+async function seedCategoriesIfEmpty(d: Database): Promise<void> {
+  const [{ n }] = await d.select<{ n: number }[]>(
+    "SELECT COUNT(*) as n FROM expense_categories",
+  );
+  if (n > 0) return;
+  for (let i = 0; i < DEFAULT_CATEGORIES.length; i++) {
+    const c = DEFAULT_CATEGORIES[i];
+    // label stays NULL on purpose: that is what marks it as translatable.
+    await d.execute(
+      `INSERT INTO expense_categories (key, label, emoji, color, sort_order, is_hidden)
+       VALUES (?, NULL, ?, ?, ?, 0)`,
+      [c.key, c.emoji, c.color, i],
+    );
+  }
+}
+
+/** Turn a label into a stable key. Keys are what expenses store, so they must
+ *  never collide and never change once created. */
+function makeKey(label: string, taken: Set<string>): string {
+  const base =
+    label.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") ||
+    `cat`;
+  let key = base;
+  let i = 2;
+  while (taken.has(key)) key = `${base}_${i++}`;
+  return key;
+}
+
+export async function createCategory(label: string, emoji: string): Promise<void> {
+  const d = await getDb();
+  const existing = await d.select<{ key: string }[]>("SELECT key FROM expense_categories");
+  const key = makeKey(label, new Set(existing.map(r => r.key)));
+  const [{ n }] = await d.select<{ n: number }[]>(
+    "SELECT COALESCE(MAX(sort_order), -1) + 1 as n FROM expense_categories",
+  );
+  await d.execute(
+    `INSERT INTO expense_categories (key, label, emoji, color, sort_order, is_hidden)
+     VALUES (?, ?, ?, 'from-gray-400 to-gray-500', ?, 0)`,
+    [key, label.trim(), emoji || "📦", n],
+  );
+  await loadCategories();
+}
+
+export async function updateCategory(
+  id: number,
+  patch: { label?: string; emoji?: string },
+): Promise<void> {
+  const d = await getDb();
+  if (patch.label !== undefined) {
+    // An empty label puts a built-in back on its translation.
+    const value = patch.label.trim() === "" ? null : patch.label.trim();
+    await d.execute("UPDATE expense_categories SET label = ? WHERE id = ?", [value, id]);
+  }
+  if (patch.emoji !== undefined) {
+    await d.execute("UPDATE expense_categories SET emoji = ? WHERE id = ?", [patch.emoji, id]);
+  }
+  await loadCategories();
+}
+
+/** Hide rather than delete: old expenses still point here. */
+export async function setCategoryHidden(id: number, hidden: boolean): Promise<void> {
+  const d = await getDb();
+  await d.execute("UPDATE expense_categories SET is_hidden = ? WHERE id = ?", [hidden ? 1 : 0, id]);
+  await loadCategories();
+}
+
+export async function moveCategory(id: number, direction: -1 | 1): Promise<void> {
+  const d = await getDb();
+  const rows = await d.select<{ id: number; sort_order: number }[]>(
+    "SELECT id, sort_order FROM expense_categories WHERE deleted = 0 ORDER BY sort_order ASC, id ASC",
+  );
+  const index = rows.findIndex(r => r.id === id);
+  const swapWith = index + direction;
+  if (index < 0 || swapWith < 0 || swapWith >= rows.length) return;
+  // Rewrite the whole column rather than swapping two values, so an order that
+  // has drifted or collided repairs itself the first time anything is moved.
+  const reordered = [...rows];
+  [reordered[index], reordered[swapWith]] = [reordered[swapWith], reordered[index]];
+  for (let i = 0; i < reordered.length; i++) {
+    await d.execute("UPDATE expense_categories SET sort_order = ? WHERE id = ?", [i, reordered[i].id]);
+  }
+  await loadCategories();
+}
+
 
 // ─── DB accessor ──────────────────────────────────────────────────────────────
 
@@ -71,11 +237,14 @@ export async function addExpense(expense: {
   category: ExpenseCategory;
   note: string;
   date: string;
+  /** Bank reference when this came from a scanned slip. Null for manual entry,
+   *  and null is what makes the unique index tolerate any number of them. */
+  slipRef?: string | null;
 }): Promise<void> {
   const d = await getDb();
   await d.execute(
-    "INSERT INTO expenses (amount, category, note, date) VALUES (?, ?, ?, ?)",
-    [expense.amount, expense.category, expense.note, expense.date]
+    "INSERT INTO expenses (amount, category, note, date, slip_ref) VALUES (?, ?, ?, ?, ?)",
+    [expense.amount, expense.category, expense.note, expense.date, expense.slipRef ?? null]
   );
 }
 
@@ -160,6 +329,32 @@ export async function aiEditExpenseByKeyword(keyword: string, fields: {
  *  person actually uses drift to the front instead of being hunted for in a
  *  nine-button grid every single time. Needs no schema: the answer is already
  *  in the expenses table. */
+/** Has this exact slip already been recorded? The unique index enforces it at
+ *  the database level too, but asking first lets the UI say so plainly instead
+ *  of surfacing a constraint error. */
+export async function slipAlreadyRecorded(ref: string): Promise<boolean> {
+  if (!ref) return false;
+  const d = await getDb();
+  const rows = await d.select<{ n: number }[]>(
+    "SELECT COUNT(*) as n FROM expenses WHERE slip_ref = ?",
+    [ref],
+  );
+  return (rows[0]?.n ?? 0) > 0;
+}
+
+/** A list screenshot carries no reference numbers, so exact duplicate detection
+ *  is impossible for it. Same day and same amount is a strong hint though, and
+ *  a hint is the right strength here: buying the same coffee twice in one day
+ *  is a real thing, so this warns rather than blocks. */
+export async function looksLikeDuplicate(date: string, amount: number): Promise<boolean> {
+  const d = await getDb();
+  const rows = await d.select<{ n: number }[]>(
+    "SELECT COUNT(*) as n FROM expenses WHERE deleted = 0 AND date = ? AND ABS(amount - ?) < 0.01",
+    [date, amount],
+  );
+  return (rows[0]?.n ?? 0) > 0;
+}
+
 export async function getRecentCategories(): Promise<string[]> {
   const d = await getDb();
   const rows = await d.select<{ category: string }[]>(
