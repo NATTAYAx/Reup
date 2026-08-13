@@ -403,7 +403,7 @@ export async function purgeTask(id: number): Promise<void> {
  */
 export async function getTasksForDate(date: string): Promise<any[]> {
   const db = await getDb();
-  return await db.select(
+  const rows = await db.select<any[]>(
     `SELECT * FROM tasks WHERE (is_active = 1 OR deleted_at IS NULL) AND (
       specific_date = ? OR
       reset_type IN ('daily', 'weekly', 'biweekly', 'custom_days') OR
@@ -415,6 +415,9 @@ export async function getTasksForDate(date: string): Promise<any[]> {
     ) ORDER BY is_priority DESC, is_urgent DESC, name`,
     [date, date, date, date]
   );
+  // Paused here too, for the same reason and by the same rule.
+  const now = new Date();
+  return rows.filter(r => !isPaused(r, now));
 }
 
 /**
@@ -429,9 +432,16 @@ export async function getTasksForDate(date: string): Promise<any[]> {
 export async function getCalendarTasks(): Promise<any[]> {
   return dbQueue(async () => {
     const db = await getDb();
-    return await db.select<any[]>(
+    const rows = await db.select<any[]>(
       "SELECT * FROM tasks WHERE is_active = 1 OR deleted_at IS NULL ORDER BY id",
     );
+    // Same pause rule as getAllTasks. Without it a set-aside task vanished from
+    // the task list and carried on appearing in the calendar - two screens
+    // disagreeing about whether something exists, which is the exact failure
+    // this function was written to fix inside the calendar and then reproduced
+    // across it.
+    const now = new Date();
+    return rows.filter(r => !isPaused(r, now));
   });
 }
 
