@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "game-scheduler",
-  "version": "0.2.32",
-  "identifier": "com.gamescheduler.app",
+  "productName": "Reup",
+  "version": "0.2.33",
+  "identifier": "app.reup",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "game-scheduler",
+        "title": "Reup",
         "width": 900,
         "height": 600,
         "resizable": true,
