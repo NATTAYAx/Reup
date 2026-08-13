@@ -13,6 +13,7 @@
 
 import { smartParse, AIResult } from "./smartAI";
 import { getAppTimeZone, offsetLabel } from "./tz";
+import { todayLocal } from "./dateUtil";
 import { cacheLookup, cacheStore, recordCall } from "./aiMemory";
 import {
   PROVIDERS, getProviderId, getApiKey, setApiKey, getModel, getBaseUrl,
@@ -515,7 +516,7 @@ function legacyToOperations(r: any): any[] | null {
   if (r.domain === "finance") {
     const kw = r.keyword?.trim?.();
     if (r.intent === "log_expense" && typeof r.amount === "number") {
-      ops.push({ kind: "log_expense", amount: r.amount, category: r.category, note: r.note });
+      ops.push({ kind: "log_expense", amount: r.amount, category: r.category, note: r.note, date: r.date });
     } else if (r.intent === "log_income" && typeof r.amount === "number") {
       ops.push({ kind: "log_income", amount: r.amount, source: r.source ?? r.note, date: r.date });
     } else if (r.intent === "edit_expense" && kw) {
@@ -673,6 +674,8 @@ export interface GeminiFinanceResponse {
   incomeAmount?: number;
   incomeNote?: string;
   querySummary?: boolean;
+  /** "YYYY-MM-DD". Absent means today. */
+  date?: string;
 }
 
 export interface GeminiChatResponse {
@@ -849,8 +852,39 @@ function localParse(text: string): LocalResult {
   return localParseTask(text);
 }
 
+/**
+ * When the spending happened, and the words that said so.
+ *
+ * The money side had no notion of a date whatsoever. Everything was filed under
+ * today, and the words that named a day were left sitting in the note: typing
+ * "จ่ายค่าอาหารหมา 1200 บาท เมื่อวาน" saved a note reading "ค่าอาหารหมา เมื่อวาน" against
+ * today, so the note said one thing and the row said another.
+ *
+ * Returns the phrase as well as the date, because a phrase that has been
+ * understood must also be removed from the note. Recognising it and leaving it
+ * in place is the same bug wearing a hat.
+ */
+function extractExpenseDate(text: string): { date: string | null; matched: RegExp | null } {
+  const rules: [RegExp, number][] = [
+    [/เมื่อวานซืน|วานซืน|day before yesterday/i, -2],
+    [/เมื่อวานนี้|เมื่อวาน|วานนี้|yesterday/i, -1],
+    // "วันนี" without the tone mark is a typo common enough to be a spelling.
+    [/วันนี้|วันนี(?![ก-๙])|today/i, 0],
+  ];
+  for (const [re, off] of rules) {
+    if (re.test(text)) {
+      const d = new Date();
+      d.setDate(d.getDate() + off);
+      return { date: todayLocal(d), matched: re };
+    }
+  }
+  return { date: null, matched: null };
+}
+
 function localParseFinance(text: string): GeminiFinanceResponse {
   const lower = text.toLowerCase();
+  const when = extractExpenseDate(text);
+  const stripWhen = (v: string) => (when.matched ? v.replace(when.matched, " ") : v);
 
   // ── Query intent ───────────────────────────────────────────
   if (/ใช้ไป|ใช้จ่าย|สรุป|เดือนนี้|วันนี้.*เท่า|ยอด|ค่าใช้จ่าย.*เดือน|summary|spending|how much|total/i.test(text)) {
@@ -869,7 +903,7 @@ function localParseFinance(text: string): GeminiFinanceResponse {
       .replace(/\s+/g, " ").trim() || "income";
     return {
       domain: "finance", intent: "log_income",
-      reply: amt ? `💰 บันทึกรายรับ ฿${amt.toLocaleString()} แล้ว ✅` : "ระบุจำนวนเงินที่ได้รับด้วยนะ เช่น \"รับเงินเดือน 15000\"",
+      reply: amt ? `💰 รายรับ ฿${amt.toLocaleString()}` : "ระบุจำนวนเงินที่ได้รับด้วยนะ เช่น \"รับเงินเดือน 15000\"",
       incomeAmount: amt ?? undefined,
       incomeNote,
     };
@@ -883,7 +917,7 @@ function localParseFinance(text: string): GeminiFinanceResponse {
       .replace(/\s+/g, " ").trim();
     return {
       domain: "finance", intent: "delete_expense",
-      reply: keyword ? `🗑️ ลบรายการ "${keyword}" แล้ว ✅` : "ลบรายการไหนดี? บอกชื่อรายการด้วยนะ",
+      reply: keyword ? `🗑️ ลบรายการ "${keyword}"` : "ลบรายการไหนดี? บอกชื่อรายการด้วยนะ",
       keyword,
     };
   }
@@ -893,7 +927,7 @@ function localParseFinance(text: string): GeminiFinanceResponse {
   const category = extractExpenseCategory(lower);
 
   // Extract a clean note: strip amount, strip leading verb, keep the meaningful noun
-  const note = text
+  const note = stripWhen(text)
     .replace(/(\d[\d,]*(?:\.\d+)?)\s*(?:บาท|baht|฿|thb)/gi, "")  // "80 บาท"
     .replace(/(?:฿)\s*\d[\d,]*/g, "")                                 // "฿80"
     .replace(/\b\d{2,}[\d,]*(?:\.\d+)?\b/g, "")                    // bare number
@@ -903,12 +937,16 @@ function localParseFinance(text: string): GeminiFinanceResponse {
   return {
     domain: "finance",
     intent: "log_expense",
+    // Nothing has been written at this point — the card that comes next is what
+    // writes it. The tick used to be printed here, so the chat said บันทึกแล้ว
+    // and then asked whether to save, in that order.
     reply: amt
-      ? `💸 บันทึก ${note} ฿${amt.toLocaleString()} หมวด ${category} ✅`
+      ? `💸 ${note} ฿${amt.toLocaleString()} หมวด ${category}`
       : `ไม่พบจำนวนเงิน ลองพิมพ์ใหม่นะ เช่น "กินข้าว 80" หรือ "กาแฟ 45 บาท"`,
     amount: amt ?? undefined,
     category,
     note,
+    date: when.date ?? undefined,
   };
 }
 

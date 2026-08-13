@@ -497,6 +497,7 @@ const translations = {
   "settings.previewTask":    { en: "Sample task", th: "งานตัวอย่าง" },
   "finance.setBudget":  { en: "Set budget", th: "ตั้งงบ" },
   "finance.yesterday":  { en: "Yesterday",  th: "เมื่อวาน" },
+  "finance.date":       { en: "Date",       th: "วันที่" },
   "finance.pickDate":   { en: "Pick date",  th: "เลือกวัน" },
   "finance.ofBudget":   { en: "of budget",  th: "ของงบ" },
   "finance.viewMonth":    { en: "Month",     th: "รายเดือน" },

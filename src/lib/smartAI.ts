@@ -290,6 +290,80 @@ function toDateStr(d: Date): string {
   return todayLocal(d);
 }
 
+// ─── Who owns which words ─────────────────────────────────────
+//
+// Every matcher below used to read the whole raw sentence, independently, with
+// nothing recording that a stretch of characters had already been understood.
+// So the same characters could be read twice and mean two different things:
+// "ทุกอาทิตย์" is every WEEK, but it contains "อาทิตย์", which is SUNDAY, and the
+// weekday matcher took it. "ประชุมทีม ทุกอาทิตย์ วันจันทร์" was saved as a one-off
+// dated to the next Sunday.
+//
+// Blanking a phrase once it has been claimed is the smallest usable version of
+// giving each matcher exclusive ownership of what it consumed. Spaces rather
+// than deletion, so every other index into the string still lines up.
+
+const TH_DAY_ALT = "อาทิตย์|จันทร์|อังคาร|พุธ|พฤหัสบดี|พฤหัส|ศุกร์|เสาร์";
+const EN_DAY_ALT = "sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tues|tue|wed|thurs|thur|thu|fri|sat";
+
+const TH_DAY_NUM_ONE: Record<string, number> = {
+  "อาทิตย์": 0, "จันทร์": 1, "อังคาร": 2, "พุธ": 3,
+  "พฤหัสบดี": 4, "พฤหัส": 4, "ศุกร์": 5, "เสาร์": 6,
+};
+
+/** Phrases that mean "how often", not "which day". */
+const CYCLE_PHRASE = new RegExp(
+  "ทุก\\s*ๆ?\\s*(?:สอง)?\\s*(?:วัน|อาทิตย์|สัปดาห์|เดือน|ปี)" +
+  "|รายวัน|รายสัปดาห์|รายเดือน|ประจำวัน|สองอาทิตย์|สองสัปดาห์" +
+  "|every\\s*(?:other\\s*)?(?:day|week|month|year)|each\\s*(?:day|week|month)" +
+  "|everyday|biweekly|bi-weekly|fortnightly|fortnight|daily|weekly|monthly",
+  "gi",
+);
+
+function maskCycleWords(text: string): string {
+  return text.replace(CYCLE_PHRASE, m => " ".repeat(m.length));
+}
+
+/**
+ * Which weekday a repeating task lands on. Null when none was named.
+ *
+ * Read in three passes because Thai writes the same word two ways. "ทุกวันอาทิตย์"
+ * is every Sunday and "ทุกอาทิตย์" is every week, so the explicit forms are asked
+ * first and only then is what remains searched — with the cycle phrases already
+ * blanked, so the second pass cannot re-read a word the first one settled.
+ */
+function detectWeeklyDay(text: string): number | null {
+  const everyTh = text.match(new RegExp(`ทุก\\s*ๆ?\\s*วัน\\s*(${TH_DAY_ALT})`));
+  if (everyTh) return TH_DAY_NUM_ONE[everyTh[1]];
+
+  // "ทุกจันทร์" without the วัน. อาทิตย์ is deliberately not in this one: on its
+  // own after ทุก it means the week, not Sunday.
+  const everyThShort = text.match(new RegExp(`ทุก\\s*ๆ?\\s*(${TH_DAY_ALT.replace("อาทิตย์|", "")})`));
+  if (everyThShort) return TH_DAY_NUM_ONE[everyThShort[1]];
+
+  const masked = maskCycleWords(text);
+
+  const named = masked.match(new RegExp(`วัน\\s*(${TH_DAY_ALT})`));
+  if (named) return TH_DAY_NUM_ONE[named[1]];
+
+  // Bare อาทิตย์ still means the week here, so it stays out.
+  const bare = masked.match(new RegExp(`(${TH_DAY_ALT.replace("อาทิตย์|", "")})`));
+  if (bare) return TH_DAY_NUM_ONE[bare[1]];
+
+  // Word boundaries, which the old table did without: it tested
+  // lower.includes("mon"), so "monitor" produced a Monday.
+  const en = masked.toLowerCase().match(new RegExp(`\\b(${EN_DAY_ALT})\\b`));
+  if (en) return EN_DAY_NUM[en[1]] ?? null;
+
+  return null;
+}
+
+/** True when the sentence says how often, which outranks any day it also names. */
+const RE_EVERY_WEEKDAY = new RegExp(
+  `ทุก\\s*ๆ?\\s*(?:วัน)?\\s*(?:${TH_DAY_ALT})|\\bevery\\s+(?:${EN_DAY_ALT})\\b`,
+  "i",
+);
+
 /** Format ISO date "YYYY-MM-DD" → "DD/MM/YYYY" for user-facing replies */
 function toDateDisplay(iso: string): string {
   const [y, m, day] = iso.split("-");
@@ -714,24 +788,58 @@ const THAI_CAT_KEYWORDS: Array<[string, Category]> = [
   ["คลินิก", "personal"], ["นวด", "personal"], ["ทำความสะอาด", "personal"],
 ];
 
+/**
+ * Words that NAME a category outright, as opposed to hinting at one.
+ *
+ * Separate from the hints below because a stated label has to win. There was no
+ * way to say "personal" at all before — it existed only as the fallback — so
+ * "blood pressure meds personal daily 09:00" was filed under Game, because the
+ * word "daily" sat inside the game test and was reached first.
+ */
+const CATEGORY_LABELS: [RegExp, Category][] = [
+  [/\bpersonal\b|ส่วนตัว/i, "personal"],
+  [/\bschool\b|เรื่องเรียน/i, "school"],
+  [/\bwork\b|เรื่องงาน/i, "work"],
+  [/\bgame\b/i, "game"],
+];
+
 function detectCategory(text: string): Category {
+  for (const [re, cat] of CATEGORY_LABELS) if (re.test(text)) return cat;
+
   for (const [kw, cat] of THAI_CAT_KEYWORDS) {
     if (text.includes(kw)) return cat;
   }
   const lower = text.toLowerCase();
   if (/homework|assignment|exam|class|school|study|lecture|quiz|midterm|final|thesis|seminar|subject|coursework|submit|due date/.test(lower)) return "school";
   if (/\bwork\b|meeting|deadline|office|report|client|presentation|project|email|invoice|manager/.test(lower)) return "work";
-  if (/game|reset|boss|quest|daily|weekly|dungeon|stamina|gacha|banner|pull|recharge|server reset/.test(lower)) return "game";
+  if (/game|reset|boss|quest|dungeon|raid|lockout|stamina|gacha|banner|pull|recharge|server reset/.test(lower)) return "game";
+
+  // How often a thing happens is the weakest signal there is, and it sits last
+  // for a reason. Dropping it entirely was worse: an unrecognised game typed as
+  // "Genshin Impact daily" has nothing else to go on and landed in Personal. So
+  // it stays, as a guess of last resort, where anything that knows better has
+  // already spoken.
+  if (/\b(daily|weekly|biweekly)\b/.test(lower) || /ทุกวัน|รายวัน/.test(text)) return "game";
   return "personal";
 }
 
 // ─── Reset type detection ─────────────────────────────────────
+/** The types that repeat on their own. Everything else needs a date. */
+const RECURRING = new Set<ResetType>(["daily", "weekly", "biweekly", "custom_days"]);
+
 function detectResetType(text: string): ResetType {
-  if (/ทุกวัน|ทุกๆวัน|รายวัน|ประจำวัน|every\s*day|everyday|daily/.test(text)) return "daily";
-  if (/ทุกสัปดาห์|ทุกอาทิตย์|รายสัปดาห์|every\s*week|weekly/.test(text)) return "weekly";
-  if (/สองอาทิตย์|ทุกสองสัปดาห์|biweekly|bi-weekly|fortnight/.test(text)) return "biweekly";
-  if (/ทุกเดือน|รายเดือน|every\s*month|monthly/.test(text)) return "custom_days";
-  if (/event|until|ends|limited/.test(text.toLowerCase())) return "event_window";
+  // Biweekly first. "biweekly" contains "weekly", so the weekly test matched it
+  // and every fortnightly task was saved as a weekly one.
+  if (/สองอาทิตย์|ทุกสองสัปดาห์|สองสัปดาห์|biweekly|bi-weekly|fortnight/i.test(text)) return "biweekly";
+
+  // "every <weekday>" before the daily test, in both languages: "ทุกวันจันทร์"
+  // contains "ทุกวัน", and "every monday" is not "every day".
+  if (RE_EVERY_WEEKDAY.test(text)) return "weekly";
+
+  if (/ทุกสัปดาห์|ทุกอาทิตย์|รายสัปดาห์|every\s*week|each\s*week|weekly/i.test(text)) return "weekly";
+  if (/ทุกวัน|ทุก\s*ๆ\s*วัน|รายวัน|ประจำวัน|every\s*day|everyday|each\s*day|daily/i.test(text)) return "daily";
+  if (/ทุกเดือน|รายเดือน|every\s*month|monthly/i.test(text)) return "custom_days";
+  if (/event|until|ends|limited/i.test(text)) return "event_window";
   return "one_time";
 }
 
@@ -785,7 +893,10 @@ const THAI_NOISE = [
   /^ส่ง(?=งาน|ของ|เอกสาร)/g, // only strip "ส่ง" as standalone prefix, not inside phrases
   /เวลา\S*/g,
   /ถึง\S*/g,
-  /วัน(จันทร์|อังคาร|พุธ|พฤหัส|ศุกร์|เสาร์|อาทิตย์)/g,
+  // The "ทุก" has to come off with the day it belongs to. Stripping the day
+  // alone left "ทำความสะอาด ทุก" as a task name, because the ทุกวัน entry
+  // further down no longer had a วัน to match.
+  /(?:ทุก\s*ๆ?\s*)?วัน(จันทร์|อังคาร|พุธ|พฤหัส|ศุกร์|เสาร์|อาทิตย์)/g,
   /เมื่อวานซืน|เมื่อวาน|วานซืน|วานนี้|พรุ่งนี้|วันนี้|มะรืน/g,
   /อีก\s*\S+\s*(วัน|อาทิตย์|สัปดาห์|เดือน)/g,
   /\S+ข้างหน้า/g,
@@ -839,6 +950,7 @@ function cleanName(raw: string, lang: "th" | "en" | "mixed", isPreset = false): 
   s = s.replace(/^มี\s*(?=งาน|เรื่อง|ของ|การ)/, ""); // "มีงาน" → "งาน"
   s = s.replace(/ต้อง(?=ส่ง|ทำ|ไป|เรียน|จ่าย|ซื้อ)/g, ""); // "ต้องส่ง" → "ส่ง"
   s = s.replace(/ต้อง(?=ส่ง|ทำ|ไป|เรียน)/g, ""); // "ต้องส่ง" → "ส่ง"
+  const beforeStrip = s;
   s = s
     .replace(/resets?/gi, "")
     .replace(/every\s+(day|week|month|[a-z]+day)/gi, "")
@@ -847,13 +959,32 @@ function cleanName(raw: string, lang: "th" | "en" | "mixed", isPreset = false): 
     .replace(isPreset ? /^$/ : /\beveryday\b|\bdaily\b|\bweekly\b|\bmonthly\b|\bbiweekly\b/gi, "")
     .replace(/at\s+\d{1,2}(:\d{2})?\s*(am|pm)?/gi, "")
     .replace(/\d{1,2}(:\d{2})?\s*(am|pm)/gi, "")
+    // A bare 24-hour clock, which only the am/pm shapes were catching. Every
+    // task typed as "meds 09:00" kept the time in its own name.
+    .replace(/\b\d{1,2}:\d{2}\b/g, "")
+    // Day names and cycle phrases, from the same tables the matchers read, so
+    // teaching one of them a word removes it from names automatically. Two
+    // lists that have to agree, maintained separately, will not agree.
+    .replace(new RegExp(`ทุก\\s*ๆ?\\s*(?:วัน)?\\s*(?:${TH_DAY_ALT})`, "g"), "")
+    .replace(new RegExp(`(?:วัน)?(?:${TH_DAY_ALT})`, "g"), "")
+    .replace(CYCLE_PHRASE, "")
+    .replace(new RegExp(`\\b(?:every\\s+)?(?:${EN_DAY_ALT})\\b`, "gi"), "")
+    // Stated category labels, which nothing removed at all.
+    .replace(/\b(personal|school|work|game)\b/gi, "")
     .replace(/midnight|noon|tonight|tomorrow|today/gi, "")
     .replace(/in\s+\d+\s+(days?|weeks?)/gi, "")
     .replace(/in\s+\d+\s+(minutes?|hours?)/gi, "")
     .replace(/next\s+(week|month)/gi, "")
     .replace(/\b(urgent|important|critical|asap|priority)\b/gi, "")
+    // Separators left stranded once the words around them are gone. A line
+    // pasted from a table came out as "Guild Raid Lockout , Monday".
+    .replace(/[,|;]+/g, " ")
     .replace(/\s+/g, " ").trim();
   s = stripPoliteness(s);
+  // A task genuinely called "Work" or "จันทร์" strips to nothing. Falling back
+  // to what was left before the day and label words were removed beats handing
+  // back "New Task", because what the person typed is at least what they meant.
+  if (!s) s = stripPoliteness(beforeStrip.replace(/\s+/g, " ").trim());
   if (!s) return "";
   if (lang !== "en") return s.trim();
   return s.split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
@@ -966,7 +1097,16 @@ function parseSegment(
   // came with it; otherwise the task becomes an undated one-off, which is what
   // the sentence actually said. Visible and editable beats correct-in-principle
   // and invisible.
-  const detected = specific_date ? "specific_date" : detectResetType(segment);
+  // A CYCLE WORD OUTRANKS A DATE, ALWAYS.
+  //
+  // This read `specific_date ? "specific_date" : detectResetType(segment)`, so
+  // any sentence containing a day name never reached detectResetType at all.
+  // "weekly, Monday 05:00" was stored as a one-off dated to the next Monday: it
+  // fired once and never came back, and nothing on screen said so.
+  const cycle = detectResetType(segment);
+  const detected: ResetType = RECURRING.has(cycle)
+    ? cycle
+    : specific_date ? "specific_date" : cycle;
   const reset_type: ResetType =
     detected === "specific_date" && !specific_date ? "one_time" : detected;
   details.push({ field: "type", value: reset_type, sure: true });
@@ -987,9 +1127,9 @@ function parseSegment(
     // time and the app threw it away without a word. A one-off task may
     // carry a time now; null still means all day. See countdown.ts.
     reset_time,
-    reset_day: null,
+    reset_day: reset_type === "weekly" ? detectWeeklyDay(segment) : null,
     reset_interval_days: reset_type === "custom_days" ? 30 : null,
-    anchor_date: null,
+    anchor_date: reset_type === "biweekly" ? todayLocal() : null,
     event_start: null, event_end: null,
     // parseSegment gets a pre-resolved date string (never an exact ISO deadline)
     specific_date: reset_type === "specific_date" ? specific_date : null,
@@ -1240,9 +1380,16 @@ export function smartParse(input: string): AIResult {
 
   // exactDeadlineISO is set ONLY for "อีก X นาที/ชั่วโมง" — exact UTC countdown deadline
   const exactDeadlineISO = dateResult?.exactDeadlineISO ?? null;
-  let reset_type: ResetType = exactDeadlineISO ? "event_window"   // exact minute-level deadline
-    : sharedDate ? "specific_date"                                  // date-only deadline
-    : detectResetType(input);
+
+  // A CYCLE WORD OUTRANKS A DATE, ALWAYS. Same fix as in parseSegment above,
+  // and the same bug: detectResetType was the last branch of a chain that a
+  // day name short-circuited, so it was never consulted for any sentence that
+  // named one. "every monday 6pm" and "ทุกวันจันทร์ 9 โมง" both became one-offs.
+  const cycleType = detectResetType(input);
+  let reset_type: ResetType = RECURRING.has(cycleType) ? cycleType
+    : exactDeadlineISO ? "event_window"   // exact minute-level deadline
+    : sharedDate ? "specific_date"        // date-only deadline
+    : cycleType;
   // Safety: never produce one_time or event_window without a proper event_end from AI
   // one_time uses Bangkok-local event_end which freezes WebKit buttons
   // event_window (Limited Event) without event_end causes null countdown → invisible task
@@ -1274,9 +1421,14 @@ export function smartParse(input: string): AIResult {
     // time and the app threw it away without a word. A one-off task may
     // carry a time now; null still means all day. See countdown.ts.
     reset_time,
-    reset_day: null,
+    // Was hardcoded null, which made a weekly task with a named day
+    // unreachable from the chat: the parser could say "weekly" and could read
+    // "Monday", and had nowhere to put the second answer.
+    reset_day: reset_type === "weekly" ? detectWeeklyDay(input) : null,
     reset_interval_days: reset_type === "custom_days" ? 30 : null,
-    anchor_date: null,
+    // A biweekly cycle counts from somewhere. Without an anchor there is no
+    // "which of the two weeks is this", so it starts from today.
+    anchor_date: reset_type === "biweekly" ? todayLocal() : null,
     event_start: null,
     // For "อีก X นาที": event_window + event_end = UTC deadline string ("...Z")
     event_end: (exactDeadlineISO && reset_type === "event_window") ? exactDeadlineISO : null,

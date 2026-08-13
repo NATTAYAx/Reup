@@ -42,6 +42,7 @@ never gets stored.
 Notifications respect quiet hours. Themes can be generated from an image.
 There is a live wallpaper feature that mostly works, about which see below.
 
+![Notification](docs/8-notification.png)
 ---
 
 ## Running it

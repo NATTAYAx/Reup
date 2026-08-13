@@ -83,12 +83,34 @@ export interface Operation {
   until?: string;
 }
 
-/** Verbs that destroy or overwrite. The caller must confirm these first. */
-const DESTRUCTIVE = new Set<OpKind>([
-  "delete_task", "delete_expense", "update_task", "edit_expense",
+/**
+ * Verbs that have to be shown to a person before they run.
+ *
+ * This was called DESTRUCTIVE and held four verbs — the ones that delete or
+ * overwrite. Creating was allowed to run unannounced, on the reasoning that a
+ * new row breaks nothing.
+ *
+ * That reasoning was wrong for a reason that only showed up in use. Both other
+ * ways of adding something already ask first: the task path puts up a card, and
+ * so does the finance path. Only an answer that came back in the operations
+ * shape skipped it, so whether the app asked before spending money in the
+ * ledger depended on which of two schemas the model happened to reply in — and
+ * which one that was depended on whether the sentence contained the word บาท.
+ *
+ * A new row in a money log is also the least visible thing this app can do. A
+ * wrongly created task is on the list where it will be noticed; a wrongly
+ * logged ฿1,200 is a line in a history nobody scrolls back through.
+ *
+ * The one-tap toggles stay unannounced. Ticking a task off is reversible by
+ * tapping it again and its effect is on screen immediately, so a confirmation
+ * there is a question with no purpose.
+ */
+const NEEDS_CONFIRM = new Set<OpKind>([
+  "create_task", "update_task", "delete_task",
+  "log_expense", "edit_expense", "delete_expense", "log_income",
 ]);
 
-export const isDestructive = (op: Operation) => DESTRUCTIVE.has(op.kind);
+export const needsConfirm = (op: Operation) => NEEDS_CONFIRM.has(op.kind);
 
 /** Everything the model is allowed to emit, for validating its output. */
 export const KNOWN_OPS = new Set<OpKind>([
@@ -198,7 +220,7 @@ export async function runOperation(op: Operation): Promise<void> {
 
     case "log_expense": {
       if (typeof op.amount !== "number") throw new Error(t("op.errNoAmount"));
-      await aiLogExpense(op.amount, op.category || "other", op.note || "");
+      await aiLogExpense(op.amount, op.category || "other", op.note || "", op.date);
       return;
     }
 

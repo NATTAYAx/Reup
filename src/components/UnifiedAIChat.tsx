@@ -33,7 +33,7 @@ import {
   loadImportant, TH_HELPLINE,
 } from "../lib/importantCard";
 import { t } from "../lib/i18n";
-import { Operation, runOperations, describe, isDestructive, KNOWN_OPS } from "../lib/aiOperations";
+import { Operation, runOperations, describe, needsConfirm, KNOWN_OPS } from "../lib/aiOperations";
 
 interface Props {
   open: boolean;
@@ -112,6 +112,8 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
     newAmount?: number;
     incomeAmount?: number;
     incomeNote?: string;
+    /** "YYYY-MM-DD" when the sentence named a day. Absent means today. */
+    date?: string;
   } | null>(null);
 
   const addMsg = (msg: ChatMessage) => setMessages(m => [...m, msg]);
@@ -370,10 +372,12 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
           for (const tk of all) names[tk.id] = tk.name;
         } catch { /* the card falls back to #id */ }
 
-        // Anything that only reads, or that creates something new, runs without
-        // asking. Anything that overwrites or destroys waits — a model that can
-        // reach every corner of the app can also delete in every corner of it.
-        if (ops.some(isDestructive)) {
+        // Anything that writes waits for a person. A model that can reach every
+        // corner of the app can also delete in every corner of it — and this
+        // path used to let creating run unannounced, which is how ฿1,200 got
+        // into the ledger from a sentence that was never confirmed. Which verbs
+        // wait is decided in aiOperations, next to where each verb is written.
+        if (ops.some(needsConfirm)) {
           setPendingOps({ ops, names });
         } else {
           try {
@@ -422,6 +426,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
             amount: fr.amount,
             category: (fr.category as ExpenseCategory) || "other",
             note: fr.note || "",
+            date: fr.date,
           });
         } else if (fr.intent === "delete_expense" || fr.intent === "edit_expense") {
           // The model decides the intent and is supposed to fill in which row
@@ -544,7 +549,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
     if (!pendingFinance) return;
     try {
       if (pendingFinance.intent === "log_expense") {
-        await aiLogExpense(pendingFinance.amount!, pendingFinance.category!, pendingFinance.note!);
+        await aiLogExpense(pendingFinance.amount!, pendingFinance.category!, pendingFinance.note!, pendingFinance.date);
         onFinanceChanged?.();
       } else if (pendingFinance.intent === "delete_expense") {
         await aiDeleteExpenseByKeyword(pendingFinance.keyword!);
@@ -890,6 +895,31 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
                       className="flex-1 bg-gray-800 border border-white/10 rounded-xl px-3 py-2 text-white text-sm focus:outline-none focus:border-yellow-500 transition-all placeholder-white/20"
                     />
                   </div>
+                  {/* Only when the sentence named another day. Today needs no
+                      row: a field that is right every time is a field nobody
+                      reads, and it would push the confirm button off a 590px
+                      screen for the sake of repeating the obvious. */}
+                  {pendingFinance.date && pendingFinance.date !== todayLocal() && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-white/30 text-xs w-14 flex-shrink-0">{t("finance.date")}</span>
+                      <div className="flex gap-1.5">
+                        {[
+                          { label: t("finance.yesterday"), value: pendingFinance.date },
+                          { label: t("finance.today"), value: todayLocal() },
+                        ].map(opt => (
+                          <button key={opt.value}
+                            onClick={() => setPendingFinance(p => p ? { ...p, date: opt.value } : p)}
+                            className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+                              pendingFinance.date === opt.value
+                                ? "bg-yellow-500/20 border border-yellow-500/40 text-yellow-200"
+                                : "bg-white/5 text-white/35 hover:text-white hover:bg-white/10"
+                            }`}>
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <div className="flex items-start gap-2">
                     <span className="text-white/30 text-xs w-14 flex-shrink-0 pt-1.5">Category</span>
                     <div className="flex flex-wrap gap-1 flex-1">

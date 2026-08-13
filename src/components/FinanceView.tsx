@@ -1010,8 +1010,14 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
               </div>
 
               {/* Most recently used first — after a week the one you want is at
-                  the front instead of somewhere in a nine-button grid. */}
-              <div className="flex gap-1.5 overflow-x-auto pb-2 mb-2 -mx-1 px-1">
+                  the front instead of somewhere in a nine-button grid.
+
+                  Wrapped rather than scrolled. Sideways scrolling hides how
+                  many options there are and costs a drag to reach the last one,
+                  to save vertical space this dialog was not short of. The same
+                  chips already wrap in the assistant's confirmation card, so
+                  two screens showing one list were disagreeing about it. */}
+              <div className="flex flex-wrap gap-1.5 pb-2 mb-2">
                 {orderedCats.map(cat => (
                   <button key={cat.key}
                     onClick={() => setExpForm(f => ({ ...f, category: cat.key }))}
@@ -1293,7 +1299,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                   className="flex-1 min-w-0 bg-transparent text-white text-2xl font-bold focus:outline-none" />
               </div>
 
-              <div className="flex gap-1.5 overflow-x-auto pb-2 mb-2 -mx-1 px-1">
+              <div className="flex flex-wrap gap-1.5 pb-2 mb-2">
                 {orderedCats.map(cat => (
                   <button key={cat.key}
                     onClick={() => setEditingExpense(x => x && { ...x, category: cat.key })}
@@ -1311,7 +1317,36 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                 onChange={e => setEditingExpense(x => x && { ...x, note: e.target.value })}
                 onKeyDown={e => { if (e.key === "Enter") handleSaveExpenseEdit(); }}
                 placeholder={t("finance.editNote")}
-                className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white text-xs placeholder-white/25 focus:outline-none focus:border-white/30 mb-3" />
+                className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white text-xs placeholder-white/25 focus:outline-none focus:border-white/30 mb-2.5" />
+
+              {/* The date was the one field this dialog could not change, and it
+                  was not for want of plumbing: the state carried it and the save
+                  wrote it back. Only the control was missing, so a receipt
+                  entered on the wrong day had to be deleted and retyped.
+
+                  Same three controls as the add form, deliberately. A dialog
+                  that edits a row should not offer a different set of choices
+                  than the one that created it. */}
+              <div className="flex items-center gap-1.5 mb-3">
+                {[
+                  { label: t("finance.today"), value: todayDate },
+                  { label: t("finance.yesterday"), value: shiftDay(todayDate, -1) },
+                ].map(opt => (
+                  <button key={opt.value}
+                    onClick={() => setEditingExpense(x => x && { ...x, date: opt.value })}
+                    className={`text-[11px] rounded-full px-3 py-1 border transition-colors ${
+                      editingExpense.date === opt.value
+                        ? "theme-btn text-white border-transparent"
+                        : "border-white/10 text-white/50 hover:text-white"
+                    }`}>
+                    {opt.label}
+                  </button>
+                ))}
+                <DatePicker compact
+                  value={editingExpense.date !== todayDate && editingExpense.date !== shiftDay(todayDate, -1) ? editingExpense.date : ""}
+                  onChange={v => v && setEditingExpense(x => x && { ...x, date: v })}
+                  compactLabel={t("finance.pickDate")} />
+              </div>
 
               <div className="flex gap-2">
                 <button onClick={() => setEditingExpense(null)}

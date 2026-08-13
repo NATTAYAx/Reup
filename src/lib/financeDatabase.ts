@@ -478,9 +478,14 @@ export async function deleteGoal(id: number): Promise<void> {
 // ─── AI-callable helpers ──────────────────────────────────────────────────────
 
 /** Log an expense by natural language parse result */
-export async function aiLogExpense(amount: number, category: ExpenseCategory, note: string): Promise<void> {
-  const today = todayLocal();
-  await addExpense({ amount, category, note, date: today });
+export async function aiLogExpense(
+  amount: number,
+  category: ExpenseCategory,
+  note: string,
+  /** Omitted means today, which is what almost every entry is. */
+  date?: string,
+): Promise<void> {
+  await addExpense({ amount, category, note, date: date || todayLocal() });
 }
 
 /** Get a spending summary string for the AI to read */
