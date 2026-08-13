@@ -13,7 +13,7 @@ is what I have.
 I wrote it for myself and still use it every day. It is public because most of
 the interesting parts are the decisions rather than the code, and those are
 worth reading even if nobody else ever installs it.
-
+![Task list showing game, medication, bill and library cycles side by side, each with a live countdown](docs/1-main-tasks.png)
 ---
 
 ## What it does
@@ -24,12 +24,20 @@ to its own timezone or float with the app's, which is the difference between a
 Japanese server that resets at 04:00 Tokyo no matter where you are and a
 reminder that should follow you when you travel.
 
+![Add-task dialog with the cycle menu open, each option explaining what it does](docs/2-add-new-task.png)
+
+![Custom cycle fields with a live preview of the next due date](docs/3-custom-cycle.png)
+
+![Month view with tasks colour-coded by category and the day's items listed alongside](docs/4-calendar.png)
+
 Countdowns tick live. Pause a task and it goes quiet without being deleted.
 Delete one and it sits in the trash for thirty days.
 
 There is a money side too — log spending in one line of plain Thai, or point it
 at a screenshot of a bank transfer slip and let it read the amount. The image
 never gets stored.
+
+![Finance view with a month of entries, daily totals on the calendar and a running balance](docs/5-finance.png)
 
 Notifications respect quiet hours. Themes can be generated from an image.
 There is a live wallpaper feature that mostly works, about which see below.
@@ -87,6 +95,8 @@ device and never sent anywhere. The obvious better approach is to let a model
 judge the context, which is exactly what cannot be done, because doing it means
 sending the sentence off the machine. Privacy over accuracy, deliberately.
 
+![A Thai sentence typed as a command, parsed on the device and turned into an expense entry](docs/6-ai-assitance-thai.png)
+
 **There is a card for information you might want in a hurry.** It is local-only,
 excluded from backups, and never synced. It is called "สิ่งสำคัญ" rather than
 anything more specific, because a neutral name is one that can sit on a screen
@@ -117,6 +127,7 @@ configured. Cosmetic, tedious, unfixed.
 **Windows only.** Nothing in the code is deliberately Windows-specific except
 the wallpaper, but nothing has been tested anywhere else either.
 
+(docs/7-live-wallpaper.mov)
 ---
 
 ## Tests
