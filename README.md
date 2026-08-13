@@ -127,7 +127,7 @@ configured. Cosmetic, tedious, unfixed.
 **Windows only.** Nothing in the code is deliberately Windows-specific except
 the wallpaper, but nothing has been tested anywhere else either.
 
-(docs/7-live-wallpaper.mov)
+![live wallpaper](docs/7-live-wallpaper.mov)
 ---
 
 ## Tests
