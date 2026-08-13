@@ -127,7 +127,9 @@ configured. Cosmetic, tedious, unfixed.
 **Windows only.** Nothing in the code is deliberately Windows-specific except
 the wallpaper, but nothing has been tested anywhere else either.
 
-![live wallpaper](docs/7-live-wallpaper.mp4)
+https://github.com/user-attachments/assets/8aa75211-7716-4e84-ab07-39d5a2d5a89f
+
+
 ---
 
 ## Tests
