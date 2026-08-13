@@ -160,23 +160,70 @@ function extractDay(text: string): number | null {
   return null;
 }
 
+/**
+ * Words that NAME a category outright, as opposed to hinting at one.
+ *
+ * Kept separate from the hints below because an explicit label has to win. The
+ * old version had no way to say "personal" at all - it was only ever the
+ * fallback - so "blood pressure meds personal daily" was filed under Game,
+ * because "daily" was checked first and matched.
+ */
+const CATEGORY_LABELS: [RegExp, Category][] = [
+  [/\bpersonal\b/i, "personal"],
+  [/\bschool\b/i, "school"],
+  [/\bwork\b/i, "work"],
+  [/\bgame\b/i, "game"],
+];
+
+/** Words about the subject of a task. Checked when no category was stated. */
+const CATEGORY_HINTS: [RegExp, Category][] = [
+  [/\b(homework|assignment|exam|class|study|lecture|submit)\b/i, "school"],
+  [/\b(meeting|deadline|project|office|report|invoice|shift)\b/i, "work"],
+  [/\b(reset|boss|quest|raid|dungeon|gacha|stamina|lockout)\b/i, "game"],
+  [/\b(meds|medicine|pill|doctor|dentist|rent|bill|laundry|groceries)\b/i, "personal"],
+];
+
+/**
+ * The weakest signal there is, and it sits last for a reason.
+ *
+ * "daily" and "weekly" describe how often something happens, not what it is.
+ * They used to be checked as if they meant Game, which is why "blood pressure
+ * meds personal daily" was filed under Game - the frequency word was reached
+ * before anything else could speak.
+ *
+ * Dropping them entirely turned out to be worse: an unrecognised game typed as
+ * "Genshin Impact daily" has nothing else to go on and landed in Personal. So
+ * they stay, as a guess of last resort. Anything that knows better - a stated
+ * label, a subject word - is consulted first.
+ */
+const FREQUENCY_FALLBACK: [RegExp, Category][] = [
+  [/\b(daily|weekly|biweekly)\b/i, "game"],
+];
+
 function extractCategory(text: string): Category {
-  const lower = text.toLowerCase();
-  if (lower.includes("homework") || lower.includes("assignment") ||
-      lower.includes("exam") || lower.includes("class") ||
-      lower.includes("school") || lower.includes("study") ||
-      lower.includes("lecture") || lower.includes("submit")) return "school";
-  if (lower.includes("work") || lower.includes("meeting") ||
-      lower.includes("deadline") || lower.includes("project") ||
-      lower.includes("office") || lower.includes("report")) return "work";
-  if (lower.includes("game") || lower.includes("reset") ||
-      lower.includes("boss") || lower.includes("quest") ||
-      lower.includes("daily") || lower.includes("weekly")) return "game";
+  for (const [re, cat] of CATEGORY_LABELS) if (re.test(text)) return cat;
+  for (const [re, cat] of CATEGORY_HINTS) if (re.test(text)) return cat;
+  for (const [re, cat] of FREQUENCY_FALLBACK) if (re.test(text)) return cat;
   return "personal";
+}
+
+/** "every 3 days" -> 3. Null when no interval was given. */
+function extractIntervalDays(text: string): number | null {
+  const m = text.match(/\bevery\s+(\d{1,3})\s*(day|days)\b/i);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  return n >= 1 && n <= 365 ? n : null;
 }
 
 function extractResetType(text: string): ResetType {
   const lower = text.toLowerCase();
+
+  // "every 3 days" before the plain-daily check, or "every 3 days" matches
+  // nothing and falls all the way through to one_time. Found while testing the
+  // name fix: a custom cycle typed in the most obvious way possible became a
+  // one-off, silently.
+  if (extractIntervalDays(lower) !== null) return "custom_days";
+
   if (lower.includes("every day") || lower.includes("everyday") ||
       lower.includes("daily") || lower.includes("each day")) return "daily";
   if (lower.includes("biweekly") || lower.includes("bi-weekly") ||
@@ -184,26 +231,79 @@ function extractResetType(text: string): ResetType {
       lower.includes("fortnight")) return "biweekly";
   if (lower.includes("every week") || lower.includes("weekly") ||
       lower.includes("each week")) return "weekly";
+
+  // "every friday" is a weekly task. The old version only understood the word
+  // "weekly", so naming the day - which is how people actually say it - produced
+  // a one-off that fired once and never again.
+  if (/\bevery\s+(sun|mon|tues?|wednes|thurs?|fri|satur)(day)?\b/i.test(lower) ||
+      (/\bon\s+(sun|mon|tues?|wednes|thurs?|fri|satur)(day)?\b/i.test(lower) &&
+       !lower.includes("once"))) return "weekly";
+
   if (lower.includes("every month") || lower.includes("monthly")) return "custom_days";
   if (lower.includes("event") || lower.includes("until") ||
       lower.includes("ends")) return "event_window";
   return "one_time";
 }
 
-function extractName(text: string): string {
-  // Remove time and day references to get clean name
-  let name = text
-    .replace(/resets?/gi, "")
-    .replace(/every\s+(day|week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)/gi, "")
-    .replace(/everyday|daily|weekly|monthly/gi, "")
-    .replace(/at\s+\d{1,2}(:\d{2})?\s*(am|pm)?/gi, "")
-    .replace(/\d{1,2}(:\d{2})?\s*(am|pm)/gi, "")
-    .replace(/midnight|noon/gi, "")
+/**
+ * Everything the other extractors consume, so the name can drop all of it.
+ *
+ * This is the fix for the bug that produced task names like "Blood Pressure
+ * Meds Personal" and "Guild Raid Lockout On". The old version kept its own
+ * hand-written list of things to strip, which had drifted out of step with what
+ * extractDay and extractCategory actually recognise: a word could be understood
+ * by one and left behind by the other, and it ended up in the title.
+ *
+ * Two lists that have to agree, maintained separately, will not agree. So the
+ * day names come from DAY_MAP and the category words from CATEGORY_LABELS -
+ * the same tables the parsing reads - and adding a word in one place now
+ * removes it from names automatically.
+ */
+function stripParsedTokens(text: string): string {
+  let out = text;
+
+  // Category labels, which the old version never removed at all.
+  for (const [re] of CATEGORY_LABELS) out = out.replace(new RegExp(re.source, "gi"), " ");
+
+  // Day names, from the same table extractDay reads. Longest first, or "mon"
+  // eats the front of "monday" and leaves "day" sitting in the title.
+  const days = Object.keys(DAY_MAP).sort((a, b) => b.length - a.length);
+  out = out.replace(new RegExp(`\\b(${days.join("|")})\\b`, "gi"), " ");
+
+  // Frequency and reset words.
+  out = out
+    .replace(/\bresets?\b/gi, " ")
+    .replace(/\b(everyday|daily|weekly|biweekly|bi-weekly|monthly|fortnight(ly)?)\b/gi, " ")
+    .replace(/\bevery\s+\d*\s*(day|week|month|year)s?\b/gi, " ")
+    .replace(/\beach\s+(day|week|month)\b/gi, " ");
+
+  // Times, in the same shapes extractTime accepts.
+  out = out
+    .replace(/\b\d{1,2}:\d{2}\s*(am|pm)?/gi, " ")
+    .replace(/\b\d{1,2}\s*(am|pm)\b/gi, " ")
+    .replace(/\b(midnight|noon)\b/gi, " ");
+
+  // Connectives left stranded once the words around them are gone, plus the
+  // separators that turn up when a line is pasted from a table.
+  out = out
+    .replace(/[|,;]+/g, " ")
+    .replace(/\b(at|on|every|each)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-  // Capitalize first letter of each word
+  return out;
+}
+
+function extractName(text: string): string {
+  const stripped = stripParsedTokens(text);
+
+  // A task genuinely called "Work" or "Monday" would be stripped to nothing.
+  // Falling back to the raw text is better than inventing "New Task", because
+  // what the person typed is at least what they meant.
+  const name = stripped || text.trim();
+
   return name.split(" ")
+    .filter(Boolean)
     .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
     .join(" ");
 }
@@ -243,7 +343,11 @@ export function parseNaturalLanguage(input: string): ParsedTask {
     reset_type,
     reset_time,
     reset_day,
-    reset_interval_days: reset_type === "custom_days" ? 30 : null,
+    // A stated interval beats the monthly default, which is what "custom_days"
+    // used to mean unconditionally.
+    reset_interval_days: reset_type === "custom_days"
+      ? (extractIntervalDays(lower) ?? 30)
+      : null,
     anchor_date: (reset_type === "biweekly" || reset_type === "custom_days")
       ? todayLocal()
       : null,
