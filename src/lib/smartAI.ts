@@ -8,7 +8,7 @@
 // · Multi-task via ส่วน/แล้วก็/นอกจากนี้
 // ============================================================
 import { Category, ResetType } from "../types";
-import { todayBangkok, bangkokNow } from "./dateUtil";
+import { todayLocal, localNow } from "./dateUtil";
 import { matchLearnedPreset } from "./aiMemory";
 
 // ─── Types ───────────────────────────────────────────────────
@@ -229,7 +229,7 @@ function extractAllTimes(text: string): Array<{ time: string; index: number }> {
     while ((m = g.exec(text)) !== null) {
       if (!used.has(m.index)) {
         used.add(m.index);
-        results.push({ time: fn(m), index: m.index });
+        results.push({ time: applySpokenMinutes(text, m, fn(m)), index: m.index });
       }
     }
   }
@@ -287,7 +287,7 @@ function nextWeekdayDate(targetDay: number): string {
 }
 
 function toDateStr(d: Date): string {
-  return todayBangkok(d);
+  return todayLocal(d);
 }
 
 /** Format ISO date "YYYY-MM-DD" → "DD/MM/YYYY" for user-facing replies */
@@ -308,7 +308,7 @@ interface DateResult {
 
 function extractSpecificDate(text: string): DateResult | null {
   // Bangkok-aware "now" so วันนี้/พรุ่งนี้ are correct past midnight UTC
-  const today = bangkokNow();
+  const today = localNow();
 
   // ── 0. Thai/English relative minutes/hours → event_window + exact UTC deadline ─────
   // "อีก 5 นาที", "อีกครึ่งชั่วโมง", "in 10 minutes" etc.
@@ -347,10 +347,19 @@ function extractSpecificDate(text: string): DateResult | null {
   }
 
   // ── 1. Thai relative words ────────────────────────────────
+  // Longest key first, so "เมื่อวานซืน" is not eaten by "เมื่อวาน".
+  //
+  // The backwards ones were missing entirely, and the way they failed was the
+  // problem: "เพิ่มงาน X deadline เมื่อวาน" still classified as specific_date,
+  // found no date, and saved a row with specific_date = null. A task with no
+  // date has no next occurrence, so it never appeared in the list — saved,
+  // confirmed on screen, and invisible.
   const thaiRel: Record<string, number> = {
+    "เมื่อวานซืน": -2, "เมื่อวาน": -1, "วานนี้": -1, "วานซืน": -2,
     "วันนี้": 0, "พรุ่งนี้": 1, "มะรืนนี้": 2, "มะรืน": 2,
     "วันพรุ่ง": 1, "อาทิตย์หน้า": 7, "สัปดาห์หน้า": 7,
     "เดือนหน้า": 30,
+    "อาทิตย์ที่แล้ว": -7, "สัปดาห์ที่แล้ว": -7, "เดือนที่แล้ว": -30,
   };
   for (const [k, off] of Object.entries(thaiRel)) {
     if (text.includes(k)) {
@@ -423,9 +432,13 @@ function extractSpecificDate(text: string): DateResult | null {
 
   // ── 6. English relative + weekday ─────────────────────────
   const lower = text.toLowerCase();
+  // "day before yesterday" before "yesterday", and "day after tomorrow" before
+  // "tomorrow" — the loop takes the first key that appears in the text, so a
+  // shorter key listed earlier would swallow the longer phrase containing it.
   const enRel: Record<string, number> = {
-    "today": 0, "tonight": 0, "tomorrow": 1,
-    "day after tomorrow": 2, "next week": 7,
+    "day before yesterday": -2, "yesterday": -1,
+    "day after tomorrow": 2,
+    "today": 0, "tonight": 0, "tomorrow": 1, "next week": 7, "last week": -7,
     "in 2 days": 2, "in two days": 2, "in 3 days": 3, "in three days": 3,
   };
   for (const [k, off] of Object.entries(enRel)) {
@@ -457,15 +470,174 @@ export function isCorrectionIntent(text: string): boolean {
   return /^(no[,.]?|wait[,.]?|actually|แก้เป็น|เปลี่ยนเป็น|ไม่ใช่|หมายถึง|อ๋อ|เอาใหม่|ขอแก้|fix|change to|make it|ไม่ถูก)\b/i.test(text.trim());
 }
 
+/**
+ * Minutes spoken after the hour, which the hour table on its own throws away.
+ *
+ * "บ่ายสามสามสิบ" came out as 15:00. The table matched บ่ายสาม and stopped, and
+ * the สามสิบ that followed was left on the floor — the reminder was set half an
+ * hour early with nothing on screen to say so, which is the kind of wrong that
+ * is only discovered by missing something.
+ *
+ * Only what directly follows the matched hour is considered, so a minute figure
+ * belonging to some other part of the sentence cannot be pulled in.
+ */
+const SPOKEN_MINUTES: [RegExp, number][] = [
+  [/^\s*(?:นาที)?ครึ่ง/, 30],
+  [/^\s*สามสิบ(?:นาที)?/, 30],
+  [/^\s*สี่สิบห้า(?:นาที)?/, 45],
+  [/^\s*สี่สิบ(?:นาที)?/, 40],
+  [/^\s*ยี่สิบห้า(?:นาที)?/, 25],
+  [/^\s*ยี่สิบ(?:นาที)?/, 20],
+  [/^\s*สิบห้า(?:นาที)?/, 15],
+  [/^\s*สิบ(?:นาที)?/, 10],
+  [/^\s*ห้า(?:นาที)?(?!สิบ)/, 5],
+  [/^\s*(\d{1,2})\s*นาที/, -1],   // -1 means "read it from the capture"
+];
+
+function applySpokenMinutes(text: string, m: RegExpExecArray, hhmm: string): string {
+  if (!/^\d{2}:00$/.test(hhmm)) return hhmm;   // already has minutes
+  const rest = text.slice(m.index + m[0].length);
+
+  for (const [re, mins] of SPOKEN_MINUTES) {
+    const hit = rest.match(re);
+    if (!hit) continue;
+    const value = mins === -1 ? parseInt(hit[1], 10) : mins;
+    if (!isFinite(value) || value < 1 || value > 59) continue;
+    return `${hhmm.slice(0, 2)}:${String(value).padStart(2, "0")}`;
+  }
+  return hhmm;
+}
+
+// ─── Naming helpers ───────────────────────────────────────────
+//
+// Both of these exist because of one real message:
+//
+//   เพิ่มงาน "ต" ให้หน่อย deadline ตอนบ่ายสามสามสิบวันนี้
+//
+// which produced a task called `"ต" ให้หน่อย deadline`. Two separate mistakes,
+// each fixed here.
+
+/**
+ * A name in quotes is the name. Nothing else in the sentence competes with it.
+ *
+ * Every other rule in this file is guessing where a name starts and stops.
+ * Quotation marks are the person saying it outright, and a guess must never
+ * overrule a statement — so this is checked first, everywhere a name is worked
+ * out, and it returns immediately.
+ *
+ * Straight and typographic quotes both, because Windows and phone keyboards
+ * disagree about which to insert and whoever typed it did not choose.
+ */
+function quotedName(raw: string): string | null {
+  const m = raw.match(/["'\u201c\u201d\u201e\u00ab\u00bb\u2018\u2019](.{1,80}?)["'\u201c\u201d\u201e\u00ab\u00bb\u2018\u2019]/);
+  const inner = m?.[1]?.trim();
+  return inner ? inner : null;
+}
+
+/** Politeness that trails a request and is never part of what is being named. */
+const TRAILING_POLITENESS =
+  /\s*(?:ให้หน่อย|ให้ที|ให้ด้วย|หน่อยสิ|หน่อยได้ไหม|หน่อยได้มั้ย|หน่อย|ทีสิ|ที|ด้วยนะ|ด้วย|เลยนะ|นะครับ|นะคะ|ครับ|ค่ะ|คะ|นะ|เลย|deadline|ddl|due)\s*$/i;
+
+/**
+ * Strips trailing politeness, repeatedly, because it stacks: "ให้หน่อยนะครับ".
+ *
+ * `ลบ ต ให้หน่อย` was reaching the database as a task named "ต ให้หน่อย" and
+ * finding nothing. The courtesy is addressed to the app; it is not part of what
+ * is being pointed at.
+ */
+function stripPoliteness(s: string): string {
+  let out = s.trim();
+  for (let i = 0; i < 4; i++) {
+    const next = out.replace(TRAILING_POLITENESS, "").trim();
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+/**
+ * Sentences this parser has no verb for, and must therefore not claim.
+ *
+ * THE FAILURE THIS PREVENTS, WHICH HAPPENED FOR REAL
+ *
+ *   "เล่น Honkai แล้ว"        → intent=add, confidence 0.97
+ *   "พัก Honkai ไว้ก่อน"       → intent=add, confidence 0.97
+ *   "ติ๊ก Honkai แล้วบันทึกกาแฟ 60" → intent=add, confidence 0.97
+ *
+ * All three offered to CREATE a duplicate task. None of them reached the model,
+ * because 0.97 clears the local floor of 0.9 and the answer is returned without
+ * ever leaving the machine.
+ *
+ * The cause is that preset matching scores on the NAME. Seeing a known game
+ * earns high confidence whether the sentence says to add it, finish it, pause
+ * it, or delete it — the verb is never consulted. High confidence about the
+ * wrong thing is the worst state available here, because it is the one state
+ * that produces no error, no log entry, and no way to find out.
+ *
+ * So this is a list of what the parser CANNOT do, checked before what it can.
+ * It does not teach the parser these verbs — that is the model's job, and the
+ * model already has words for every one of them. It only stops the parser
+ * answering a question it was never asked.
+ *
+ * That is the shape this file should keep growing in: narrower and more certain,
+ * not wider. Every phrase added to the parser is a phrase that will never again
+ * get the model's judgement.
+ */
+// The object sits BETWEEN the verb and its ending in Thai — "เล่น Honkai แล้ว",
+// "พัก Honkai ไว้ก่อน" — so the two halves have to be allowed to be apart. The
+// gap is bounded so the match stays inside one clause rather than reaching
+// across a whole paragraph to find a word that happens to be there.
+const GAP = "[\\s\\S]{0,30}?";
+
+const OUT_OF_LOCAL_SCOPE: RegExp[] = [
+  // completed — "เล่น X แล้ว", "ทำเสร็จแล้ว", "ติ๊ก", "done"
+  new RegExp(`(?:เล่น|ทำ|กิน|อ่าน|วิ่ง|เคลียร์|รับ|ส่ง)${GAP}(?:แล้ว|เสร็จ)`),
+  /เสร็จแล้ว|ติ๊ก|\bdone\b|\bfinished\b|\bcompleted\b/i,
+  // not done after all
+  /ยังไม่ได้ทำ|ยกเลิกติ๊ก|เอาติ๊กออก|\buncheck\b|\bundone\b/i,
+  // set aside / bring back
+  new RegExp(`พัก${GAP}(?:ไว้|ก่อน)`),
+  new RegExp(`(?:หยุด|เก็บ)${GAP}ไว้ก่อน`),
+  /ไม่เอาตอนนี้|\bpause\b|\bsnooze\b/i,
+  new RegExp(`เอา${GAP}กลับมา`),
+  /เปิดใหม่|\bresume\b|\bunpause\b/i,
+  // money coming in — the parser only knows money going out
+  /ได้เงิน|ได้ค่า|รายรับ|เงินเข้า|โอนเข้า|เงินเดือน|\bincome\b|\bgot paid\b/i,
+  // the bin
+  /กู้คืน|เอาคืน|\brestore\b|\bundelete\b/i,
+  // the urgent flag on an EXISTING task. Deliberately narrow: "เพิ่มงาน X ด่วน"
+  // is an add with a flag on it and the parser handles that correctly, so the
+  // bare word ด่วน must not be enough to defer. Only the phrasings that mean
+  // "change this one" are listed.
+  new RegExp(`(?:ตั้ง|ทำให้|เปลี่ยน)${GAP}(?:เป็น\\s*)?(?:ด่วน|เร่งด่วน)`),
+  /เอาด่วนออก|ไม่ด่วนแล้ว|\b(?:mark|set|flag)\b[\s\S]{0,20}?\burgent\b/i,
+];
+
+/** True when the sentence asks for something outside this parser's vocabulary. */
+function isOutOfLocalScope(text: string): boolean {
+  return OUT_OF_LOCAL_SCOPE.some(re => re.test(text));
+}
+
 // ─── Intent detection ─────────────────────────────────────────
 function detectIntent(text: string): AIIntent {
   const lower = text.toLowerCase();
+
+  // Checked FIRST, ahead of every pattern below, because the patterns below are
+  // what produce the confident wrong answer. See OUT_OF_LOCAL_SCOPE.
+  if (isOutOfLocalScope(text)) return "unknown";
 
   // Correction messages — return clarify so smartParse can handle gracefully
   if (isCorrectionIntent(text)) return "clarify";
 
   // Delete intent — require ลบ as a standalone word to avoid ลบล้าง, ลบเลือน etc.
-  if (/(?:^|[\s,])ลบ(?:ออก|งาน|task|ทิ้ง)?(?:\s|$)|ลบออก|เอาออก|ยกเลิกงาน|\bdelete\s+\S|\bremove\s+\S/.test(text)) return "delete";
+  //
+  // The label chain after ลบ has to be allowed to REPEAT. The old pattern took
+  // at most one of งาน/task/ทิ้ง/ออก and then demanded whitespace, so
+  // `ลบงานชื่อ "ต"` failed on ชื่อ, fell through every branch, and was classified
+  // as ADD — a delete command that created a task named after itself. That is
+  // the worst available way to be wrong here, so the labels now repeat freely
+  // and an opening quote counts as a boundary just like a space does.
+  if (/(?:^|[\s,])ลบ(?:\s*(?:ออก|งาน|task|ทิ้ง|ชื่อ|ที่ชื่อ))*(?:[\s"'\u201c\u201d]|$)|ลบออก|เอาออก|ยกเลิกงาน|\bdelete\s+\S|\bremove\s+\S/.test(text)) return "delete";
 
   // Edit time — expanded Thai patterns
   if (/เปลี่ยนเวลา|แก้เวลา|ขยับเวลา|เลื่อนเวลา|เลื่อน.*ไป|ย้ายเวลา|change time|update time|reschedule|move.*to/.test(text)) return "edit_time";
@@ -485,9 +657,17 @@ function detectIntent(text: string): AIIntent {
 
 /** Extract the target task name from an edit/delete command */
 function extractTargetName(text: string): string {
+  // `ลบ ต ให้หน่อย` was matching the greedy-to-end pattern and returning
+  // "ต ให้หน่อย", which then found no task by that name. The politeness is
+  // addressed to the app, not part of what is being pointed at.
+  // Quoted first, for the same reason cleanName checks quotes first: quotes are
+  // the user stating the name outright, and every pattern below is a guess.
+  const q = quotedName(text);
+  if (q) return q;
+
   const patterns = [
-    // Thai: ลบ "X" / ลบ X ออก / ลบงาน X
-    /ลบ\s*(?:งาน|task)?\s*["""]?(.+?)["""]?\s*(?:ออก|ทิ้ง|$)/,
+    // Thai: ลบ "X" / ลบ X ออก / ลบงาน X / ลบงานชื่อ X
+    /ลบ\s*(?:(?:งาน|task|ชื่อ|ที่ชื่อ)\s*)*["""]?(.+?)["""]?\s*(?:ออก|ทิ้ง|$)/,
     /ลบ\s*["""](.+?)["""]/,
     // Thai: เปลี่ยนเวลา X เป็น / แก้เวลา X
     /(?:เปลี่ยนเวลา|แก้เวลา|ขยับเวลา|เลื่อนเวลา)\s*["""]?(.+?)["""]?\s*(?:เป็น|to|$)/,
@@ -500,7 +680,10 @@ function extractTargetName(text: string): string {
   ];
   for (const p of patterns) {
     const m = text.match(p);
-    if (m?.[1]) return m[1].trim();
+    if (m?.[1]) {
+      const name = stripPoliteness(m[1].trim());
+      if (name) return name;
+    }
   }
   return "";
 }
@@ -603,7 +786,7 @@ const THAI_NOISE = [
   /เวลา\S*/g,
   /ถึง\S*/g,
   /วัน(จันทร์|อังคาร|พุธ|พฤหัส|ศุกร์|เสาร์|อาทิตย์)/g,
-  /พรุ่งนี้|วันนี้|มะรืน/g,
+  /เมื่อวานซืน|เมื่อวาน|วานซืน|วานนี้|พรุ่งนี้|วันนี้|มะรืน/g,
   /อีก\s*\S+\s*(วัน|อาทิตย์|สัปดาห์|เดือน)/g,
   /\S+ข้างหน้า/g,
   /ทุกวัน|ทุกสัปดาห์|ทุกอาทิตย์/g,
@@ -624,6 +807,10 @@ const THAI_NOISE = [
 ];
 
 function cleanName(raw: string, lang: "th" | "en" | "mixed", isPreset = false): string {
+  // Checked before anything else, so no later rule can chip away at it.
+  const quoted = quotedName(raw);
+  if (quoted) return quoted;
+
   let s = raw;
   for (const p of THAI_NOISE) s = s.replace(p, "");
 
@@ -666,6 +853,7 @@ function cleanName(raw: string, lang: "th" | "en" | "mixed", isPreset = false): 
     .replace(/next\s+(week|month)/gi, "")
     .replace(/\b(urgent|important|critical|asap|priority)\b/gi, "")
     .replace(/\s+/g, " ").trim();
+  s = stripPoliteness(s);
   if (!s) return "";
   if (lang !== "en") return s.trim();
   return s.split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
@@ -766,7 +954,21 @@ function parseSegment(
     confidence += 0.2;
   }
 
-  const reset_type: ResetType = specific_date ? "specific_date" : detectResetType(segment);
+  // A specific_date task with NO DATE cannot exist on screen: getNextReset has
+  // nothing to compute from, so the row saves, reports success, and then never
+  // appears in any list. That is the worst shape a task can have — every part
+  // of the app behaves correctly and the person is simply told that something
+  // happened which did not.
+  //
+  // It is reachable whenever detectResetType reads a deadline word but the date
+  // itself fails to parse, which is exactly what "deadline เมื่อวาน" did before
+  // เมื่อวาน was a word this file knew. So the type is only kept when a date
+  // came with it; otherwise the task becomes an undated one-off, which is what
+  // the sentence actually said. Visible and editable beats correct-in-principle
+  // and invisible.
+  const detected = specific_date ? "specific_date" : detectResetType(segment);
+  const reset_type: ResetType =
+    detected === "specific_date" && !specific_date ? "one_time" : detected;
   details.push({ field: "type", value: reset_type, sure: true });
   confidence += 0.15;
 
@@ -803,6 +1005,24 @@ export function smartParse(input: string): AIResult {
   const lang = detectLang(input);
   const isThai = lang === "th" || lang === "mixed";
   const intent = detectIntent(input);
+
+  // ── Intent: unknown — hand it over, do not guess ───────────
+  //
+  // Returning early with a low score is the whole mechanism. Nothing below this
+  // line runs, so the preset matcher never gets to award 0.97 for recognising a
+  // game name in a sentence that was never about adding a game, and the message
+  // drops below the local floor and goes to the model, which has words for what
+  // was actually asked.
+  if (intent === "unknown") {
+    return {
+      intent: "unknown",
+      tasks: [], isMulti: false,
+      reply: "",
+      confidence: 0.2,
+      details: [],
+      needsClarification: false,
+    };
+  }
 
   // ── Intent: clarify (correction message received) ─────────
   if (intent === "clarify") {
@@ -1026,8 +1246,14 @@ export function smartParse(input: string): AIResult {
   // Safety: never produce one_time or event_window without a proper event_end from AI
   // one_time uses Bangkok-local event_end which freezes WebKit buttons
   // event_window (Limited Event) without event_end causes null countdown → invisible task
-  if (reset_type === "one_time") reset_type = "specific_date";
-  if (reset_type === "event_window" && !exactDeadlineISO) reset_type = "specific_date";
+  // Only promote to specific_date when there IS a date to promote it with —
+  // see the note in the single-task path for why an undated specific_date is
+  // a task that saves successfully and is then never seen again.
+  if (reset_type === "one_time" && sharedDate) reset_type = "specific_date";
+  if (reset_type === "event_window" && !exactDeadlineISO) {
+    reset_type = sharedDate ? "specific_date" : "one_time";
+  }
+  if (reset_type === "specific_date" && !sharedDate) reset_type = "one_time";
   details.push({ field: "type", value: reset_type, sure: true });
   confidence += 0.15;
   details.push({ field: "category", value: sharedCategory, sure: true });

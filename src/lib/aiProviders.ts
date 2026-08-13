@@ -292,8 +292,38 @@ export function setModel(model: string) {
   localStorage.setItem(K_MODEL, model.trim());
 }
 
+/** Hosts the app is allowed to talk to. Must stay in step with connect-src in
+ *  tauri.conf.json — the CSP is what actually enforces this; the check here
+ *  exists so a blocked URL produces a sentence instead of a silent failure.
+ *
+ *  Why this list is short: a custom base URL is a complete exfiltration path.
+ *  Anything that can write one line of localStorage can point every request,
+ *  API key included, at a machine it owns, and nothing on screen would change.
+ *  Localhost is allowed so a local model still works, since that never leaves
+ *  the machine. */
+const ALLOWED_HOSTS = [
+  "generativelanguage.googleapis.com",
+  "api.anthropic.com",
+  "api.openai.com",
+];
+
+export function isAllowedEndpoint(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.hostname === "localhost" || u.hostname === "127.0.0.1") return true;
+    return u.protocol === "https:" && ALLOWED_HOSTS.includes(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
 export function getBaseUrl(id: ProviderId = getProviderId()): string {
-  return localStorage.getItem(K_BASEURL) || PROVIDERS[id].defaultBaseUrl || "";
+  const stored = localStorage.getItem(K_BASEURL);
+  if (stored && !isAllowedEndpoint(stored)) {
+    console.warn("[ai] stored base URL is not an allowed endpoint, ignoring:", stored);
+    return PROVIDERS[id].defaultBaseUrl || "";
+  }
+  return stored || PROVIDERS[id].defaultBaseUrl || "";
 }
 export function setBaseUrl(url: string) {
   localStorage.setItem(K_BASEURL, url.trim());

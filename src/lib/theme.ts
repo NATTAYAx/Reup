@@ -103,6 +103,7 @@ export function applyTheme(t: AppTheme) {
     .bg-indigo-500\\/10 { background-color: rgba(${sr},${sg},${sb},0.10) !important; }
 
     /* ── Borders ── */
+    .border-purple-500 { border-color: ${t.primary} !important; }
     .border-purple-500\\/30 { border-color: rgba(${pr},${pg},${pb},0.30) !important; }
     .border-purple-500\\/40 { border-color: rgba(${pr},${pg},${pb},0.40) !important; }
     .border-purple-500\\/60 { border-color: rgba(${pr},${pg},${pb},0.60) !important; }

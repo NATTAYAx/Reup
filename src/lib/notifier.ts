@@ -30,6 +30,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { CountdownResult } from "../types";
+import { wallClock } from "./tz";
 
 const INVOKE_TIMEOUT = 3_000;
 const FINAL_WARN_MS  = 10 * 60 * 1000;
@@ -63,6 +64,96 @@ function pruneOld(activeTaskIds: number[]) {
   for (const id of _lastDeadline.keys()) {
     if (!ids.has(id)) _lastDeadline.delete(id);
   }
+}
+
+// ─── Quiet hours ──────────────────────────────────────────────────────────────
+//
+// Mute used to be the only control, and it is all-or-nothing: either every
+// reminder or none of them. That is the wrong shape for the actual problem,
+// which is not "reminders are unwelcome" but "a chime at five in the morning
+// costs a night's sleep". A window is the smaller, truer setting.
+//
+// TWO THINGS HERE ARE EASY TO GET WRONG.
+//
+// 1. A SUPPRESSED NOTIFICATION MUST NOT COUNT AS FIRED. The dedup set is what
+//    stops a reminder repeating; if a quiet-hours skip wrote to it, the
+//    reminder would be cancelled rather than delayed and would never arrive.
+//    So the check below returns before _notified is touched, which also means
+//    catch-up is free: the moment the window ends, the next tick finds the
+//    reminder still unsent and still inside its window, and sends it.
+//
+// 2. SILENCE MUST NOT CAUSE THE MISS IT WAS MEANT TO PREVENT. If the thing is
+//    actually DUE during the quiet window, staying silent is not a kindness —
+//    the reminder would arrive after the deadline, which is the same as never.
+//    So a task whose deadline falls inside the current window is exempt and
+//    rings anyway. Quiet hours delay reminders; they do not eat deadlines.
+
+export interface QuietHours {
+  enabled: boolean;
+  /** "HH:MM" in the app's timezone. */
+  start: string;
+  /** "HH:MM". Earlier than start means the window crosses midnight. */
+  end: string;
+}
+
+const QUIET_KEY = "gamesched_quiet_hours_v1";
+const QUIET_DEFAULT: QuietHours = { enabled: false, start: "23:00", end: "08:00" };
+
+export function getQuietHours(): QuietHours {
+  try {
+    const raw = localStorage.getItem(QUIET_KEY);
+    if (!raw) return QUIET_DEFAULT;
+    const p = JSON.parse(raw) as Partial<QuietHours>;
+    return {
+      enabled: Boolean(p.enabled),
+      start: typeof p.start === "string" && /^\d{2}:\d{2}$/.test(p.start) ? p.start : QUIET_DEFAULT.start,
+      end: typeof p.end === "string" && /^\d{2}:\d{2}$/.test(p.end) ? p.end : QUIET_DEFAULT.end,
+    };
+  } catch {
+    return QUIET_DEFAULT;
+  }
+}
+
+export function setQuietHours(q: QuietHours) {
+  try { localStorage.setItem(QUIET_KEY, JSON.stringify(q)); } catch { /* full */ }
+}
+
+const toMinutes = (hhmm: string): number => {
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + m;
+};
+
+/**
+ * Where `at` sits relative to the window, and when the window ends.
+ *
+ * `endsAt` is what makes the deadline exemption possible: without knowing when
+ * quiet is over, there is no way to ask whether the deadline lands inside it.
+ * Returns null when quiet hours are off or `at` is outside the window.
+ *
+ * A start equal to the end is treated as OFF, not as twenty-four hours of
+ * silence. Someone who sets both to 08:00 has made a mistake, and the failure
+ * that loses every reminder forever is not the one to pick.
+ */
+export function quietWindowEnd(at: number = Date.now()): number | null {
+  const q = getQuietHours();
+  if (!q.enabled) return null;
+
+  const startMin = toMinutes(q.start);
+  const endMin   = toMinutes(q.end);
+  if (startMin === endMin) return null;
+
+  const w = wallClock(at);
+  const nowMin = w.h * 60 + w.mi;
+
+  const wraps = endMin < startMin;
+  const inside = wraps
+    ? (nowMin >= startMin || nowMin < endMin)   // e.g. 23:00 → 08:00
+    : (nowMin >= startMin && nowMin < endMin);  // e.g. 01:00 → 06:00
+  if (!inside) return null;
+
+  // Minutes from now until the window ends, allowing for the wrap.
+  const untilEnd = endMin > nowMin ? endMin - nowMin : 1440 - nowMin + endMin;
+  return at + untilEnd * 60_000;
 }
 
 export function isMuted(): boolean {
@@ -162,6 +253,10 @@ function fireNotification(
 export function checkAndNotify(results: CountdownResult[]) {
   if (isMuted()) return;
 
+  // Computed once per tick rather than per task: it reads localStorage and the
+  // answer cannot differ between two tasks in the same pass.
+  const quietUntil = quietWindowEnd();
+
   console.log(`[notify-debug] called with ${results.length} tasks, _notified size=${_notified.size}`);
   results.forEach(r => {
     const win = getNotifyWindowMs(r);
@@ -188,6 +283,13 @@ export function checkAndNotify(results: CountdownResult[]) {
       _notified.delete(buildKey(task.id, "final"));
     }
     _lastDeadline.set(task.id, deadlineNow);
+
+    // Quiet hours. Skipped BEFORE _notified is touched, so this delays the
+    // reminder rather than cancelling it — when the window ends the next tick
+    // finds it unsent and fires. Exempt when the deadline itself falls inside
+    // the window, because silence there would not delay the reminder, it would
+    // replace it with nothing.
+    if (quietUntil !== null && deadlineNow > quietUntil) continue;
 
     const notifyWindowMs = getNotifyWindowMs(result);
     const mainKey        = buildKey(task.id, "main");

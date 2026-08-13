@@ -17,10 +17,11 @@ import {
 import { getMonthIncome, getIncomeByMonth, addIncome, deleteIncome } from "../lib/database";
 import { t, getLang } from "../lib/i18n";
 import DatePicker from "./DatePicker";
+import Select from "./Select";
 import { scanImage, getLastRawReply, type ScannedItem } from "../lib/slipScanner";
 import { slipAlreadyRecorded, looksLikeDuplicate } from "../lib/financeDatabase";
 import { learnMerchant, recallMerchant } from "../lib/aiMemory";
-import { todayBangkok, monthBangkok } from "../lib/dateUtil";
+import { todayLocal, monthLocal } from "../lib/dateUtil";
 
 interface Props {
   onBack: () => void;
@@ -151,8 +152,8 @@ function MonthCalendar({ month, data, selected, onPick }: {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }: Props) {
-  const [todayDate, setTodayDate] = useState(todayBangkok);
-  const [currentMonth, setCurrentMonth] = useState(() => monthBangkok());
+  const [todayDate, setTodayDate] = useState(todayLocal);
+  const [currentMonth, setCurrentMonth] = useState(() => monthLocal());
 
   const [expenses, setExpenses]     = useState<Expense[]>([]);
   const [catTotals, setCatTotals]   = useState<{ category: string; total: number }[]>([]);
@@ -180,7 +181,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
   // How the month is being looked at. All three modes read data that is already
   // loaded, so switching between them costs no query.
   const [viewMode, setViewMode]       = useState<"month" | "calendar">("month");
-  const [selectedDay, setSelectedDay] = useState(todayBangkok);
+  const [selectedDay, setSelectedDay] = useState(todayLocal);
   const [showAllCats, setShowAllCats] = useState(false);
 
   // Income could only ever be entered through the AI chat, which is why the
@@ -190,12 +191,12 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
   const [prevMonthTotal, setPrevMonthTotal] = useState(0);
   const [showAddIncome, setShowAddIncome] = useState(false);
   const [incForm, setIncForm] = useState(() => ({
-    amount: "", source: "", note: "", date: todayBangkok(),
+    amount: "", source: "", note: "", date: todayLocal(),
   }));
 
   const [showAddExpense, setShowAddExpense] = useState(false);
   const [expForm, setExpForm] = useState(() => ({
-    amount: "", category: "food" as ExpenseCategory, note: "", date: todayBangkok(),
+    amount: "", category: "food" as ExpenseCategory, note: "", date: todayLocal(),
     slipRef: null as string | null, merchant: null as string | null,
   }));
   const slipRef = useRef<HTMLInputElement>(null);
@@ -363,14 +364,14 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
   // June while the list beside it is still headed 26 July.
   useEffect(() => {
     if (selectedDay.slice(0, 7) === currentMonth) return;
-    const today = todayBangkok();
+    const today = todayLocal();
     setSelectedDay(today.slice(0, 7) === currentMonth ? today : `${currentMonth}-01`);
   }, [currentMonth, selectedDay]);
 
   // Roll the "today" figure over at midnight without a restart.
   useEffect(() => {
     const interval = setInterval(() => {
-      const now = todayBangkok();
+      const now = todayLocal();
       setTodayDate(prev => (prev === now ? prev : now));
     }, 60_000);
     return () => clearInterval(interval);
@@ -507,7 +508,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
   const insights = useMemo(() => {
     const first = new Date(currentMonth + "-01T00:00:00");
     const daysInMonth = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
-    const running = currentMonth === monthBangkok();
+    const running = currentMonth === monthLocal();
     const elapsed = running ? Math.max(1, parseInt(todayDate.slice(8), 10)) : daysInMonth;
     const avg = monthTotal / elapsed;
     const deltaPct = prevMonthTotal > 0
@@ -557,7 +558,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
     return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
   }, [currentMonth]);
 
-  const isCurrentMonth = currentMonth === monthBangkok();
+  const isCurrentMonth = currentMonth === monthLocal();
   const balance = monthIncome - monthTotal;
 
   const goalsCard = (
@@ -964,17 +965,21 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                           {row.kind === "topup" && (
                             <span className="text-amber-300/80 text-[10px]">{t("finance.scanTopup")}</span>
                           )}
-                          <select
-                            value={row.category ?? ""}
-                            onChange={e => setReview(r => r && r.map(x => x.id === row.id ? { ...x, category: e.target.value || null } : x))}
-                            className={`ml-auto bg-white/5 border rounded-md text-[10px] px-1 py-0.5 focus:outline-none ${
-                              row.category ? "border-white/10 text-white/70" : "border-amber-400/40 text-amber-300"
-                            }`}>
-                            <option value="" className="bg-gray-900">{t("finance.pickCat")}</option>
-                            {categories.map(c => (
-                              <option key={c.key} value={c.key} className="bg-gray-900">{c.emoji} {c.label}</option>
-                            ))}
-                          </select>
+                          {/* The last native <select> in the app. Chromium hands
+                              the option list to Windows, so this one row was
+                              still opening a grey system menu in the system font
+                              in the middle of a dark app. */}
+                          <div className={`ml-auto w-40 ${row.category ? "" : "rounded-xl ring-1 ring-amber-400/40"}`}>
+                            <Select
+                              value={row.category ?? ""}
+                              placeholder={t("finance.pickCat")}
+                              options={[
+                                { value: "", label: t("finance.pickCat") },
+                                ...categories.map(c => ({ value: c.key, icon: c.emoji, label: c.label })),
+                              ]}
+                              onChange={v => setReview(r => r && r.map(x => x.id === row.id ? { ...x, category: v || null } : x))}
+                            />
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -1081,7 +1086,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                       onChange={e => updateCategory(c.id, { emoji: e.target.value.slice(0, 2) }).then(refreshCats)}
                       className="w-9 bg-white/5 border border-white/10 rounded-lg px-1 py-1.5 text-center text-sm focus:outline-none focus:border-white/30" />
                     <input defaultValue={c.label}
-                      onBlur={e => { if (e.target.value !== c.label) updateCategory(c.id, { label: e.target.value }).then(refreshCats); }}
+                      onBlur={e => { if (e.target.value !== c.label) updateCategory(c.id, { label: e.target.value }).then(refreshCats).catch(() => refreshCats()); }}
                       className="flex-1 min-w-0 bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-white text-xs focus:outline-none focus:border-white/30" />
                     <button onClick={() => moveCategory(c.id, -1).then(refreshCats)} disabled={i === 0}
                       className="text-white/30 hover:text-white disabled:opacity-20 p-1"><ChevronLeft size={13} className="rotate-90" /></button>

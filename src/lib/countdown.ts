@@ -1,8 +1,6 @@
 import { Task, CountdownResult, isCompletedThisCycle } from "../types";
-import { toZonedTime } from "date-fns-tz";
+import { wallClock, wallToMs, addDays, atTime, dateStrToWall, getAppTimeZone, type Wall } from "./tz";
 import { t } from "./i18n";
-
-const TIMEZONE = "Asia/Bangkok";
 
 // ─── One rule for time, applied to every kind of task ─────────────────────────
 //
@@ -21,21 +19,25 @@ const TIMEZONE = "Asia/Bangkok";
 // keep behaving identically, one-off tasks carry null and still mean end of day.
 // The change is only that the second case is now a choice rather than the only
 // possibility.
+//
+// Every zone-aware conversion below goes through lib/tz. There is no "+07:00",
+// no minus seven, and no 16:59:59 standing in for a Bangkok midnight anywhere in
+// this file any more, and none of the arithmetic depends on what the machine's
+// own clock is set to.
 
-/** A wall-clock moment in Bangkok, as a real Date. */
-function bangkokMoment(dateStr: string, time?: string | null): Date | null {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  if (!y || !m || !d) return null;
+/** A wall-clock moment in the task's zone, as a real instant. */
+function momentInZone(dateStr: string, time: string | null | undefined, zone: string): Date | null {
   const hhmm = parseHHMM(time);
-  if (!hhmm) {
-    // 23:59:59 Bangkok is 16:59:59 UTC.
-    return new Date(Date.UTC(y, m - 1, d, 16, 59, 59));
-  }
-  // Date.UTC rolls the day back on its own when the hour goes negative.
-  return new Date(Date.UTC(y, m - 1, d, hhmm.h - 7, hhmm.m, 0));
+  // No time means the whole day, which ends one second before the next one.
+  const w = hhmm
+    ? dateStrToWall(dateStr, hhmm.h, hhmm.m, 0)
+    : dateStrToWall(dateStr, 23, 59, 59);
+  return w ? new Date(wallToMs(w, zone)) : null;
 }
 
-function parseHHMM(time?: string | null): { h: number; m: number } | null {
+interface HM { h: number; m: number }
+
+function parseHHMM(time?: string | null): HM | null {
   if (!time) return null;
   const match = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
   if (!match) return null;
@@ -45,41 +47,58 @@ function parseHHMM(time?: string | null): { h: number; m: number } | null {
   return { h, m };
 }
 
-/** Repeating kinds need a concrete time to aim at; with none, aim at end of day. */
-const timeOrEndOfDay = (time?: string | null) => (parseHHMM(time) ? time!.trim() : "23:59");
+/** Repeating kinds need a concrete time to aim at; with none, aim at end of day.
+ *  Returns numbers rather than a string, so the helpers below do not each
+ *  re-split the same "HH:MM" once per task on every tick of the render loop. */
+const timeOrEndOfDay = (time?: string | null) => parseHHMM(time) ?? { h: 23, m: 59 };
+
+/** A timestamp that carries no zone of its own is read as the app's zone, which
+ *  is what the old code meant when it glued "+07:00" onto the end of one. */
+function parseLooseInstant(raw: string, zone: string): Date | null {
+  const s = raw.trim();
+  if (!s) return null;
+  if (/[Zz]$/.test(s) || /[+-]\d{2}:?\d{2}$/.test(s)) {
+    const d = new Date(s.includes("T") ? s : s.replace(" ", "T"));
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/.exec(s);
+  if (m) {
+    return new Date(wallToMs({
+      y: +m[1], mo: +m[2], d: +m[3],
+      h: +m[4], mi: +m[5], s: m[6] ? +m[6] : 0,
+      dow: 0,
+    }, zone));
+  }
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
 
 export function getNextReset(task: Task): Date | null {
-  const now = new Date();
-  const nowBangkok = toZonedTime(now, TIMEZONE);
+  const nowMs = Date.now();
+  // A task pinned to a zone is read in that zone; otherwise it floats with the
+  // app's. Both are cache hits after the first task of a tick.
+  const zone = task.time_zone || getAppTimeZone();
+  const now = wallClock(nowMs, zone);
 
   switch (task.reset_type) {
     case "daily":
-      return getNextDaily(nowBangkok, timeOrEndOfDay(task.reset_time));
+      return getNextDaily(now, nowMs, timeOrEndOfDay(task.reset_time), zone);
 
     case "weekly":
-      return getNextWeekly(nowBangkok, task.reset_day!, timeOrEndOfDay(task.reset_time));
+      return getNextWeekly(now, nowMs, task.reset_day!, timeOrEndOfDay(task.reset_time), zone);
 
     case "biweekly":
-      return getNextCycle(nowBangkok, task.anchor_date!, 14, timeOrEndOfDay(task.reset_time));
+      return getNextCycle(nowMs, task.anchor_date!, 14, timeOrEndOfDay(task.reset_time), zone);
 
     case "custom_days":
-      return getNextCycle(nowBangkok, task.anchor_date!, task.reset_interval_days!, timeOrEndOfDay(task.reset_time));
+      return getNextCycle(nowMs, task.anchor_date!, task.reset_interval_days!, timeOrEndOfDay(task.reset_time), zone);
 
     case "one_time": {
       // one_time is kept for backward-compat with old DB rows only.
       // New tasks from AI chat use specific_date instead.
       if (!task.event_end) return null;
       // Normalize: space→T so WebKit parses correctly
-      let normalized = task.event_end.includes('T')
-        ? task.event_end
-        : task.event_end.replace(' ', 'T');
-      // If no timezone info (no Z, no +HH:MM), it was stored as Bangkok local — append +07:00
-      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(normalized)) {
-        normalized += '+07:00';
-      }
-      const d = new Date(normalized);
-      if (isNaN(d.getTime())) return null;
-      return d;
+      return parseLooseInstant(task.event_end, zone);
     }
 
     case "event_window": {
@@ -97,13 +116,11 @@ export function getNextReset(task: Task): Date | null {
       // Case 2: date-only string "YYYY-MM-DD" (from manual AddTaskModal date picker)
       // Treat as end of that day in Bangkok time (23:59:59 UTC+7 = 16:59:59 UTC)
       if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-        return bangkokMoment(raw, task.reset_time);
+        return momentInZone(raw, task.reset_time, zone);
       }
-      // Case 3: datetime with T but no Z/offset — treat as Bangkok local, append +07:00
-      const ev = raw.includes('T') ? raw : raw.replace(' ', 'T');
-      const normalized = /[Z+\-]\d{2}:\d{2}$/.test(ev) || ev.endsWith('Z') ? ev : ev + '+07:00';
-      const d = new Date(normalized);
-      if (isNaN(d.getTime())) {
+      // Case 3: a timestamp with no zone of its own, read as the app's zone.
+      const d = parseLooseInstant(raw, zone);
+      if (!d) {
         console.warn("[countdown] event_window Invalid Date for task", task.id, task.event_end);
         return null;
       }
@@ -114,7 +131,7 @@ export function getNextReset(task: Task): Date | null {
       if (!task.specific_date) return null;
       // With a time it is an appointment, without one it is a deadline for the
       // day. Both are one-off tasks; only the precision differs.
-      return bangkokMoment(task.specific_date, task.reset_time);
+      return momentInZone(task.specific_date, task.reset_time, zone);
     }
 
     default:
@@ -122,36 +139,37 @@ export function getNextReset(task: Task): Date | null {
   }
 }
 
-function getNextDaily(now: Date, resetTime: string): Date {
-  const [hours, minutes] = resetTime.split(":").map(Number);
-  const next = new Date(now);
-  next.setHours(hours, minutes, 0, 0);
-  if (next <= now) next.setDate(next.getDate() + 1);
-  return next;
+function getNextDaily(now: Wall, nowMs: number, { h, m: mi }: HM, zone: string): Date {
+  let ms = wallToMs(atTime(now, h, mi), zone);
+  if (ms <= nowMs) ms = wallToMs(atTime(addDays(now, 1), h, mi), zone);
+  return new Date(ms);
 }
 
-function getNextWeekly(now: Date, resetDay: number, resetTime: string): Date {
-  const [hours, minutes] = resetTime.split(":").map(Number);
-  const next = new Date(now);
-  next.setHours(hours, minutes, 0, 0);
-  const currentDay = now.getDay();
-  let daysUntil = resetDay - currentDay;
-  if (daysUntil < 0 || (daysUntil === 0 && next <= now)) {
-    daysUntil += 7;
-  }
-  next.setDate(next.getDate() + daysUntil);
-  return next;
+function getNextWeekly(now: Wall, nowMs: number, resetDay: number, { h, m: mi }: HM, zone: string): Date {
+  let daysUntil = resetDay - now.dow;
+  if (daysUntil < 0) daysUntil += 7;
+  let ms = wallToMs(atTime(addDays(now, daysUntil), h, mi), zone);
+  // Landing on today but already past the time means it is next week.
+  if (ms <= nowMs) ms = wallToMs(atTime(addDays(now, daysUntil + 7), h, mi), zone);
+  return new Date(ms);
 }
 
-function getNextCycle(now: Date, anchorDate: string, intervalDays: number, resetTime: string): Date {
-  const [hours, minutes] = resetTime.split(":").map(Number);
-  const anchor = new Date(anchorDate);
-  anchor.setHours(hours, minutes, 0, 0);
-  const msPerCycle = intervalDays * 24 * 60 * 60 * 1000;
-  const elapsed = now.getTime() - anchor.getTime();
-  const cyclesPassed = Math.floor(elapsed / msPerCycle);
-  const next = new Date(anchor.getTime() + (cyclesPassed + 1) * msPerCycle);
-  return next;
+function getNextCycle(nowMs: number, anchorDate: string, intervalDays: number, { h, m: mi }: HM, zone: string): Date | null {
+  if (!anchorDate || !intervalDays || intervalDays < 1) return null;
+  const anchor = dateStrToWall(anchorDate, h, mi);
+  if (!anchor) return null;
+
+  // Whole cycles elapsed, then the boundary rebuilt as calendar days rather
+  // than a fixed multiple of 86,400,000 ms — the two only agree in a zone with
+  // no daylight saving.
+  const cycleMs = intervalDays * 86_400_000;
+  const elapsed = nowMs - wallToMs(anchor, zone);
+  let n = Math.floor(elapsed / cycleMs) + 1;
+  if (n < 0) n = 0; // anchor still in the future: the first one is the anchor
+
+  let ms = wallToMs(addDays(anchor, n * intervalDays), zone);
+  if (ms <= nowMs) ms = wallToMs(addDays(anchor, (n + 1) * intervalDays), zone);
+  return new Date(ms);
 }
 
 export function calculateCountdown(task: Task): CountdownResult | null {

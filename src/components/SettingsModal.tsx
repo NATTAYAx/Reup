@@ -1,12 +1,16 @@
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, Save, Power, Image, Palette, Upload, Sparkles, Check, RotateCcw, Bell, BellOff, Clock, Languages } from "lucide-react";
+import { X, Power, Image, Palette, Upload, Sparkles, Check, RotateCcw, Bell, BellOff, Clock, Languages, Globe, ChevronDown, Moon } from "lucide-react";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
-import { isMuted, setMuted } from "../lib/notifier";
+import { isMuted, setMuted, getQuietHours, setQuietHours, type QuietHours } from "../lib/notifier";
+import TimePicker from "./TimePicker";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getSetting, setSetting } from "../lib/database";
 import { getLang, setLang, t, type Lang } from "../lib/i18n";
+import TimeZonePicker from "./TimeZonePicker";
+import BackupCard from "./BackupCard";
+import { getTimeZonePreference, setTimeZonePreference, getAppTimeZone, offsetLabel, SYSTEM } from "../lib/tz";
 import { loadToastStyle, saveToastStyle, type ToastStyle } from "../lib/toastStyle";
 import {
   PROVIDERS, getProviderId, setProviderId, getApiKey, setApiKey,
@@ -18,6 +22,7 @@ import {
   summariseEscapes, getLearnedPresets, forgetPreset, cacheSize, merchantCount,
   type EscapeSummary, type LearnedPreset,
 } from "../lib/aiMemory";
+import { loadImportant, saveImportant, shouldReviewImportant, markImportantReviewed, type ImportantCard } from "../lib/importantCard";
 import { Toast } from "./ToastCard";
 import { paletteFromVideo } from "../lib/videoPalette";
 
@@ -203,9 +208,20 @@ export default function SettingsModal({ open, onClose }: Props) {
   const [aiError, setAiError]           = useState("");
   const [saved, setSaved]               = useState(false);
   const [notifMuted, setNotifMuted]     = useState(false);
+  const [quiet, setQuiet]               = useState<QuietHours>(getQuietHours);
   const [toastDuration, setToastDuration] = useState(8);
   const [lang, setLangState] = useState<Lang>(getLang);
   const [pendingLang, setPendingLang] = useState<Lang | null>(null);
+  // Same shape as the language setting: chosen, confirmed, then the window
+  // reloads. A zone change moves what "today" means, and several views work out
+  // their month or their calendar cursor once when they mount, so reloading is
+  // both the honest and the cheap way to make every one of them agree.
+  const [reviewImportant, setReviewImportant] = useState(false);
+  useEffect(() => { if (open) setReviewImportant(shouldReviewImportant()); }, [open]);
+
+  const [tzPref, setTzPref] = useState<string>(getTimeZonePreference);
+  const [pendingTz, setPendingTz] = useState<string | null>(null);
+  const [tzOpen, setTzOpen] = useState(false);
   const [pendingIconUrl, setPendingIconUrl] = useState<string | null>(null);
   const [customSound, setCustomSound]   = useState<string | null>(null);
   const [soundName, setSoundName]       = useState<string>("");
@@ -225,6 +241,14 @@ export default function SettingsModal({ open, onClose }: Props) {
   const [escapes, setEscapes]       = useState<EscapeSummary[]>([]);
   const [learned, setLearned]       = useState<LearnedPreset[]>([]);
   const [memStats, setMemStats]     = useState({ cache: 0, shops: 0 });
+
+  // Written by the person, read by nobody else. Never synced, never sent.
+  const [important, setImportant] = useState<ImportantCard>(() => loadImportant());
+  const [newContact, setNewContact] = useState({ label: "", value: "" });
+  const persistImportant = (card: ImportantCard) => {
+    setImportant(card);
+    saveImportant(card);
+  };
 
   const refreshMemory = () => {
     setEscapes(summariseEscapes(7).slice(0, 6));
@@ -254,6 +278,10 @@ export default function SettingsModal({ open, onClose }: Props) {
     setAiUsage(getUsageToday());
     setAiSaved(true);
     setTimeout(() => setAiSaved(false), 1500);
+    // Same pinned confirmation the rest of the page uses, so there is one
+    // place to look rather than one per section.
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1500);
   };
   // Wallpaper state
   const [wpPath, setWpPath]             = useState<string>("");
@@ -267,6 +295,10 @@ export default function SettingsModal({ open, onClose }: Props) {
     setWpError(m);
     setTimeout(() => setWpError(v => (v === m ? "" : v)), 3000);
   };
+
+  // Whether the click in progress began on the backdrop rather than inside the
+  // dialog. See the mousedown handler on the overlay.
+  const backdropPress = useRef(false);
 
   const iconRef  = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLInputElement>(null);
@@ -296,6 +328,7 @@ export default function SettingsModal({ open, onClose }: Props) {
       setAiCap(String(getDailyRequestCap()));
       setAiUsage(getUsageToday());
       refreshMemory();
+      setImportant(loadImportant());
       // Load wallpaper settings from DB
       setWpBusy(false); // clear any stuck busy state from a previous session
       getSetting("wallpaper_path").then(p => { if (p) setWpPath(p); }).catch(() => {});
@@ -429,6 +462,14 @@ export default function SettingsModal({ open, onClose }: Props) {
     setPendingLang(null);
   };
 
+  const confirmTzChange = () => {
+    if (!pendingTz) return;
+    setTimeZonePreference(pendingTz);
+    setTzPref(pendingTz);
+    setPendingTz(null);
+    setTimeout(() => window.location.reload(), 300);
+  };
+
   const toggleAutostart = async () => {
     // The autostart plugin registers whichever executable is running right now.
     // Turning this on from `pnpm tauri dev` writes target\\debug\\game-scheduler.exe
@@ -470,6 +511,11 @@ export default function SettingsModal({ open, onClose }: Props) {
     setSoundName("");
     localStorage.removeItem("gamesched_notif_sound_name");
     if (soundRef.current) soundRef.current.value = "";
+  };
+
+  const saveQuiet = (next: QuietHours) => {
+    setQuiet(next);
+    setQuietHours(next);
   };
 
   const toggleNotifMute = () => {
@@ -865,16 +911,45 @@ Rules:
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-          onClick={onClose}
+          /* Closing on any click that lands on the backdrop is wrong: dragging
+             to select text inside a field and releasing past the dialog edge
+             fires a click on their common ancestor, which is this backdrop, and
+             the dialog shuts with the text unsaved.
+
+             A click only counts as "on the backdrop" if the press STARTED
+             there. A drag that began inside the dialog is a selection, not a
+             dismissal, wherever it happens to end. */
+          onMouseDown={e => { backdropPress.current = e.target === e.currentTarget; }}
+          onClick={e => {
+            if (e.target === e.currentTarget && backdropPress.current) onClose();
+            backdropPress.current = false;
+          }}
         >
           <motion.div
             initial={{ scale: 0.9, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
             exit={{ scale: 0.9, opacity: 0 }}
             onClick={e => e.stopPropagation()}
-            className="bg-gray-900 border border-white/10 rounded-3xl w-full max-w-md shadow-2xl overflow-hidden"
+            className="relative bg-gray-900 border border-white/10 rounded-3xl w-full max-w-md shadow-2xl overflow-hidden"
             style={{ maxHeight: "88vh" }}
           >
+            {/* "Saved" used to live inside the scrolling content, up beside the
+                theme preview. Anyone who had scrolled to the bottom to press a
+                button never saw the confirmation for the thing they just
+                pressed. It is pinned to the dialog now, not to the page. */}
+            <AnimatePresence>
+              {saved && (
+                <motion.div
+                  initial={{ opacity: 0, y: -8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 rounded-full bg-emerald-500/20 border border-emerald-400/40 px-3 py-1 text-emerald-300 text-xs font-semibold pointer-events-none"
+                >
+                  <Check size={12} /> {t("settings.applied")}
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             {/* Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-white/8">
               <h2 className="text-white font-bold text-xl">{t("settings.title")}</h2>
@@ -941,8 +1016,58 @@ Rules:
                     </div>
                     {!notifMuted && (
                       <div className="border-t border-white/8 pt-3 space-y-3">
-                        {/* Duration */}
+                        {/* Quiet hours — a window, not an off switch.
+                            Mute is all-or-nothing and that is the wrong shape
+                            for "not at five in the morning". Reminders held
+                            back here are delayed, not cancelled: the notifier
+                            deliberately does not mark them as sent, so the
+                            first tick after the window fires them. */}
                         <div>
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-2">
+                              <Moon size={13} className="text-white/40" />
+                              <span className="text-white/60 text-xs font-semibold">{t("quiet.title")}</span>
+                            </div>
+                            <button
+                              onClick={() => saveQuiet({ ...quiet, enabled: !quiet.enabled })}
+                              className={`w-10 h-5 rounded-full transition-all relative ${quiet.enabled ? "bg-purple-500" : "bg-white/20"}`}
+                            >
+                              <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-all ${quiet.enabled ? "left-5.5" : "left-0.5"}`} />
+                            </button>
+                          </div>
+                          <p className="text-white/30 text-[11px] leading-relaxed mb-2">
+                            {quiet.enabled ? t("quiet.sub") : t("quiet.off")}
+                          </p>
+                          {quiet.enabled && (
+                            <>
+                              {/* The app's own picker, not <input type="time">.
+                                  The native field is drawn by the browser in the
+                                  OS locale, so it showed 11:00 PM here while
+                                  every other time field in the app showed 23:00
+                                  — two clocks, in one program, disagreeing about
+                                  what country it is in. TimePicker follows the
+                                  app language like the rest of them. */}
+                              <div className="flex items-center gap-2">
+                                <span className="text-white/40 text-[11px] w-12 shrink-0">{t("quiet.from")}</span>
+                                <div className="flex-1 min-w-0">
+                                  {/* No zone control here. Quiet hours are about
+                                      when this person is asleep, in the app's own
+                                      zone — a foreign-zone entry would be answering
+                                      a question nobody asked. */}
+                                  <TimePicker value={quiet.start} onChange={v => saveQuiet({ ...quiet, start: v })} showZone={false} />
+                                </div>
+                                <span className="text-white/40 text-[11px] w-10 text-right shrink-0">{t("quiet.to")}</span>
+                                <div className="flex-1 min-w-0">
+                                  <TimePicker value={quiet.end} onChange={v => saveQuiet({ ...quiet, end: v })} showZone={false} />
+                                </div>
+                              </div>
+                              <p className="text-white/25 text-[10px] leading-relaxed mt-2">{t("quiet.note")}</p>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Duration */}
+                        <div className="border-t border-white/8 pt-3">
                           <div className="flex items-center gap-2 mb-2">
                             <Clock size={13} className="text-white/40" />
                             <span className="text-white/60 text-xs font-semibold">{t("settings.duration")}</span>
@@ -1092,6 +1217,42 @@ Rules:
                     </div>
                   </div>
 
+                  <BackupCard />
+
+                  {/* Timezone */}
+                  <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+                    <div className="flex items-center gap-3 mb-3">
+                      <Globe size={18} className="text-purple-400" />
+                      <div className="min-w-0">
+                        <p className="text-white text-sm font-semibold">{t("settings.timezone")}</p>
+                        <p className="text-white/40 text-xs">{t("settings.timezoneSub")}</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setTzOpen(v => !v)}
+                      className="w-full flex items-center gap-2 bg-white/5 border border-white/10 hover:border-white/25 rounded-xl px-3.5 py-2.5 text-left transition-colors"
+                    >
+                      <span className="flex-1 min-w-0">
+                        <span className="block text-white text-sm font-medium truncate">
+                          {getAppTimeZone()}
+                        </span>
+                        <span className="block text-white/35 text-[11px]">
+                          {offsetLabel(getAppTimeZone())}
+                          {tzPref === SYSTEM ? ` · ${t("tz.auto")}` : ` · ${t("tz.pinned")}`}
+                        </span>
+                      </span>
+                      <ChevronDown size={15} className={`text-white/35 shrink-0 transition-transform ${tzOpen ? "rotate-180" : ""}`} />
+                    </button>
+                    {tzOpen && (
+                      <div className="mt-2.5">
+                        <TimeZonePicker
+                          value={tzPref}
+                          onChange={pref => { if (pref !== tzPref) setPendingTz(pref); }}
+                        />
+                      </div>
+                    )}
+                  </div>
+
                   {/* ── AI assistant ─────────────────────────────────────── */}
                   <div className="bg-white/5 rounded-2xl p-4 border border-white/10 space-y-3">
                     <div className="flex items-center gap-2">
@@ -1118,7 +1279,9 @@ Rules:
 
                     <div>
                       <p className="text-white/40 text-[11px] mb-1.5">{t("ai.model")}</p>
-                      <input value={aiModel} onChange={e => setAiModel(e.target.value)}
+                      <input value={aiModel}
+                        onChange={e => setAiModel(e.target.value)}
+                        onBlur={saveAiSettings}
                         placeholder={PROVIDERS[aiProvider].defaultModel}
                         className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white text-xs placeholder-white/25 focus:outline-none focus:border-white/30" />
                     </div>
@@ -1126,7 +1289,9 @@ Rules:
                     {PROVIDERS[aiProvider].configurableBaseUrl && (
                       <div>
                         <p className="text-white/40 text-[11px] mb-1.5">{t("ai.baseUrl")}</p>
-                        <input value={aiBaseUrl} onChange={e => setAiBaseUrl(e.target.value)}
+                        <input value={aiBaseUrl}
+                          onChange={e => setAiBaseUrl(e.target.value)}
+                          onBlur={saveAiSettings}
                           placeholder={PROVIDERS[aiProvider].defaultBaseUrl}
                           className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white text-xs placeholder-white/25 focus:outline-none focus:border-white/30" />
                         <p className="text-white/25 text-[10px] mt-1">{t("ai.baseUrlHint")}</p>
@@ -1141,7 +1306,9 @@ Rules:
                           {t("ai.getKey")}
                         </a>
                       </div>
-                      <input type="password" value={aiKey} onChange={e => setAiKey(e.target.value)}
+                      <input type="password" value={aiKey}
+                        onChange={e => setAiKey(e.target.value)}
+                        onBlur={saveAiSettings}
                         placeholder="sk-..." autoComplete="off"
                         className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white text-xs placeholder-white/25 focus:outline-none focus:border-white/30" />
                       <p className="text-white/25 text-[10px] mt-1">{t("ai.localOnly")}</p>
@@ -1156,14 +1323,10 @@ Rules:
                       </div>
                       <input type="number" inputMode="numeric" min={0}
                         value={aiCap} onChange={e => setAiCap(e.target.value)}
+                        onBlur={saveAiSettings}
                         className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-white/30" />
                       <p className="text-white/25 text-[10px] mt-1">{t("ai.capHint")}</p>
                     </div>
-
-                    <button onClick={saveAiSettings}
-                      className="w-full py-2.5 theme-btn rounded-xl text-white text-sm font-semibold">
-                      {t("settings.done")}
-                    </button>
 
                     {/* What the app has stopped needing to ask about. The point
                         of this panel is that these numbers should climb while
@@ -1216,19 +1379,105 @@ Rules:
                     </div>
                   </div>
 
-                  <p className="text-white/30 text-xs text-center">
-                    {t("settings.trayHint")}
-                  </p>
+
+
+                  {/* ── Important things ──────────────────────────────────
+                      Neutral name on purpose. One person keeps an insurance
+                      line here, another a landlord, another someone to call at
+                      four in the morning. The app does not need to know which,
+                      and is better for not knowing. */}
+                  <div className="bg-white/5 rounded-2xl p-4 border border-white/10 space-y-3">
+                    {/* Worded like a bank asking whether your phone number still
+                        works, because that is the register that gets read. At
+                        most once every 60 days, never on an empty card. */}
+                    {reviewImportant && (
+                      <div className="flex items-center gap-2.5 bg-white/[0.04] border border-white/10 rounded-xl px-3 py-2">
+                        <span className="flex-1 min-w-0">
+                          <span className="block text-white/70 text-xs font-medium">{t("important.review")}</span>
+                          <span className="block text-white/30 text-[10px]">{t("important.reviewSub")}</span>
+                        </span>
+                        <button
+                          onClick={() => { markImportantReviewed(); setReviewImportant(false); }}
+                          className="text-white/35 hover:text-white text-[11px] shrink-0 transition-colors"
+                        >
+                          {t("important.reviewLater")}
+                        </button>
+                      </div>
+                    )}
+                    <div>
+                      <p className="text-white text-sm font-semibold">{t("important.title")}</p>
+                      <p className="text-white/30 text-[10px] mt-0.5 leading-relaxed">{t("important.hint")}</p>
+                    </div>
+
+                    {important.contacts.length > 0 && (
+                      <div className="space-y-1.5">
+                        {important.contacts.map((c, i) => (
+                          <div key={i} className="flex items-center gap-2">
+                            <span className="text-white/70 text-xs flex-1 min-w-0 truncate">{c.label}</span>
+                            <span className="text-white text-xs shrink-0">{c.value}</span>
+                            <button
+                              onClick={() => persistImportant({
+                                ...important,
+                                contacts: important.contacts.filter((_, j) => j !== i),
+                              })}
+                              className="text-white/25 hover:text-red-400 shrink-0">
+                              <X size={12} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="flex gap-1.5">
+                      <input value={newContact.label}
+                        onChange={e => setNewContact(v => ({ ...v, label: e.target.value }))}
+                        placeholder={t("important.label")}
+                        className="flex-1 min-w-0 bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-white text-xs placeholder-white/25 focus:outline-none focus:border-white/30" />
+                      <input value={newContact.value}
+                        onChange={e => setNewContact(v => ({ ...v, value: e.target.value }))}
+                        placeholder={t("important.value")}
+                        className="flex-1 min-w-0 bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-white text-xs placeholder-white/25 focus:outline-none focus:border-white/30" />
+                      <button
+                        onClick={() => {
+                          if (!newContact.label.trim() || !newContact.value.trim()) return;
+                          persistImportant({
+                            ...important,
+                            contacts: [...important.contacts, {
+                              label: newContact.label.trim(), value: newContact.value.trim(),
+                            }],
+                          });
+                          setNewContact({ label: "", value: "" });
+                        }}
+                        className="theme-btn text-white text-xs rounded-lg px-3">
+                        {t("important.add")}
+                      </button>
+                    </div>
+
+                    <textarea value={important.note} rows={2}
+                      onChange={e => setImportant({ ...important, note: e.target.value })}
+                      onBlur={() => saveImportant(important)}
+                      placeholder={t("important.note")}
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white text-xs placeholder-white/25 focus:outline-none focus:border-white/30 resize-none" />
+                  </div>
 
                   <p className="text-white/20 text-[10px] text-center">
                     {t("settings.version")} {__APP_VERSION__}
                   </p>
 
+                  {/* This read "done" beside a save icon, which said it
+                      committed the page. It never did: every setting here
+                      writes the moment it changes, and the AI block had its own
+                      separate save. A button that looks like the save button
+                      and is not one is worse than no button. */}
+                  <p className="text-white/25 text-[10px] text-center">
+                    {t("settings.autoSaved")}
+                  </p>
+
                   <button
                     onClick={onClose}
-                    className="w-full py-3 bg-gradient-to-r from-purple-600 to-indigo-600 rounded-xl text-white font-semibold flex items-center justify-center gap-2"
+                    className="w-full py-3 rounded-xl border border-white/12 text-white/70 font-semibold hover:text-white hover:border-white/25 transition-colors"
                   >
-                    <Save size={16} /> {t("settings.done")}
+                    {t("settings.close")}
                   </button>
                 </div>
               )}
@@ -1245,15 +1494,7 @@ Rules:
                       ))}
                     </div>
                     <span className="text-white/60 text-xs font-semibold ml-1">{currentTheme.name}</span>
-                    {saved && (
-                      <motion.span
-                        initial={{ opacity: 0, scale: 0.8 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        className="ml-auto text-green-400 text-xs flex items-center gap-1"
-                      >
-                        <Check size={11} /> {t("settings.applied")}
-                      </motion.span>
-                    )}
+
                   </div>
 
                   {/* Preset themes */}
@@ -1517,6 +1758,33 @@ Rules:
         </motion.div>
       )}
       {/* ── Language change confirmation dialog ── */}
+      {pendingTz && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setPendingTz(null)}>
+          <div className="bg-gray-900 border border-white/10 rounded-2xl p-5 w-full max-w-xs shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center gap-2.5 mb-2.5">
+              <Globe size={18} className="text-purple-400" />
+              <div>
+                <p className="text-white font-bold text-sm">{t("settings.timezone")}</p>
+                <p className="text-white/40 text-xs">
+                  {pendingTz === SYSTEM ? t("tz.auto") : pendingTz}
+                </p>
+              </div>
+            </div>
+            <p className="text-white/60 text-xs leading-relaxed mb-4">{t("tz.confirm")}</p>
+            <div className="flex gap-2">
+              <button onClick={() => setPendingTz(null)}
+                className="flex-1 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white/60 hover:text-white text-sm font-semibold transition-colors">
+                {t("common.cancel")}
+              </button>
+              <button onClick={confirmTzChange}
+                className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 text-white text-sm font-semibold transition-all hover:brightness-110">
+                {t("tz.apply")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {pendingLang && (
         <motion.div
           initial={{ opacity: 0 }}

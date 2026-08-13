@@ -5,7 +5,8 @@
 import { useState, useRef, useEffect } from "react";
 import { motion } from "framer-motion";
 import { X, Send, Sparkles, Brain, Wallet, CheckCircle, Wifi, WifiOff, Key } from "lucide-react";
-import { todayBangkok } from "../lib/dateUtil";
+import { todayLocal } from "../lib/dateUtil";
+import { getAppTimeZone } from "../lib/tz";
 import { getAllTasks } from "../lib/database";
 import {
   saveHabit, getTopHabits, QUICK_PRESETS,
@@ -27,7 +28,12 @@ import {
 } from "../lib/geminiService";
 import { getUsageToday, type DailyUsage } from "../lib/aiProviders";
 import { learnPreset } from "../lib/aiMemory";
+import {
+  looksHeavy, alreadyOfferedThisSession, markOffered,
+  loadImportant, TH_HELPLINE,
+} from "../lib/importantCard";
 import { t } from "../lib/i18n";
+import { Operation, runOperations, describe, isDestructive, KNOWN_OPS } from "../lib/aiOperations";
 
 interface Props {
   open: boolean;
@@ -43,6 +49,15 @@ interface ChatMessage {
   text: string;
   domain?: Domain;
   source?: "gemini" | "local" | "cache"; // shows which backend answered
+  /** Stays on this machine. Rendered like any other turn, but never included in
+   *  the history sent with a later request — see where `history` is built.
+   *
+   *  This exists because the distress path returning early was not, on its own,
+   *  enough. It kept THAT message from being sent, and then the message sat in
+   *  `messages` like any other, so the next request that did go out carried it
+   *  in the last-four-turns window. Along with the reply, which is the contents
+   *  of the important-things card: names and phone numbers. */
+  local?: true;
 }
 
 const fmt = (n: number) => `฿${n.toLocaleString("th-TH")}`;
@@ -62,6 +77,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
   const [lastUsage, setLastUsage] = useState<TokenUsage | null>(null);
   const [categories, setCategories] = useState<CategoryRow[]>(() => getCategoryList());
   const [today, setToday] = useState<DailyUsage>(() => getUsageToday());
+  const [showImportant, setShowImportant] = useState(false);
   const [habits, setHabits] = useState(getTopHabits(3));
   const [online, setOnline] = useState(true);
   const [showKeyInput, setShowKeyInput] = useState(false);
@@ -73,6 +89,11 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
   // When the conversation was last touched, so a stale one can be retired
   // without throwing away a live one.
   const lastActivity = useRef<number>(Date.now());
+
+  // A plan the model proposed, waiting to be confirmed. Separate from the two
+  // older pending states because it can hold several operations at once and can
+  // mix domains — "ติ๊ก Honkai แล้วบันทึกค่าเน็ต 599" is one message.
+  const [pendingOps, setPendingOps] = useState<{ ops: Operation[]; names: Record<number, string> } | null>(null);
 
   const [pendingTask, setPendingTask] = useState<{
     type: "add" | "delete" | "edit_time" | "edit_priority";
@@ -112,12 +133,13 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
       }
       setPendingTask(null);
       setPendingFinance(null);
+      setPendingOps(null);
       setHabits(getTopHabits(3));
       setShowKeyInput(false);
       setKeyDraft(getGeminiKey());
       setTimeout(() => inputRef.current?.focus(), 100);
       // Check connectivity
-      isOnline().then(setOnline);
+      isOnline().then(setOnline).catch(() => setOnline(false));
       // The category set is user-editable now, so re-read it each time the
       // panel opens rather than trusting a snapshot from app start.
       loadCategories().then(() => setCategories(getCategoryList())).catch(() => {});
@@ -136,9 +158,61 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
     const msg = (text || input).trim();
     if (!msg || loading) return;
     setInput("");
+    if (showHints) retireHints();
     addMsg({ role: "user", text: msg });
     setLoading(true);
     lastActivity.current = Date.now();
+
+    // Checked BEFORE anything else, and it returns early. That ordering is the
+    // whole design: a message that matches is never handed to a model, never
+    // cached, never written to the usage log, and never leaves the machine.
+    //
+    // The reply is short and plainly says what this is. A warm therapeutic
+    // tone would invite a conversation this app cannot hold — and what the
+    // evidence actually supports is contact with a person, so the job here is
+    // to shorten the distance to one rather than stand in it.
+    //
+    // TWO DIFFERENT ONCE-PER-SESSION QUESTIONS, AND THEY ARE NOT THE SAME ONE.
+    //
+    // This used to read `looksHeavy(msg) && !alreadyOfferedThisSession()`, so
+    // the session flag gated the WHOLE branch. The first matching message was
+    // held back; every one after it in the same session fell straight through
+    // to the model. The guarantee in the paragraph above was true exactly once
+    // per app launch, which is worse than not having it, because the comment
+    // says otherwise and nothing on screen shows the difference.
+    //
+    // So the two decisions are now separate:
+    //   • WHETHER TO SEND — never, on every match, with no condition at all.
+    //   • WHETHER TO SHOW THE CARD — the first time only, because repeating a
+    //     list of phone numbers at someone every message is the nagging the
+    //     original note was right to avoid.
+    // After the first, the reply is one line. Something has to be said, or the
+    // message vanishes into a chat that simply stops answering.
+    if (looksHeavy(msg)) {
+      // Retroactively mark the turn added above. It is the same message the
+      // guard just matched, and it must not travel either.
+      setMessages(m => m.map((entry, i) =>
+        i === m.length - 1 && entry.role === "user" ? { ...entry, local: true } : entry
+      ));
+
+      const firstTime = !alreadyOfferedThisSession();
+      if (firstTime) markOffered();
+
+      let text: string;
+      if (firstTime) {
+        const card = loadImportant();
+        const lines = card.contacts.length
+          ? card.contacts.map(c => `${c.label} — ${c.value}`).join("\n")
+          : `${t("care.noContacts")}\n${t("care.helpline")} ${TH_HELPLINE}`;
+        text = `${t("care.reply")}\n\n${lines}${card.note ? `\n\n${card.note}` : ""}`;
+      } else {
+        text = t("care.replyAgain");
+      }
+
+      addMsg({ role: "ai", text, local: true });
+      setLoading(false);
+      return;
+    }
 
     const isCorrection = isCorrectionMessage(msg) && (pendingTask !== null || pendingFinance !== null);
     if (!isCorrection) {
@@ -156,16 +230,28 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
       // needs so a coffee receipt does not carry the whole task list with it.
       const buildContext = async (kind: ContextKind): Promise<string | undefined> => {
         try {
-          const today = todayBangkok();
+          const today = todayLocal();
           const month = today.slice(0, 7);
-          const parts: string[] = [`Today is ${today} (Asia/Bangkok).`];
+          const parts: string[] = [`Today is ${today} (${getAppTimeZone()}).`];
 
+          // IDS, NOT NAMES.
+          //
+          // The list used to carry names only, so the model answered with a name
+          // and the app went looking for the row again with a LIKE query. That
+          // round trip through text is where the failures lived: two tasks with
+          // similar names meant the wrong one changed, and a slightly different
+          // spelling meant nothing was found at all. The same weakness on the
+          // money side produced three rounds of the same bug in one afternoon
+          // under three different field names.
+          //
+          // With the id in front of every task the model can point instead of
+          // describe, and the guessing stops. It costs a handful of tokens per
+          // task, which is a small price for removing an entire category of
+          // being confidently wrong.
           const tasks = await getAllTasks();
           if (kind === "finance") {
-            // Names only. Cheap, but still enough to resolve "ลบอันนั้น" if the
-            // offline parser guessed the domain wrong.
             parts.push(tasks.length
-              ? `The user's task names: ${tasks.slice(0, 40).map((tk: any) => `"${tk.name}"`).join(", ")}`
+              ? `The user's tasks (id: name): ${tasks.slice(0, 40).map((tk: any) => `${tk.id}: "${tk.name}"`).join(", ")}`
               : `The user has no tasks yet.`);
           } else {
             const lines = tasks.slice(0, 40).map((tk: any) => {
@@ -176,11 +262,14 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
                 tk.reset_time ? `at ${tk.reset_time}` : null,
                 tk.is_priority ? "priority" : null,
                 tk.is_urgent ? "urgent" : null,
+                // Whether it is already ticked, so "เล่นแล้ว" on something
+                // already done can be answered rather than acted on twice.
+                tk.completed_until ? "already done this cycle" : null,
               ].filter(Boolean);
-              return `- ${bits.join(", ")}`;
+              return `- id ${tk.id} — ${bits.join(", ")}`;
             }).join("\n");
             parts.push(tasks.length
-              ? `The user's CURRENT tasks (use these exact names):\n${lines}`
+              ? `The user's CURRENT tasks. Use the id when referring to one:\n${lines}`
               : `The user has no tasks yet.`);
           }
 
@@ -216,7 +305,9 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
       };
 
       // Recent turns so follow-ups like "อันนั้นแหละ" have something to refer to.
-      const history = messages.slice(-4).map(m => ({
+      // Filtered BEFORE the slice, not after: filtering after would let a local
+      // turn eat one of the four slots and silently shorten the context.
+      const history = messages.filter(m => !m.local).slice(-4).map(m => ({
         role: m.role === "user" ? ("user" as const) : ("ai" as const),
         text: m.text,
       }));
@@ -246,16 +337,65 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
       // better news, never worse.
       if (source === "gemini") setOnline(true);
 
+      // Left in on purpose. Every silent turn this app has ever produced came
+      // from a reply the code could not route, and without the payload there is
+      // nothing to reason about afterwards — only a description of a blank
+      // screen. One line in the console costs nothing and turns "it did
+      // nothing" into an answerable question.
+      console.log("[UnifiedAIChat] response:", source, JSON.stringify(response));
+
       // ── Route by domain ──────────────────────────────────────
       if (response.domain === "chat") {
-        addMsg({ role: "ai", text: response.reply, source });
+        addMsg({ role: "ai", text: (response.reply ?? "").trim() || t("ai.notUnderstood"), source });
+        setLoading(false);
+        return;
+      }
+
+      // ── A plan, if the model sent one ──────────────────────────────────
+      //
+      // Checked before the per-domain branches, because an operations list is
+      // the newer and more complete answer and those branches only know seven
+      // verbs between them.
+      const rawOps: any[] = Array.isArray((response as any).operations) ? (response as any).operations : [];
+      const ops: Operation[] = rawOps.filter(o => KNOWN_OPS.has(o.kind));
+      if (ops.length) {
+        const replyLine = ((response as any).reply ?? "").trim();
+        if (replyLine) addMsg({ role: "ai", text: replyLine, domain: response.domain as Domain, source });
+
+        // Names for the confirmation card, resolved here rather than trusting
+        // whatever the model called them.
+        const names: Record<number, string> = {};
+        try {
+          const all = await getAllTasks();
+          for (const tk of all) names[tk.id] = tk.name;
+        } catch { /* the card falls back to #id */ }
+
+        // Anything that only reads, or that creates something new, runs without
+        // asking. Anything that overwrites or destroys waits — a model that can
+        // reach every corner of the app can also delete in every corner of it.
+        if (ops.some(isDestructive)) {
+          setPendingOps({ ops, names });
+        } else {
+          try {
+            const n = await runOperations(ops);
+            onTaskAdded();
+            onFinanceChanged?.();
+            addMsg({ role: "ai", text: `${t("ai.saved")}${n > 1 ? ` (${n})` : ""}` });
+          } catch (e: any) {
+            addMsg({ role: "ai", text: `❌ ${e?.message ?? t("ai.errorRetry")}` });
+          }
+        }
         setLoading(false);
         return;
       }
 
       if (response.domain === "finance") {
         const fr = response as GeminiFinanceResponse;
-        addMsg({ role: "ai", text: fr.reply, domain: "finance", source });
+        // The model's own sentence, if it wrote one. Blank is a real outcome:
+        // it used to be pushed into the chat anyway as an empty bubble, which
+        // looks exactly like the app doing nothing.
+        const reply = (fr.reply ?? "").trim();
+        if (reply) addMsg({ role: "ai", text: reply, domain: "finance", source });
 
         if (fr.intent === "query_spending") {
           // Already replied with summary text — done
@@ -263,7 +403,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
           return;
         }
         if (fr.intent === "log_income" && fr.incomeAmount) {
-          const today = todayBangkok();
+          const today = todayLocal();
           await addIncome({
             amount: fr.incomeAmount,
             source: "other",
@@ -283,10 +423,45 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
             category: (fr.category as ExpenseCategory) || "other",
             note: fr.note || "",
           });
-        } else if (fr.intent === "delete_expense") {
-          setPendingFinance({ intent: "delete_expense", keyword: fr.keyword });
-        } else if (fr.intent === "edit_expense") {
-          setPendingFinance({ intent: "edit_expense", keyword: fr.keyword, newAmount: fr.newAmount });
+        } else if (fr.intent === "delete_expense" || fr.intent === "edit_expense") {
+          // The model decides the intent and is supposed to fill in which row
+          // it means. It does not always manage the second half — "เปลี่ยนเป็น
+          // 699" has no noun in it, so the subject has to be carried over from
+          // the turn before, and sometimes it just comes back null.
+          //
+          // Nothing used to check. The confirmation card printed the word
+          // undefined at the user, and pressing it handed undefined to a
+          // function that immediately called .toLowerCase() on it — a
+          // TypeError shown as a red ❌, which reads like the app broke rather
+          // than like the app did not understand.
+          //
+          // Model output is untrusted input. Ask instead of guessing: deleting
+          // or overwriting the WRONG expense is a worse failure than a second
+          // question, and there is no way to tell which row was meant.
+          // Either name. See GeminiFinanceResponse.targetExpenseName for why
+          // there are two.
+          const keyword = (fr.keyword ?? fr.targetExpenseName)?.trim();
+          if (!keyword) {
+            addMsg({
+              role: "ai",
+              text: fr.intent === "delete_expense" ? t("ai.deleteWhich") : t("ai.editWhich"),
+              domain: "finance",
+              source,
+            });
+            setLoading(false);
+            return;
+          }
+          if (fr.intent === "delete_expense") {
+            setPendingFinance({ intent: "delete_expense", keyword });
+          } else {
+            setPendingFinance({ intent: "edit_expense", keyword, newAmount: fr.newAmount });
+          }
+        } else if (!reply) {
+          // An intent none of the branches above handle — a value outside the
+          // five in the schema, or none at all. Falling through here used to
+          // end the turn in silence, and a chat that stops answering reads as
+          // broken rather than as confused. Say the true thing instead.
+          addMsg({ role: "ai", text: t("ai.notUnderstood"), domain: "finance", source });
         }
         setLoading(false);
         return;
@@ -295,7 +470,8 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
       // ── Task domain ──────────────────────────────────────────
       if (response.domain === "task") {
         const tr = response as GeminiTaskResponse;
-        addMsg({ role: "ai", text: tr.reply, domain: "task", source });
+        const reply = (tr.reply ?? "").trim();
+        if (reply) addMsg({ role: "ai", text: reply, domain: "task", source });
 
         if (tr.intent === "delete") {
           setPendingTask({ type: "delete", targetName: tr.targetTaskName });
@@ -310,10 +486,32 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
           // Also push to conversation history for context
           const localResult = smartParse(msg);
           pushHistory({ userText: msg, result: localResult, timestamp: Date.now() });
+        } else if (!reply) {
+          // "I did not follow that" is the wrong sentence when the offline
+          // parser DID follow it and simply has no verb for it. Those messages
+          // are meant to go to the model, so when they come back unanswered the
+          // reason is the connection, not the understanding — and saying the
+          // wrong one sends someone off rephrasing a sentence that was fine.
+          // Cast because GeminiTaskResponse's intent union does not include the
+          // parser's own "unknown" — the two type systems meet here and the
+          // value is real even though the declared union does not admit it.
+          const deferred = (tr.intent as string) === "unknown" && source === "local";
+          addMsg({
+            role: "ai",
+            text: t(deferred ? "ai.needsOnline" : "ai.notUnderstood"),
+            domain: "task",
+            source,
+          });
         }
         setLoading(false);
         return;
       }
+
+      // A domain outside the three above. Same rule: never end a turn without
+      // saying something.
+      addMsg({ role: "ai", text: t("ai.notUnderstood"), source });
+      setLoading(false);
+      return;
 
     } catch (e: any) {
       console.error("[UnifiedAIChat] sendMessage error:", e);
@@ -321,6 +519,24 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
     }
 
     setLoading(false);
+  };
+
+  // ── Confirm a plan ────────────────────────────────────────────
+  const confirmOps = async () => {
+    if (!pendingOps || isConfirming.current) return;
+    isConfirming.current = true;
+    const { ops } = pendingOps;
+    setPendingOps(null);
+    try {
+      const n = await runOperations(ops);
+      onTaskAdded();
+      onFinanceChanged?.();
+      addMsg({ role: "ai", text: `${t("ai.saved")}${n > 1 ? ` (${n})` : ""}` });
+    } catch (e: any) {
+      addMsg({ role: "ai", text: `❌ ${e?.message ?? t("ai.errorRetry")}` });
+    } finally {
+      isConfirming.current = false;
+    }
   };
 
   // ── Confirm finance ───────────────────────────────────────────
@@ -385,6 +601,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
   const cancelPending = () => {
     setPendingTask(null);
     setPendingFinance(null);
+    setPendingOps(null);
     addMsg({ role: "ai", text: t("ai.cancelled") });
   };
 
@@ -397,11 +614,26 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
     });
   };
 
-  const hasPending = !!(pendingTask || pendingFinance);
+  const hasPending = !!(pendingTask || pendingFinance || pendingOps);
   const pendingDomain = pendingFinance ? "finance" : pendingTask ? "task" : null;
   const domainCfg = pendingDomain ? DOMAIN_BADGE[pendingDomain] : DOMAIN_BADGE.task;
 
   const FINANCE_QUICK = ["กินข้าว 80 บาท", "ค่า Grab 45 บาท", "ใช้ไปเท่าไรแล้ว?", "สรุปเดือนนี้"];
+
+  // These are teaching examples: they exist to show that a sentence typed in
+  // plain language is enough. Once someone has actually sent a message they
+  // know that, and the examples become clutter that reappears at the top of
+  // every empty chat forever. They also name specific games and specific
+  // prices, which reads as the app assuming things about the person.
+  //
+  // So: shown until they are used or dismissed, then never again.
+  const [showHints, setShowHints] = useState(
+    () => localStorage.getItem("gamesched_ai_hints_done") !== "1",
+  );
+  const retireHints = () => {
+    localStorage.setItem("gamesched_ai_hints_done", "1");
+    setShowHints(false);
+  };
 
   if (!open) return null;
 
@@ -452,6 +684,14 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
                     · {today.requests}× {today.input + today.output}tk
                   </span>
                 )}
+                {/* Always here, so the card never depends on a keyword matcher
+                    guessing right. Detection can only ever be a nudge; a door
+                    that is simply visible does not have to guess at all. Named
+                    plainly, so it costs nothing to have on screen. */}
+                <button onClick={() => setShowImportant(v => !v)}
+                  className="text-white/25 hover:text-white transition-colors ml-auto">
+                  {t("important.title")}
+                </button>
               </p>
             </div>
           </div>
@@ -498,16 +738,48 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2.5">
           {/* Quick presets (shown only on fresh open) */}
-          {messages.length <= 1 && (
+          {showImportant && (
+            <div className="bg-white/[0.04] border border-white/10 rounded-xl p-3 mb-2 text-xs">
+              {(() => {
+                const card = loadImportant();
+                if (!card.contacts.length && !card.note) {
+                  return (
+                    <p className="text-white/40">
+                      {t("care.noContacts")}<br />
+                      {t("care.helpline")} {TH_HELPLINE}
+                    </p>
+                  );
+                }
+                return (
+                  <div className="space-y-1">
+                    {card.contacts.map((c, i) => (
+                      <div key={i} className="flex justify-between gap-2">
+                        <span className="text-white/60 truncate">{c.label}</span>
+                        <span className="text-white shrink-0">{c.value}</span>
+                      </div>
+                    ))}
+                    {card.note && <p className="text-white/40 pt-1 whitespace-pre-wrap">{card.note}</p>}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
+          {showHints && messages.length <= 1 && (
             <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
-              className="bg-white/[0.03] border border-white/8 rounded-xl p-2.5 space-y-2">
+              className="bg-white/[0.03] border border-white/8 rounded-xl p-2.5 space-y-2 relative">
+              <button onClick={retireHints}
+                title={t("ai.hideHints")}
+                className="absolute top-1.5 right-1.5 text-white/25 hover:text-white transition-colors">
+                <X size={12} />
+              </button>
               <div>
                 <p className="text-yellow-400/50 text-[10px] font-semibold uppercase tracking-wider mb-1.5 flex items-center gap-1">
                   <Wallet size={9}/> Finance
                 </p>
                 <div className="flex flex-wrap gap-1">
                   {FINANCE_QUICK.map(q => (
-                    <button key={q} onClick={() => sendMessage(q)}
+                    <button key={q} onClick={() => { retireHints(); sendMessage(q); }}
                       className="px-2 py-1 bg-yellow-500/10 border border-yellow-500/15 rounded-lg text-[11px] text-yellow-300/70 hover:text-yellow-200 hover:bg-yellow-500/20 transition-all">
                       {q}
                     </button>
@@ -521,13 +793,13 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
                 <div className="flex flex-wrap gap-1">
                   {habits.length > 0
                     ? habits.map((h, i) => (
-                        <button key={i} onClick={() => sendMessage(h.input)}
+                        <button key={i} onClick={() => { retireHints(); sendMessage(h.input); }}
                           className="px-2 py-1 bg-purple-600/15 border border-purple-500/15 rounded-lg text-[11px] text-purple-300/70 hover:text-purple-200 transition-all">
                           🧠 {h.result.name || h.input}
                         </button>
                       ))
                     : QUICK_PRESETS.slice(0, 4).map(p => (
-                        <button key={p.label} onClick={() => sendMessage(p.input)}
+                        <button key={p.label} onClick={() => { retireHints(); sendMessage(p.input); }}
                           className="px-2 py-1 bg-white/5 border border-white/10 rounded-lg text-[11px] text-white/50 hover:text-white transition-all">
                           {p.label}
                         </button>
@@ -637,15 +909,40 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
                 </div>
               )}
 
+              {/* A plan: every operation, in the order it will run.
+                  Built from the operations themselves rather than from the
+                  model's sentence — the sentence is a claim about what happened
+                  and this is the thing that is actually about to happen. Those
+                  two disagreed often enough ("แก้ไขเรียบร้อยแล้วค่ะ" arriving
+                  before anything had been written) that the confirmation should
+                  come from the plan. */}
+              {pendingOps && (
+                <div className="p-3 space-y-1.5">
+                  <p className="text-white/40 text-[11px] px-0.5">{t("op.confirmTitle")}</p>
+                  {pendingOps.ops.map((op, i) => (
+                    <div key={i} className="flex items-center gap-2 bg-white/5 rounded-xl px-3 py-2">
+                      <span className="text-white/25 text-[10px] tabular-nums w-4 shrink-0">{i + 1}</span>
+                      <span className="text-white text-sm flex-1 truncate">
+                        {describe(op, op.id != null ? pendingOps.names[op.id] : undefined)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {/* Other pending: compact summary */}
-              {(!pendingFinance || pendingFinance.intent !== "log_expense") && (
+              {!pendingOps && (!pendingFinance || pendingFinance.intent !== "log_expense") && (
                 <div className="p-3 flex items-center gap-2.5">
                   <div className={`w-8 h-8 rounded-xl bg-gradient-to-br ${domainCfg.color} flex items-center justify-center flex-shrink-0`}>
                     <domainCfg.icon size={14} className="text-white" />
                   </div>
                   <p className="text-white/60 text-xs flex-1">
                     {pendingFinance?.intent === "delete_expense" && t("ai.pendingDeleteExpense", { keyword: pendingFinance.keyword! })}
-                    {pendingFinance?.intent === "edit_expense" && t("ai.pendingEditExpense", { keyword: pendingFinance.keyword! })}
+                    {pendingFinance?.intent === "edit_expense" && (
+                      pendingFinance.newAmount != null
+                        ? t("ai.pendingEditExpenseTo", { keyword: pendingFinance.keyword!, amount: fmt(pendingFinance.newAmount) })
+                        : t("ai.pendingEditExpense", { keyword: pendingFinance.keyword! })
+                    )}
                     {pendingTask?.type === "add" && t("ai.pendingAddTask", { n: pendingTask.tasks?.length ?? 1 })}
                     {pendingTask?.type === "delete" && t("ai.pendingDeleteTask", { name: pendingTask.targetName! })}
                     {pendingTask?.type === "edit_time" && t("ai.pendingEditTime", { name: pendingTask.targetName! })}
@@ -655,7 +952,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
               )}
 
               {/* Task add — editable names */}
-              {pendingTask?.type === "add" && pendingTask.tasks && pendingTask.tasks.length > 0 && (
+              {!pendingOps && pendingTask?.type === "add" && pendingTask.tasks && pendingTask.tasks.length > 0 && (
                 <div className="px-3 pb-2 space-y-1.5">
                   {pendingTask.tasks.map((task, idx) => (
                     <div key={idx} className="flex items-center gap-2 bg-white/5 rounded-xl px-3 py-2">
@@ -682,7 +979,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
 
               <div className="flex gap-2 px-3 pb-3">
                 <button
-                  onClick={pendingFinance ? confirmFinance : confirmTask}
+                  onClick={pendingOps ? confirmOps : pendingFinance ? confirmFinance : confirmTask}
                   className={`flex-1 py-2.5 bg-gradient-to-r ${domainCfg.color} rounded-xl text-white text-sm font-bold hover:opacity-90 transition-all`}>
                   {t("ai.btnConfirmCheck")}
                 </button>

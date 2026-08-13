@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Settings, Gamepad2, Clock, CalendarDays, CheckCircle2, Brain, Wallet } from "lucide-react";
+import { Plus, Settings, Gamepad2, Clock, CalendarDays, CheckCircle2, Brain, Wallet, BatteryLow, Archive } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { useCountdowns } from "./hooks/useCountdowns";
 import { loadTheme, applyTheme } from "./lib/theme";
-import { deleteTask, togglePriority, toggleUrgent, getSetting } from "./lib/database";
+import { deleteTask, togglePriority, toggleUrgent, getSetting, pauseTask } from "./lib/database";
+import { PAUSE_FOREVER } from "./types";
+import { installWindowActive, useWindowActive } from "./lib/windowActive";
 import TaskCard from "./components/TaskCard";
 import AddTaskModal from "./components/AddTaskModal";
 import SettingsModal from "./components/SettingsModal";
@@ -14,8 +16,12 @@ import CalendarView from "./components/CalendarView";
 import FinanceView from "./components/FinanceView";
 import EditTaskModal from "./components/EditTaskModal";
 import UnifiedAIChat from "./components/UnifiedAIChat";
+import TaskShelf from "./components/TaskShelf";
 // import DebugOverlay from "./components/DebugOverlay"; // debug tool, re-enable if needed
-import { bangkokHour } from "./lib/dateUtil";
+import { localHour, todayLocal } from "./lib/dateUtil";
+import { getAppTimeZone } from "./lib/tz";
+import { shouldShowWeekNote, markWeekNoteShown } from "./lib/weekNote";
+import { listen } from "@tauri-apps/api/event";
 
 type Filter = "all" | "priority" | "urgent" | "done" | "game" | "school" | "work" | "personal";
 
@@ -85,6 +91,50 @@ export default function App() {
   const [calendarKey, setCalendarKey] = useState(0);
   const [financeKey, setFinanceKey] = useState(0);
 
+  // A switch the PERSON flips, never the app. An app guessing at someone's
+  // capacity gets it wrong in both directions: it nags on a fine day and
+  // consoles on a busy one, and neither is its business. On the days it is on,
+  // every task shows only its smallest version and the counters go away.
+  // One sentence, at most once a week, and only when a whole week of answered
+  // tasks contained nothing wanted. Computed once when the list changes rather
+  // than on the countdown tick — it reads the calendar, not the clock.
+  // Shown once, ever, the first time the close button turns out not to close
+  // anything. Set while the window is already hidden, so it is sitting there
+  // when it comes back.
+  const [shelfOpen, setShelfOpen] = useState(false);
+  // Stops every looping animation while the window is not in front. See
+  // lib/windowActive — this is the thing that was holding the GPU at 80%.
+  useEffect(() => { installWindowActive(); }, []);
+  const windowActive = useWindowActive();
+  const [trayHint, setTrayHint] = useState(false);
+  useEffect(() => {
+    const un = listen("closed-to-tray", () => {
+      if (localStorage.getItem("gamesched_tray_hint_seen")) return;
+      localStorage.setItem("gamesched_tray_hint_seen", "1");
+      setTrayHint(true);
+    });
+    return () => { un.then(f => f()); };
+  }, []);
+
+  const [weekNote, setWeekNote] = useState(false);
+  useEffect(() => {
+    if (loading) return;
+    setWeekNote(shouldShowWeekNote(countdowns.map(c => c.task)));
+  }, [loading, countdowns.length]);
+
+  const [lowPower, setLowPower] = useState(
+    () => localStorage.getItem("gamesched_low_power_date") === todayLocal(),
+  );
+  const toggleLowPower = () => {
+    setLowPower(v => {
+      // Stored as a DATE, so it clears itself overnight. Nobody should have to
+      // remember to turn it off, and it should never quietly persist for weeks.
+      if (v) localStorage.removeItem("gamesched_low_power_date");
+      else localStorage.setItem("gamesched_low_power_date", todayLocal());
+      return !v;
+    });
+  };
+
   // Nothing below is built until it is opened for the first time.
   const mountCalendar = useMountOnce(view === "calendar");
   const mountFinance  = useMountOnce(view === "finance");
@@ -101,6 +151,15 @@ export default function App() {
 
   const handleDelete = useCallback(async (id: number) => {
     try { await deleteTask(id); } catch (e) { console.error("deleteTask failed:", e); }
+    refreshTasks();
+  }, [refreshTasks]);
+
+  // No end date by default. Asking "until when" is asking someone to predict
+  // when they will have the energy for a thing they just decided they do not
+  // have the energy for, and a wrong answer means it comes back too early. It
+  // is one click to bring back, which is the cheaper direction to be wrong in.
+  const handlePause = useCallback(async (id: number) => {
+    try { await pauseTask(id, PAUSE_FOREVER); } catch (e) { console.error("pauseTask failed:", e); }
     refreshTasks();
   }, [refreshTasks]);
 
@@ -138,7 +197,7 @@ export default function App() {
     return countdowns.filter(c => c.task.category === filter);
   }, [countdowns, filter]);
 
-  const hr = bangkokHour();
+  const hr = localHour();
   // hr < 12 meant 01:54 greeted you with "good morning". Anyone awake at that
   // hour knows it is not morning, and for this app in particular the small
   // hours are prime time — game resets land at 04:00.
@@ -178,12 +237,18 @@ export default function App() {
         <div className="flex items-center justify-between mb-5">
           <div>
             <p className="text-white/40 text-xs">
-              {new Date().toLocaleDateString(getLang() === "th" ? "th-TH" : "en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "Asia/Bangkok" })}
+              {new Date().toLocaleDateString(getLang() === "th" ? "th-TH" : "en-US", { weekday: "long", month: "long", day: "numeric", timeZone: getAppTimeZone() })}
             </p>
             <h1 className="text-xl font-bold text-white">{greeting} 👋</h1>
           </div>
 
-          {view === "tasks" && (
+          {view === "tasks" && lowPower && (
+            <span className="text-white/45 text-xs rounded-xl bg-white/5 border border-white/10 px-3 py-2">
+              {t("app.lowPowerOn")}
+            </span>
+          )}
+
+          {view === "tasks" && !lowPower && (
             <div className="flex gap-2">
               {/* Total pending */}
               <div className="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-center min-w-14">
@@ -224,6 +289,22 @@ export default function App() {
           )}
 
           <div className="flex gap-2">
+            <motion.button whileTap={{ scale: 0.95 }} onClick={toggleLowPower}
+              className={`p-2.5 rounded-xl border transition-all ${
+                lowPower
+                  ? "bg-amber-500/15 border-amber-500/40"
+                  : "bg-white/5 border-white/10 hover:bg-white/10"
+              }`}
+              title={t("app.lowPower")}>
+              <BatteryLow size={16} className={lowPower ? "text-amber-400" : "text-white/40"} />
+            </motion.button>
+
+            <motion.button whileTap={{ scale: 0.95 }} onClick={() => setShelfOpen(true)}
+              className="p-2.5 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition-all"
+              title={t("shelf.title")}>
+              <Archive size={16} className="text-white/40" />
+            </motion.button>
+
             <motion.button whileTap={{ scale: 0.95 }} onClick={() => setAiOpen(true)}
               className="p-2.5 rounded-xl bg-purple-500/10 border border-purple-500/25 hover:bg-purple-500/20 hover:border-purple-500/50 transition-all relative"
               title="AI Assistant">
@@ -256,7 +337,9 @@ export default function App() {
                     className="mb-4 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 flex items-center gap-3 cursor-pointer"
                     onClick={() => setFilter(f => f === "urgent" ? "all" : "urgent")}
                   >
-                    <motion.div animate={{ scale: [1, 1.2, 1] }} transition={{ repeat: Infinity, duration: 1 }}>
+                    <motion.div
+                      animate={windowActive ? { scale: [1, 1.2, 1] } : { scale: 1 }}
+                      transition={windowActive ? { repeat: Infinity, duration: 1 } : { duration: 0 }}>
                       <Clock size={16} className="text-red-400" />
                     </motion.div>
                     <p className="text-red-300 text-sm font-medium">
@@ -266,9 +349,44 @@ export default function App() {
                 )}
               </AnimatePresence>
 
+              {trayHint && (
+                <div className="flex items-start gap-2.5 bg-white/[0.03] border border-white/[0.08] rounded-xl px-3.5 py-2.5 mb-3">
+                  <p className="flex-1 text-white/50 text-xs leading-relaxed">{t("settings.trayToast")}</p>
+                  <button onClick={() => setTrayHint(false)}
+                    className="text-white/35 hover:text-white text-[11px] shrink-0 transition-colors">
+                    {t("week.dismiss")}
+                  </button>
+                </div>
+              )}
+
+              {/* Stated and dismissible, never repeated within the week. See
+                  lib/weekNote for the rules on when this is allowed to appear
+                  at all — the short version is that silence is the default and
+                  a quiet week stays quiet. */}
+              <AnimatePresence>
+                {view === "tasks" && weekNote && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="mb-3"
+                  >
+                    <div className="flex items-start gap-2.5 bg-white/[0.03] border border-white/[0.08] rounded-xl px-3.5 py-2.5">
+                      <p className="flex-1 text-white/50 text-xs leading-relaxed">{t("week.allMust")}</p>
+                      <button
+                        onClick={() => { markWeekNoteShown(); setWeekNote(false); }}
+                        className="text-white/35 hover:text-white text-[11px] shrink-0 transition-colors"
+                      >
+                        {t("week.dismiss")}
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
               {/* done progress bar — shows when any tasks are done */}
               <AnimatePresence>
-                {doneCount > 0 && countdowns.length > 0 && (
+                {!lowPower && doneCount > 0 && countdowns.length > 0 && (
                   <motion.div
                     initial={{ opacity: 0, height: 0 }}
                     animate={{ opacity: 1, height: "auto" }}
@@ -276,11 +394,20 @@ export default function App() {
                     className="mb-3"
                   >
                     <div className="flex justify-between text-xs text-white/40 mb-1">
+                      {/* With nothing ticked yet this line used to read
+                          "0 of 3 done today" beside a big 0%, which is a score
+                          of your morning before the morning has happened. Same
+                          data, but until there is something to report it
+                          reports the schedule instead of the shortfall. */}
                       <span className="flex items-center gap-1">
-                        <CheckCircle2 size={11} className="text-green-400" />
-                        {t("progress.doneOf", { done: doneCount, total: countdowns.length })}
+                        {doneCount > 0 && <CheckCircle2 size={11} className="text-green-400" />}
+                        {doneCount > 0
+                          ? t("progress.doneOf", { done: doneCount, total: countdowns.length })
+                          : t("progress.noneYet", { total: countdowns.length })}
                       </span>
-                      <span>{Math.round((doneCount / countdowns.length) * 100)}%</span>
+                      {doneCount > 0 && (
+                        <span>{Math.round((doneCount / countdowns.length) * 100)}%</span>
+                      )}
                     </div>
                     <div className="h-1 bg-white/5 rounded-full overflow-hidden">
                       <motion.div
@@ -352,6 +479,8 @@ export default function App() {
                           onToggleUrgent={handleToggleUrgent}
                           onRefresh={refreshTasks}
                           onEdit={handleEdit}
+                          onPause={handlePause}
+                          lowPower={lowPower}
                         />
                       ))}
                     </AnimatePresence>
@@ -387,6 +516,7 @@ export default function App() {
       {mountAdd && <AddTaskModal open={addOpen} onClose={() => setAddOpen(false)}
         onTaskAdded={refreshAll} onOpenAI={() => { setAddOpen(false); setAiOpen(true); }} />}
       {mountSettings && <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />}
+      <TaskShelf open={shelfOpen} onClose={() => setShelfOpen(false)} onChanged={refreshAll} />
       {mountEdit && <EditTaskModal taskId={editTaskId} initialTask={editTask} onClose={() => { setEditTaskId(null); setEditTask(null); }} onSaved={() => { setEditTaskId(null); setEditTask(null); setTimeout(refreshAll, 100); }} />}
       {mountAi && <UnifiedAIChat
         open={aiOpen}

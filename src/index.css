@@ -121,3 +121,25 @@ input[type="date"]::-webkit-calendar-picker-indicator {
   opacity: 0;
   display: none;
 }
+/* ─── Idle painting ───────────────────────────────────────────────────────────
+   Set by lib/windowActive when the window is not in front.
+
+   The app is a transparent, undecorated window with fourteen backdrop-blur
+   surfaces in it. In that setup any element that animates forever keeps the
+   whole surface stack dirty, and the compositor redraws it around sixty times a
+   second for as long as the process lives — which is what put the GPU at 80%
+   with the CPU near idle, tray-hidden included.
+
+   Pausing rather than disabling is the point: `animation-play-state` freezes an
+   animation where it stands and resumes it in place, so nothing jumps when the
+   window comes back. Transitions are cut too, since a transition that fires
+   while hidden is a repaint for a frame nobody sees.
+
+   Scoped to html.idle only, so with the window in front the app animates
+   exactly as it did before. */
+html.idle *,
+html.idle *::before,
+html.idle *::after {
+  animation-play-state: paused !important;
+  transition: none !important;
+}

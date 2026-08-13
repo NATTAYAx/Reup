@@ -1,7 +1,7 @@
 {
   "name": "game-scheduler",
   "private": true,
-  "version": "0.2.12",
+  "version": "0.2.32",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "bump": "node scripts/bump-version.mjs",
-    "release": "node scripts/bump-version.mjs && tauri build"
+    "release": "node scripts/bump-version.mjs && tauri build",
+    "eval": "tsc scripts/eval-parser.ts --outDir node_modules/.cache/eval --module commonjs --target es2020 --moduleResolution node --skipLibCheck --esModuleInterop && node node_modules/.cache/eval/scripts/eval-parser.js"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -17,8 +18,6 @@
     "@tauri-apps/plugin-http": "^2.5.7",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-sql": "^2.3.2",
-    "date-fns": "^4.1.0",
-    "date-fns-tz": "^3.2.0",
     "framer-motion": "^12.34.3",
     "lucide-react": "^0.575.0",
     "react": "^19.1.0",

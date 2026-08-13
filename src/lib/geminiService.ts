@@ -12,6 +12,7 @@
 // ============================================================
 
 import { smartParse, AIResult } from "./smartAI";
+import { getAppTimeZone, offsetLabel } from "./tz";
 import { cacheLookup, cacheStore, recordCall } from "./aiMemory";
 import {
   PROVIDERS, getProviderId, getApiKey, setApiKey, getModel, getBaseUrl,
@@ -68,7 +69,7 @@ You are a smart assistant for a personal task and finance tracker app.
 
 The user is Thai, so they may write in Thai, English, or mix both (Thaiglish).
 
-Today's timezone is Asia/Bangkok (UTC+7).
+Today's timezone is ${getAppTimeZone()} (${offsetLabel(getAppTimeZone())}).
 
 
 
@@ -223,6 +224,63 @@ THAI KEYWORDS:
 - วันจันทร์=1, อังคาร=2, พุธ=3, พฤหัส=4, ศุกร์=5, เสาร์=6, อาทิตย์=0
 `.trim();
 
+const PROMPT_OPERATIONS = `
+PREFERRED FORMAT — a list of operations. Use this whenever the request maps to
+one of the verbs below. One message may contain several; return them in the
+order they should run.
+
+{
+  "domain": "task" | "finance",
+  "reply": "<one short friendly sentence>",
+  "operations": [ { "kind": "...", ... } ]
+}
+
+TASK VERBS. Every one except create_task takes "id", copied EXACTLY from the id
+shown beside the task in CONTEXT. Never invent an id, and never send a name
+instead — if no task in CONTEXT matches, return an empty operations list and ask
+which one in "reply".
+
+  {"kind":"create_task","task":{ ...the task object described above... }}
+  {"kind":"update_task","id":N,"task":{ only the fields that change }}
+      editable: name, description, notes, category, reset_type, reset_time,
+      reset_day, reset_interval_days, anchor_date, event_start, event_end,
+      specific_date, is_priority, is_urgent, min_step, time_zone, intent
+  {"kind":"delete_task","id":N}
+  {"kind":"restore_task","id":N}
+  {"kind":"complete_task","id":N}          // "เล่นแล้ว" / "ทำเสร็จแล้ว" / "done"
+  {"kind":"uncomplete_task","id":N}        // "ยังไม่ได้ทำ" / "ยกเลิกติ๊ก"
+  {"kind":"pause_task","id":N,"until":"YYYY-MM-DDTHH:MM:SSZ" or omit for no end date}
+  {"kind":"resume_task","id":N}
+  {"kind":"set_priority","id":N,"value":true|false}
+  {"kind":"set_urgent","id":N,"value":true|false}
+
+MONEY VERBS. Expenses have no id, so they are found by "keyword" — a word from
+the entry's own note, taken from what the user said or from the previous turn.
+
+  {"kind":"log_expense","amount":N,"category":"<key from CONTEXT>","note":"..."}
+  {"kind":"edit_expense","keyword":"...","amount":N}
+  {"kind":"delete_expense","keyword":"..."}
+  {"kind":"log_income","amount":N,"source":"...","date":"YYYY-MM-DD" or omit}
+
+WHEN MORE THAN ONE TASK COULD BE MEANT, ASK. DO NOT PICK.
+
+Names overlap. A user may have "Honkai Star Rail" and "Honkai Impact 3rd" at the
+same time, and "เล่น Honkai แล้ว" then names neither of them. Choosing the
+likelier one is wrong even when it happens to be right, because marking the wrong
+task done is silent — nothing looks broken, the mistake is only found later, and
+by then the reason is gone.
+
+So: if two or more tasks in CONTEXT are a plausible match for what the user said,
+return "operations": [] and use "reply" to ask which, listing the candidates by
+their full names. One matching task means act. Zero means say so. Only exactly
+one match is enough to proceed.
+
+This applies to every id-taking verb, and most sharply to the destructive ones.
+
+Answering a question rather than changing something ("เดือนนี้ใช้ไปเท่าไหร่")
+means an empty operations list and the answer in "reply".
+`.trim();
+
 const PROMPT_FINANCE = `
 For FINANCE operations return:
 
@@ -240,7 +298,7 @@ For FINANCE operations return:
 
   "note": "..." or null,
 
-  "keyword": "..." or null,
+  "keyword": "..." or null,   // for delete_expense / edit_expense this names the entry, copied from the user's words or the previous turn. The field is called "keyword" — NOT "targetExpenseName".
 
   "newAmount": number or null,
 
@@ -258,6 +316,9 @@ function buildSystemPrompt(kind: ContextKind): string {
   const parts = [PROMPT_BASE];
   if (kind !== "finance") parts.push(PROMPT_TASK);
   if (kind !== "task") parts.push(PROMPT_FINANCE);
+  // Last, so it is the most recent instruction in the prompt and reads as the
+  // preferred answer rather than as one option among several.
+  parts.push(PROMPT_OPERATIONS);
   return parts.join("\n\n");
 }
 
@@ -309,7 +370,214 @@ let lastUsage: TokenUsage | null = null;
  * all come from src/lib/aiProviders.ts. Swapping to an OpenAI key, an Anthropic
  * key, or a model running locally through Ollama changes a dropdown, not code.
  */
-export async function callGemini(
+export 
+/**
+ * Get an object out of whatever the model actually sent.
+ *
+ * THIS IS WHERE PROVIDER SUPPORT IS REALLY DECIDED.
+ *
+ * The three HTTP shapes in the world are already handled in lib/aiProviders —
+ * Gemini, Anthropic, and the OpenAI format that OpenRouter, Groq, Together,
+ * DeepSeek, Mistral, LM Studio and Ollama all speak too. Adding another vendor
+ * is rarely the problem. What varies is how CLEANLY the answer comes back.
+ *
+ * Gemini and OpenAI can be told to emit nothing but JSON. Anthropic has no such
+ * switch, and neither do most models served locally through Ollama or LM Studio.
+ * Those will happily write "Sure! Here's the JSON:" in front of it, or add a
+ * closing remark after it, or wrap it in a fence.
+ *
+ * The old line stripped fences and called JSON.parse. One stray sentence and it
+ * threw, the catch swallowed it, and the app quietly fell back to the offline
+ * parser — so a self-hosted model would have looked simply broken, with the
+ * reason never surfacing anywhere.
+ *
+ * So this tries three times, from strictest to most forgiving, and only gives up
+ * when there is no balanced object anywhere in the text.
+ */
+function parseModelJson(raw: string): any {
+  const text = (raw ?? "").trim();
+  if (!text) throw new Error("EMPTY_RESPONSE");
+
+  // 1. Exactly what was asked for.
+  try { return JSON.parse(text); } catch { /* keep going */ }
+
+  // 2. Fenced, which is the common case for models without a JSON mode.
+  const fenced = text.replace(/```json\s*/gi, "").replace(/```/g, "").trim();
+  try { return JSON.parse(fenced); } catch { /* keep going */ }
+
+  // 3. Buried in prose. Scan for the first balanced {...}, counting braces and
+  //    ignoring any that sit inside a string, so a brace in a Thai reply cannot
+  //    end the object early.
+  const src = fenced;
+  const start = src.indexOf("{");
+  if (start !== -1) {
+    let depth = 0, inStr = false, esc = false;
+    for (let i = start; i < src.length; i++) {
+      const c = src[i];
+      if (esc) { esc = false; continue; }
+      if (c === "\\") { esc = true; continue; }
+      if (c === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (c === "{") depth++;
+      else if (c === "}") {
+        depth--;
+        if (depth === 0) {
+          try { return JSON.parse(src.slice(start, i + 1)); } catch { break; }
+        }
+      }
+    }
+  }
+
+  throw new Error("BAD_JSON");
+}
+
+// ─── Normalising what comes back ──────────────────────────────────────────────
+//
+// The schema in the system prompt asks for domain "finance" and intent
+// "edit_expense". Fourteen consecutive real calls, read out of the usage log,
+// came back as:
+//
+//   domain: finance  intent: edit_expense    ← as asked
+//   domain: spending intent: edit_amount
+//   domain: spending intent: edit
+//   domain: expense  intent: edit_amount
+//
+// Same sentence, same prompt, four different vocabularies. And the code checked
+// `response.domain === "finance"`, so three of those four missed the finance
+// branch entirely, missed the task branch too, and came out the far end as "I
+// didn't follow that one" — while the model had understood perfectly and even
+// written a confident Thai sentence saying the edit was done.
+//
+// Chasing this one field name at a time does not converge; there was already a
+// patch for `targetExpenseName` and the very next call invented
+// `targetSpendingName`. A generative model is not a wire protocol. It gets the
+// MEANING right far more reliably than it gets the SPELLING right, so the
+// spelling has to be repaired at the door, once, rather than guarded against at
+// every branch downstream.
+//
+// Unknown values are left exactly as they are. Nothing here invents an intent
+// that was not there — it only renames ones that were.
+
+const DOMAIN_ALIASES: Record<string, string> = {
+  spending: "finance", expense: "finance", expenses: "finance", money: "finance",
+  budget: "finance", income: "finance", financial: "finance", cost: "finance",
+  tasks: "task", todo: "task", todos: "task", schedule: "task",
+  reminder: "task", reminders: "task", game: "task",
+  conversation: "chat", general: "chat", other: "chat",
+};
+
+const FINANCE_INTENT_ALIASES: Record<string, string> = {
+  edit: "edit_expense", update: "edit_expense", modify: "edit_expense",
+  edit_amount: "edit_expense", change_amount: "edit_expense",
+  update_expense: "edit_expense", update_amount: "edit_expense",
+  edit_spending: "edit_expense", change: "edit_expense",
+  delete: "delete_expense", remove: "delete_expense",
+  remove_expense: "delete_expense", delete_spending: "delete_expense",
+  add: "log_expense", add_expense: "log_expense", log: "log_expense",
+  spend: "log_expense", record_expense: "log_expense", new_expense: "log_expense",
+  add_income: "log_income", record_income: "log_income", earn: "log_income",
+  query: "query_spending", summary: "query_spending", ask: "query_spending",
+  report: "query_spending", check: "query_spending", total: "query_spending",
+};
+
+/** Any field whose name reads like "the thing being referred to". */
+const KEYWORD_ALIASES = [
+  "keyword", "targetExpenseName", "targetSpendingName", "targetName",
+  "expenseName", "spendingName", "itemName", "target", "name", "item", "note",
+];
+
+/** Exposed for tests only. */
+export const __normalizeForTest = (raw: any) => normalizeResponse(raw);
+
+/**
+ * Turn the old single-intent answer into an operations list.
+ *
+ * The model is asked for operations, and it will still sometimes answer in the
+ * older shape — the examples for tasks and expenses are right there in the same
+ * prompt, and a generative model reaches for whichever pattern feels closest.
+ * Rejecting those answers would throw away replies that are perfectly correct,
+ * so they are translated instead, once, here.
+ *
+ * The reverse also matters: nothing downstream has to know which shape arrived.
+ */
+function legacyToOperations(r: any): any[] | null {
+  const ops: any[] = [];
+
+  if (r.domain === "task") {
+    if (r.intent === "add" && Array.isArray(r.tasks)) {
+      for (const task of r.tasks) ops.push({ kind: "create_task", task });
+    }
+    // The name-based verbs cannot be translated: they address a row by text and
+    // the executor addresses it by id. Left alone so the old path still handles
+    // them, rather than converted into an operation with no id.
+  }
+
+  if (r.domain === "finance") {
+    const kw = r.keyword?.trim?.();
+    if (r.intent === "log_expense" && typeof r.amount === "number") {
+      ops.push({ kind: "log_expense", amount: r.amount, category: r.category, note: r.note });
+    } else if (r.intent === "log_income" && typeof r.amount === "number") {
+      ops.push({ kind: "log_income", amount: r.amount, source: r.source ?? r.note, date: r.date });
+    } else if (r.intent === "edit_expense" && kw) {
+      ops.push({ kind: "edit_expense", keyword: kw, amount: r.newAmount ?? r.amount });
+    } else if (r.intent === "delete_expense" && kw) {
+      ops.push({ kind: "delete_expense", keyword: kw });
+    }
+  }
+
+  return ops.length ? ops : null;
+}
+
+function normalizeResponse(raw: any): any {
+  if (!raw || typeof raw !== "object") return raw;
+  const r = { ...raw };
+
+  const lower = (v: unknown) => (typeof v === "string" ? v.trim().toLowerCase() : "");
+
+  const d = lower(r.domain);
+  if (d && DOMAIN_ALIASES[d]) r.domain = DOMAIN_ALIASES[d];
+  else if (d) r.domain = d;
+
+  if (r.domain === "finance") {
+    const i = lower(r.intent);
+    if (i && FINANCE_INTENT_ALIASES[i]) r.intent = FINANCE_INTENT_ALIASES[i];
+    else if (i) r.intent = i;
+
+    // Whichever spelling carried the subject this time, put it where the app
+    // reads it. First non-empty wins; `note` is last because on a log_expense
+    // it is the description rather than a reference to an existing row.
+    if (!r.keyword) {
+      for (const alias of KEYWORD_ALIASES) {
+        const v = r[alias];
+        if (typeof v === "string" && v.trim()) { r.keyword = v.trim(); break; }
+      }
+    }
+
+    // Same treatment for the new figure.
+    if (r.newAmount == null) {
+      for (const alias of ["newAmount", "amount", "value", "newValue", "newPrice"]) {
+        const v = r[alias];
+        if (typeof v === "number" && isFinite(v)) { r.newAmount = v; break; }
+      }
+    }
+  }
+  // Only ever an array from here on, so callers stop having to check.
+  if (r.operations && !Array.isArray(r.operations)) delete r.operations;
+  if (!r.operations) {
+    const converted = legacyToOperations(r);
+    if (converted) r.operations = converted;
+  }
+  if (Array.isArray(r.operations)) {
+    // Drop anything the executor has no verb for rather than carrying an
+    // invented one all the way to a switch statement's default branch.
+    r.operations = r.operations.filter(
+      (op: any) => op && typeof op === "object" && typeof op.kind === "string",
+    );
+  }
+
+  return r;
+}
+async function callGemini(
   userMessage: string,
   options: GeminiOptions = {}
 ): Promise<GeminiResponse> {
@@ -359,9 +627,7 @@ export async function callGemini(
       console.info(`[ai:${providerId}] in ${reply.usage.input} / out ${reply.usage.output} tokens`);
     }
 
-    // Providers without a JSON mode wrap their answer in a markdown fence.
-    const clean = reply.text.replace(/```json\s*/gi, "").replace(/```/g, "").trim();
-    return JSON.parse(clean) as GeminiResponse;
+    return normalizeResponse(parseModelJson(reply.text)) as GeminiResponse;
   } catch (e: any) {
     clearTimeout(tid);
     if (e.name === "AbortError") throw new Error("TIMEOUT");
@@ -387,7 +653,22 @@ export interface GeminiFinanceResponse {
   amount?: number;
   category?: string;
   note?: string;
+  /** Which row is meant, for delete_expense and edit_expense. */
   keyword?: string;
+  /**
+   * The same thing under the name the model keeps inventing.
+   *
+   * The task schema in this same system prompt calls its equivalent field
+   * `targetTaskName`, and Gemini generalises: asked to edit an expense it
+   * returns `targetExpenseName` and leaves `keyword` out entirely. Reading only
+   * `keyword` meant a perfectly good answer — the row was correctly identified
+   * as "ค่าเน็ต" — was thrown away and the user was asked which entry they
+   * meant, right after telling us.
+   *
+   * A prompt cannot be enforced, only requested. So the schema still asks for
+   * `keyword` and the reader accepts either.
+   */
+  targetExpenseName?: string;
   newAmount?: number;
   incomeAmount?: number;
   incomeNote?: string;
@@ -446,6 +727,33 @@ export async function processMessage(
   const local = localParse(userMessage);
 
   if (!options.forceRemote && local.confidence >= LOCAL_CONFIDENCE_FLOOR) {
+    // THE LOG USED TO ONLY RECORD FAILURES.
+    //
+    // recordCall lived solely on the Gemini path, so every row in it was, by
+    // definition, a message that had already scored below the floor. Reading
+    // that log and concluding the confidence score "does not discriminate" is
+    // reading a pile of failed exams and concluding the exam measures nothing.
+    //
+    // Two questions could not be answered at all from it, and both matter more
+    // than any individual parsing case:
+    //
+    //   What fraction escapes? If nine in ten stay local, sharpening the parser
+    //   buys almost nothing and the effort belongs elsewhere.
+    //
+    //   What is CONFIDENTLY WRONG? A message scoring 0.9+ and misread never
+    //   reaches a model, never appears here, and nobody finds out. That is the
+    //   worst failure this app can have and it was the one thing invisible.
+    //
+    // Both sides are recorded now, so the log is a measurement rather than a
+    // complaints box.
+    recordCall({
+      text: userMessage,
+      domain: (local.response as any)?.domain ?? "?",
+      intent: (local.response as any)?.intent ?? "?",
+      localConfidence: local.confidence,
+      input: 0,
+      output: 0,
+    });
     return { source: "local", response: local.response };
   }
 

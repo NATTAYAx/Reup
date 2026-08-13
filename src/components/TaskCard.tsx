@@ -1,10 +1,12 @@
 import { motion, AnimatePresence } from "framer-motion";
-import { Trash2, Star, Flame, CheckCircle2, RotateCcw, Edit3 } from "lucide-react";
+import { Trash2, Star, Flame, CheckCircle2, RotateCcw, Edit3, Pin, PauseCircle } from "lucide-react";
 import { CountdownResult, isRecurring, isOneShot } from "../types";
 import { formatCountdown, getCategoryColor, getUrgencyColor } from "../lib/countdown";
 import { getNextReset } from "../lib/countdown";
 import { markTaskCompleted, unmarkTaskCompleted } from "../lib/database";
 import { t } from "../lib/i18n";
+import { getAppTimeZone } from "../lib/tz";
+import { isEased } from "../lib/cycles";
 
 interface Props {
   result: CountdownResult;
@@ -13,9 +15,14 @@ interface Props {
   onToggleUrgent: (id: number, current: boolean) => void;
   onRefresh: () => void;
   onEdit?: (id: number) => void;
+  /** Set the task aside. Absent on surfaces where pausing makes no sense. */
+  onPause?: (id: number) => void;
+  /** On a low-power day the card shows the smallest version of the task
+   *  instead of the whole thing, and drops the decoration around it. */
+  lowPower?: boolean;
 }
 
-export default function TaskCard({ result, onDelete, onTogglePriority, onToggleUrgent, onRefresh, onEdit }: Props) {
+export default function TaskCard({ result, onDelete, onTogglePriority, onToggleUrgent, onRefresh, onEdit, onPause, lowPower = false }: Props) {
   // No interactive delay needed — the sort stability fix in useCountdowns ensures
   // TaskCards don't continuously remount each second, so phantom clicks cannot occur.
   const { task, urgency, is_completed_this_cycle } = result;
@@ -23,6 +30,9 @@ export default function TaskCard({ result, onDelete, onTogglePriority, onToggleU
   const isPriority = Boolean(task.is_priority);
   const isUrgent = Boolean(task.is_urgent);
   const recurring = isRecurring(task);
+  // Two missed cycles in a row and the task has a smallest version written
+  // down. Nothing about this is announced; the ask just gets smaller.
+  const eased = isEased(task);
   const oneShot = isOneShot(task);
 
   // Card border: completed > urgent > priority > time-based urgency
@@ -111,12 +121,30 @@ export default function TaskCard({ result, onDelete, onTogglePriority, onToggleU
             }`}>
               {task.name}
             </p>
-            {task.description ? (
-              <p className="text-white/40 text-xs mt-0.5 truncate">{task.description}</p>
-            ) : null}
-            {(task as any).notes ? (
-              <p className="text-white/25 text-xs mt-0.5 truncate italic">📝 {(task as any).notes}</p>
-            ) : null}
+            {/* Two ways the smallest version REPLACES the description and notes
+                rather than joining them. On a low-power day, because the point
+                of the day is fewer things to read. And after two missed cycles
+                in a row, because at that point the full version is not what to
+                ask for — see lib/cycles. Both look identical on purpose: there
+                is no marker anywhere saying which one you are looking at, and
+                nothing counts or displays the misses. */}
+            {(lowPower || eased) && task.min_step ? (
+              <p className="text-amber-200/70 text-xs mt-0.5 truncate">
+                → {task.min_step}
+              </p>
+            ) : (
+              <>
+                {task.description ? (
+                  <p className="text-white/40 text-xs mt-0.5 truncate">{task.description}</p>
+                ) : null}
+                {(task as any).notes ? (
+                  <p className="text-white/25 text-xs mt-0.5 truncate italic">📝 {(task as any).notes}</p>
+                ) : null}
+                {task.min_step ? (
+                  <p className="text-white/30 text-xs mt-0.5 truncate">→ {task.min_step}</p>
+                ) : null}
+              </>
+            )}
           </div>
 
           {/* action buttons — show on hover */}
@@ -176,6 +204,18 @@ export default function TaskCard({ result, onDelete, onTogglePriority, onToggleU
                 <Edit3 size={13} />
               </button>
             )}
+            {/* Sits immediately before delete on purpose. The moment someone
+                reaches for the bin because a task will not stop asking is the
+                moment the gentler answer needs to already be under the cursor. */}
+            {onPause && (
+              <button
+                onClick={e => { e.stopPropagation(); if (e.isTrusted) onPause(task.id); }}
+                className="p-1.5 rounded-lg text-white/20 hover:text-sky-300 bg-white/5 transition-all"
+                title={t("task.pause")}
+              >
+                <PauseCircle size={13} />
+              </button>
+            )}
             <button
               onClick={e => { if (e.isTrusted) onDelete(task.id); }}
               className="p-1.5 rounded-lg text-white/20 hover:text-red-400 bg-white/5 transition-all"
@@ -197,6 +237,15 @@ export default function TaskCard({ result, onDelete, onTogglePriority, onToggleU
              task.reset_type === "biweekly" ? t("type.biweekly") :
              task.reset_type.replace("_", " ")}
           </span>
+
+          {/* Only when the pin has actually parted company with the app's zone.
+              While they agree there is nothing to say, so nothing is drawn. */}
+          {task.time_zone && task.time_zone !== getAppTimeZone() && (
+            <span className="flex items-center gap-1 text-[10px] bg-amber-500/15 text-amber-200/80 border border-amber-500/30 px-2 py-0.5 rounded-full">
+              <Pin size={9} />
+              {(task.time_zone.split("/").pop() ?? task.time_zone).replace(/_/g, " ")}
+            </span>
+          )}
 
           {is_completed_this_cycle ? (
             <span className="text-xs text-green-400/70 font-medium">

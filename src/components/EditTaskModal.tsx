@@ -4,6 +4,13 @@ import { updateTask, getTaskById } from "../lib/database";
 import TimePicker from "./TimePicker";
 import DatePicker from "./DatePicker";
 import TaskImagePicker from "./TaskImagePicker";
+import Select from "./Select";
+import CategoryPicker from "./CategoryPicker";
+import CycleFields from "./CycleFields";
+import TimeZonePin from "./TimeZonePin";
+import IntentPicker from "./IntentPicker";
+import { getAppTimeZone } from "../lib/tz";
+import { TYPE_OPTIONS } from "../lib/taskOptions";
 import { t } from "../lib/i18n";
 
 interface Props {
@@ -98,6 +105,9 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
       event_start: form.event_start || null,
       event_end: form.event_end || null,
       specific_date: form.specific_date || null,
+      min_step: (form.min_step ?? "").trim() || null,
+      time_zone: form.time_zone ?? null,
+      intent: (form.intent as "want" | "must" | null) ?? null,
       is_priority: form.is_priority ?? 0,
       is_urgent: form.is_urgent ?? 0,
       cover_image: form.cover_image ?? null,
@@ -168,34 +178,39 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
               className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-white/30 text-sm focus:outline-none focus:border-purple-500"/>
             <textarea value={form.notes ?? ""} onChange={e => set("notes", e.target.value)} placeholder={t("editTask.notesPH")} rows={2}
               className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-white/30 text-sm focus:outline-none focus:border-purple-500 resize-none"/>
+            {/* The smallest version of this task. Editable here as well as on
+                creation, because the useful wording for it usually only becomes
+                obvious after a few days of not managing the full one. */}
+            <div className="flex flex-col gap-1">
+              <label className="text-white/40 text-xs px-1">{t("task.minStep")}</label>
+              <input value={form.min_step ?? ""} onChange={e => set("min_step", e.target.value)}
+                placeholder={t("task.minStepPH")}
+                className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-white placeholder-white/30 text-sm focus:outline-none focus:border-purple-500"/>
+              <p className="text-white/25 text-[11px] px-1">{t("task.minStepHint")}</p>
+              <div className="px-1 pt-2">
+                <IntentPicker
+                  value={(form.intent as "want" | "must" | null) ?? null}
+                  onChange={v => set("intent", v)}
+                />
+              </div>
+            </div>
             <TaskImagePicker
               value={form.cover_image ?? null}
               onChange={v => set("cover_image", v)}
               category={form.category}
             />
-            <div className="grid grid-cols-2 gap-3">
-              <div className="flex flex-col gap-1">
-                <label className="text-white/40 text-xs px-1">{t("editTask.labelCat")}</label>
-                <select value={form.category ?? "personal"} onChange={e => set("category", e.target.value)}
-                  className="bg-gray-800 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-purple-500">
-                  <option value="game">{t("catOpt.game")}</option>
-                  <option value="school">{t("catOpt.school")}</option>
-                  <option value="work">{t("catOpt.work")}</option>
-                  <option value="personal">{t("catOpt.personal")}</option>
-                </select>
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-white/40 text-xs px-1">{t("editTask.labelType")}</label>
-                <select value={form.reset_type ?? "daily"} onChange={e => set("reset_type", e.target.value)}
-                  className="bg-gray-800 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-purple-500">
-                  <option value="daily">{t("resetType.daily")}</option>
-                  <option value="weekly">{t("resetType.weekly")}</option>
-                  <option value="biweekly">{t("resetType.biweekly")}</option>
-                  <option value="custom_days">{t("resetType.custom_days")}</option>
-                  <option value="event_window">{t("resetType.event_window")}</option>
-                  <option value="specific_date">{t("resetType.specific_date")}</option>
-                </select>
-              </div>
+            <div className="flex flex-col gap-2">
+              <label className="text-white/40 text-[11px] font-semibold tracking-wide uppercase px-0.5">{t("editTask.labelCat")}</label>
+              <CategoryPicker value={form.category ?? "personal"} onChange={v => set("category", v)} />
+            </div>
+            <div className="flex flex-col gap-2">
+              <label className="text-white/40 text-[11px] font-semibold tracking-wide uppercase px-0.5">{t("editTask.labelType")}</label>
+              <Select
+                value={form.reset_type ?? "daily"}
+                options={TYPE_OPTIONS}
+                onChange={v => set("reset_type", v)}
+                placeholder={t("addTask.typePH")}
+              />
             </div>
             <div className="flex flex-col gap-1">
               <div className="flex items-center justify-between px-1">
@@ -213,6 +228,9 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
               {form.reset_time
                 ? <TimePicker value={form.reset_time} onChange={v => set("reset_time", v)} />
                 : <p className="text-white/25 text-[11px] px-1">{t("task.allDayHint")}</p>}
+              <div className="px-1 pt-1">
+                <TimeZonePin value={form.time_zone ?? null} onChange={v => set("time_zone", v)} />
+              </div>
             </div>
             {form.reset_type === "weekly" && (
               <div className="flex flex-col gap-1">
@@ -226,18 +244,14 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
               </div>
             )}
             {(form.reset_type === "biweekly" || form.reset_type === "custom_days") && (
-              <div className="space-y-2">
-                {form.reset_type === "custom_days" && (
-                  <input type="number" value={form.reset_interval_days ?? 14} onChange={e => set("reset_interval_days", Number(e.target.value))} placeholder={t("editTask.cyclePH")}
-                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-purple-500"/>
-                )}
-                <DatePicker
-                  value={form.anchor_date ?? ""}
-                  onChange={v => set("anchor_date", v)}
-                  placeholder={t("editTask.anchorPH")}
-                  label={t("editTask.anchorLabel")}
-                />
-              </div>
+              <CycleFields
+                editableInterval={form.reset_type === "custom_days"}
+                intervalDays={form.reset_type === "biweekly" ? 14 : (form.reset_interval_days ?? 14)}
+                onIntervalChange={v => set("reset_interval_days", v)}
+                anchorDate={form.anchor_date ?? ""}
+                onAnchorChange={v => set("anchor_date", v)}
+                resetTime={form.reset_time ?? ""}
+              />
             )}
             {form.reset_type === "event_window" && (() => {
               // Detect AI-chat deadline (event_end has 'T' = UTC datetime) vs manual date range
@@ -262,7 +276,7 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
                 const deadlineTime = form.event_end ? getLocalTime(form.event_end) : "23:59";
                 return (
                   <div className="space-y-2">
-                    <label className="text-white/40 text-xs px-1">⏰ Deadline (Bangkok time)</label>
+                    <label className="text-white/40 text-xs px-1">⏰ Deadline ({getAppTimeZone()})</label>
                     <DatePicker
                       value={deadlineDate}
                       onChange={e => {

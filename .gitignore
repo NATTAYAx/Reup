@@ -1,22 +1,84 @@
-# Logs
-logs
+# ── build output ─────────────────────────────────────────────────────────────
+node_modules/
+dist/
+dist-ssr/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+
+# ── anything the app itself writes ───────────────────────────────────────────
+# The backup file is the one that matters. It contains every task, every money
+# entry, and (before the storageKeys fix) API keys in plaintext. Export it once
+# into the project folder, run `git add .` without looking, and it is in the
+# history for good — deleting the file later does not remove it, and anyone who
+# already cloned still has it.
+*.backup.json
+gamescheduler-backup*
+backup-*.json
+
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+
+# ── secrets ──────────────────────────────────────────────────────────────────
+# No key should ever reach a file in here — they live in localStorage at
+# runtime and are stripped from backups. This is the second lock on a door that
+# should already be shut.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+
+# ── signing / release ────────────────────────────────────────────────────────
+# The updater private key signs releases. If it leaks, anyone can push an
+# update that every install will accept as genuine.
+*.jks
+*.keystore
+tauri-private.key
+*.tauri-key
+
+
+# ── notes and personal files ─────────────────────────────────────────────────
+# Chat logs, handoff notes, medical or personal documents — none of it belongs
+# in a public repo, and all of it tends to end up in the project folder because
+# that is the folder that happens to be open. Keep drafts under notes/ or
+# private/ and they can never be added by accident.
+notes/
+private/
+*.docx
+*.doc
+text.md
+handoff*.md
+TODO.private.md
+
+
+# ── logs / temp ──────────────────────────────────────────────────────────────
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
-
-node_modules
-dist
-dist-ssr
 *.local
+.cache/
 
-# Editor directories and files
+
+# ── editors and OS ───────────────────────────────────────────────────────────
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
 .DS_Store
+Thumbs.db
+desktop.ini
 *.suo
 *.ntvs*
 *.njsproj

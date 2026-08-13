@@ -27,6 +27,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getAllTasks } from "../lib/database";
 import { calculateCountdown } from "../lib/countdown";
+import { reconcileCycles } from "../lib/cycles";
 import { checkAndNotify } from "../lib/notifier";
 import { CountdownResult } from "../types";
 
@@ -65,7 +66,18 @@ export function useCountdowns() {
   // ── Load tasks from DB — updates tasksRef only, NO state update ──────────
   const loadTasks = useCallback(async () => {
     try {
-      tasksRef.current = await getAllTasks();
+      const tasks = await getAllTasks();
+      // Walk each repeating task's boundary forward and note whether the cycle
+      // that just ended was met. Deliberately here and not in the 1-second
+      // render loop: a boundary passes once per cycle, so this almost always
+      // does nothing at all. See lib/cycles.
+      try {
+        await reconcileCycles(tasks);
+      } catch (err) {
+        // A task list that renders is worth more than a bookkeeping column.
+        console.error("[useCountdowns] reconcileCycles error:", err);
+      }
+      tasksRef.current = tasks;
     } catch (err) {
       console.error("[useCountdowns] loadTasks error:", err);
     } finally {

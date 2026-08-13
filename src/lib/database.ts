@@ -1,3 +1,4 @@
+import { isPaused } from "../types";
 import Database from "@tauri-apps/plugin-sql";
 import { applySyncMigrations } from "./syncMeta";
 
@@ -5,6 +6,9 @@ let db: Database | null = null;
 let dbReadyPromise: Promise<Database> | null = null;
 
 /** Single shared DB — ALL tables (tasks + finance) created here before any caller proceeds */
+/** How long a deleted task stays recoverable. */
+export const TRASH_TTL_DAYS = 30;
+
 export async function getDb(): Promise<Database> {
   if (db) return db;
   if (dbReadyPromise) return dbReadyPromise;
@@ -59,6 +63,16 @@ async function initializeSchema(db: Database): Promise<void> {
   try { await db.execute(`ALTER TABLE tasks ADD COLUMN is_urgent INTEGER DEFAULT 0`); } catch (_) {}
   try { await db.execute(`ALTER TABLE tasks ADD COLUMN completed_until TEXT DEFAULT NULL`); } catch (_) {}
   try { await db.execute(`ALTER TABLE tasks ADD COLUMN notes TEXT DEFAULT ''`); } catch (_) {}
+  // Null = the time floats with the app's zone, which is what every row already
+  // did before this column existed. Nothing needs backfilling.
+  try { await db.execute(`ALTER TABLE tasks ADD COLUMN time_zone TEXT DEFAULT NULL`); } catch (_) {}
+  // Null intent means nobody answered, which is read as unknown rather than as
+  // obligation — see types/index.ts. The two cycle columns exist so that "was
+  // the last cycle completed" is answerable at all; completed_until is a single
+  // overwritten value and keeps no history.
+  try { await db.execute(`ALTER TABLE tasks ADD COLUMN intent TEXT DEFAULT NULL`); } catch (_) {}
+  try { await db.execute(`ALTER TABLE tasks ADD COLUMN cycle_checked_until TEXT DEFAULT NULL`); } catch (_) {}
+  try { await db.execute(`ALTER TABLE tasks ADD COLUMN missed_streak INTEGER DEFAULT 0`); } catch (_) {}
 
   // ── Income table ───────────────────────────────────────────
   await db.execute(`CREATE TABLE IF NOT EXISTS income (
@@ -132,6 +146,15 @@ async function initializeSchema(db: Database): Promise<void> {
     )
   `);
 
+  // The smallest version of a task that still counts as having done it.
+  // "ล้างจาน" is a wall; "ล้างจาน 1 ใบ" is a doorway. Depression and ordinary
+  // procrastination both fail at the same place — starting — and shrinking the
+  // first step is the standard way through it. Nullable, because most tasks
+  // never need one.
+  try {
+    await db.execute("ALTER TABLE tasks ADD COLUMN min_step TEXT");
+  } catch (_) { /* already there */ }
+
   // A bank reference is the one thing on a slip worth keeping: short, opaque,
   // no account numbers or names in it, and it is what makes photographing the
   // same slip twice detectable instead of silently doubling a month's total.
@@ -143,6 +166,29 @@ async function initializeSchema(db: Database): Promise<void> {
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_slip_ref ON expenses(slip_ref) WHERE slip_ref IS NOT NULL",
   );
 
+  // Setting a task aside without deleting it. Null means running; a datetime
+  // means paused until then. See types/index.ts for why this is not a boolean.
+  try {
+    await db.execute("ALTER TABLE tasks ADD COLUMN paused_until TEXT DEFAULT NULL");
+  } catch (_) { /* already there */ }
+
+  // When the person deleted it, as opposed to the several other ways a row can
+  // reach is_active = 0. Only rows with this set are offered back in the bin.
+  try {
+    await db.execute("ALTER TABLE tasks ADD COLUMN deleted_at TEXT DEFAULT NULL");
+  } catch (_) { /* already there */ }
+
+  // Empty the bin. Thirty days is long enough that a mistake noticed a month
+  // later is still recoverable, and short enough that the bin does not turn
+  // into an archive of everything ever made — which would then ride along in
+  // every backup file forever.
+  try {
+    const cutoff = new Date(Date.now() - TRASH_TTL_DAYS * 86_400_000).toISOString();
+    await db.execute("DELETE FROM tasks WHERE deleted_at IS NOT NULL AND deleted_at < ?", [cutoff]);
+  } catch (err) {
+    console.error("[db] could not purge trash:", err);
+  }
+
   // Give every row a device-independent identity and a modification time, so
   // the phone app can eventually sync with this one. See src/lib/syncMeta.ts.
   // Runs last, after every table exists. Idempotent, so it is safe every boot.
@@ -150,16 +196,35 @@ async function initializeSchema(db: Database): Promise<void> {
 }
 
 
+/** The only columns updateTask may write. Anything else is dropped in silence
+ *  rather than reaching the SQL string. Keep in step with the type below. */
+const UPDATABLE_TASK_COLUMNS = new Set([
+  "name", "description", "category", "reset_type", "reset_time", "reset_day",
+  "reset_interval_days", "anchor_date", "event_start", "event_end",
+  "specific_date", "is_priority", "is_urgent", "min_step", "time_zone",
+  "intent", "notes",
+]);
+
 export async function updateTask(id: number, fields: Partial<{
   name: string; description: string; notes: string; category: string;
   reset_type: string; reset_time: string | null; reset_day: number | null;
   reset_interval_days: number | null; anchor_date: string | null;
   event_start: string | null; event_end: string | null;
   specific_date: string | null; is_priority: number; is_urgent: number;
+  min_step: string | null; time_zone: string | null;
+  intent: "want" | "must" | null;
 }>): Promise<void> {
   return dbQueue(async () => {
     const db = await getDb();
-    const keys = Object.keys(fields) as string[];
+    // Column names go into the SQL text itself — they cannot be bound as
+    // parameters the way values can — so they have to come from a list written
+    // here, not from whatever keys the caller happened to pass. TypeScript's
+    // Partial<> above looks like it enforces that, but types are gone by the
+    // time this runs: an object parsed from an AI reply or arriving from a sync
+    // server satisfies no type at all at runtime. Today every caller is a form
+    // in this app; sync will change that, and this is the line that has to hold
+    // when it does.
+    const keys = Object.keys(fields).filter(k => UPDATABLE_TASK_COLUMNS.has(k));
     if (!keys.length) return;
     const sets = keys.map(k => `${k} = ?`).join(', ');
     const INTEGER_COLS = new Set(["reset_day", "reset_interval_days", "is_priority", "is_urgent"]);
@@ -229,16 +294,117 @@ export async function getAllTasks(): Promise<any[]> {
         AND completed_until IS NOT NULL
         AND completed_until < datetime('now')
     `);
-    return await db.select(
+    const rows = await db.select<any[]>(
       "SELECT * FROM tasks WHERE is_active = 1 ORDER BY id"
+    );
+    // Paused tasks are filtered out here rather than in the WHERE clause, so
+    // that every caller gets the same answer: the list, the countdowns, the
+    // notifier and the context handed to the assistant. Filtering in JS is
+    // deliberate — paused_until is an ISO string and SQLite's datetime() is
+    // not, so comparing them in SQL is wrong for part of every day.
+    const now = new Date();
+    return rows.filter(r => !isPaused(r, now));
+  });
+}
+
+/** Set aside. `until` is an ISO datetime, or PAUSE_FOREVER for no end date. */
+export async function pauseTask(id: number, until: string): Promise<void> {
+  return dbQueue(async () => {
+    const db = await getDb();
+    await db.execute("UPDATE tasks SET paused_until = ? WHERE id = ?", [until, id]);
+  });
+}
+
+/**
+ * Back on the list.
+ *
+ * missed_streak is cleared and cycle_checked_until is wiped along with it. That
+ * is the whole point of the feature: a task deliberately set aside was not
+ * missed, and coming back to a smaller version of it — or to any consequence at
+ * all — would make pausing something to avoid. cycle_checked_until being null
+ * makes lib/cycles adopt the current boundary on its next pass without judging
+ * the gap, which is exactly how it treats a task it has never seen.
+ */
+export async function resumeTask(id: number): Promise<void> {
+  return dbQueue(async () => {
+    const db = await getDb();
+    await db.execute(
+      "UPDATE tasks SET paused_until = NULL, missed_streak = 0, cycle_checked_until = NULL WHERE id = ?",
+      [id],
     );
   });
 }
 
+/** Everything currently set aside, newest first. */
+export async function getPausedTasks(): Promise<any[]> {
+  return dbQueue(async () => {
+    const db = await getDb();
+    const rows = await db.select<any[]>(
+      "SELECT * FROM tasks WHERE is_active = 1 AND paused_until IS NOT NULL ORDER BY id DESC",
+    );
+    const now = new Date();
+    return rows.filter(r => isPaused(r, now));
+  });
+}
+
+/**
+ * The bin: deleted by hand, not yet purged.
+ *
+ * The deleted_at IS NOT NULL is doing real work. One-shot tasks archive
+ * themselves to is_active = 0 once they are done and the day has turned, and
+ * those are completed, not discarded. Offering to undelete a finished task
+ * would be both confusing and a way to quietly refill the list with things
+ * already dealt with.
+ */
+export async function getTrashedTasks(): Promise<any[]> {
+  return dbQueue(async () => {
+    const db = await getDb();
+    return await db.select<any[]>(
+      "SELECT * FROM tasks WHERE is_active = 0 AND deleted_at IS NOT NULL ORDER BY deleted_at DESC",
+    );
+  });
+}
+
+/** Undelete. Comes back running, not paused, with no missed cycles owed. */
+export async function restoreTask(id: number): Promise<void> {
+  return dbQueue(async () => {
+    const db = await getDb();
+    await db.execute(
+      "UPDATE tasks SET is_active = 1, deleted_at = NULL, missed_streak = 0, cycle_checked_until = NULL WHERE id = ?",
+      [id],
+    );
+  });
+}
+
+/** Gone for good, now rather than in thirty days. */
+export async function purgeTask(id: number): Promise<void> {
+  return dbQueue(async () => {
+    const db = await getDb();
+    await db.execute("DELETE FROM tasks WHERE id = ? AND deleted_at IS NOT NULL", [id]);
+  });
+}
+
+/**
+ * What was on a given day — including things that were finished and put away.
+ *
+ * The list and the calendar answer different questions. The list asks WHAT
+ * NEEDS DOING, so a one-off completed yesterday correctly disappears from it.
+ * The calendar asks WHAT HAPPENED ON THIS DAY, and for that question a finished
+ * task is the best answer there is.
+ *
+ * Both used to read `is_active = 1`, which meant they shared a flag that only
+ * ever meant "still on the to-do list". The consequence was that looking back
+ * at last month, a day where something was finished and a day where nothing
+ * happened at all rendered identically — both empty — which is backwards.
+ *
+ * So archived rows are let through and deleted ones are not: `deleted_at IS
+ * NULL` is the whole distinction. Something thrown away should leave no trace;
+ * something completed should leave exactly one.
+ */
 export async function getTasksForDate(date: string): Promise<any[]> {
   const db = await getDb();
   return await db.select(
-    `SELECT * FROM tasks WHERE is_active = 1 AND (
+    `SELECT * FROM tasks WHERE (is_active = 1 OR deleted_at IS NULL) AND (
       specific_date = ? OR
       reset_type IN ('daily', 'weekly', 'biweekly', 'custom_days') OR
       (reset_type = 'one_time' AND substr(event_end, 1, 10) = ?) OR
@@ -251,10 +417,30 @@ export async function getTasksForDate(date: string): Promise<any[]> {
   );
 }
 
+/**
+ * Everything the calendar may draw, on any day of any month.
+ *
+ * The month grid was building its cells from getAllTasks, which is the to-do
+ * list — so after the day panel learned to keep completed one-offs, the two
+ * halves of the same screen disagreed: a finished task appeared in the panel on
+ * the right and left no mark on the grid on the left. Same screen, same day,
+ * two answers.
+ */
+export async function getCalendarTasks(): Promise<any[]> {
+  return dbQueue(async () => {
+    const db = await getDb();
+    return await db.select<any[]>(
+      "SELECT * FROM tasks WHERE is_active = 1 OR deleted_at IS NULL ORDER BY id",
+    );
+  });
+}
+
+/** Which days have a marker on them. Same rule as getTasksForDate, or the dot
+ *  and the day panel would disagree about whether anything is there. */
 export async function getTaskDates(): Promise<string[]> {
   const db = await getDb();
   const rows = await db.select<{specific_date: string}[]>(
-    "SELECT DISTINCT specific_date FROM tasks WHERE is_active = 1 AND specific_date IS NOT NULL"
+    "SELECT DISTINCT specific_date FROM tasks WHERE (is_active = 1 OR deleted_at IS NULL) AND specific_date IS NOT NULL"
   );
   return rows.map(r => r.specific_date);
 }
@@ -310,8 +496,9 @@ export async function createTask(task: any): Promise<void> {
   console.log('[createTask]', task.name, task.reset_type, 'event_end=', task.event_end, 'specific_date=', task.specific_date);
   await db.execute(
     `INSERT INTO tasks (name, description, category, reset_type, reset_time, reset_day,
-     reset_interval_days, anchor_date, event_start, event_end, specific_date, is_priority, is_urgent)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     reset_interval_days, anchor_date, event_start, event_end, specific_date, is_priority, is_urgent,
+     min_step, time_zone, intent)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       task.name, task.description || '', task.category, task.reset_type,
       sanitizeText(task.reset_time),
@@ -323,6 +510,9 @@ export async function createTask(task: any): Promise<void> {
       sanitizeText(task.specific_date),
       task.is_priority ? 1 : 0,
       task.is_urgent ? 1 : 0,
+      sanitizeText(task.min_step),
+      sanitizeText(task.time_zone),
+      task.intent === "want" || task.intent === "must" ? task.intent : null,
     ]
   );
   }); // end dbQueue
@@ -331,7 +521,10 @@ export async function createTask(task: any): Promise<void> {
 export async function deleteTask(id: number): Promise<void> {
   return dbQueue(async () => {
     const db = await getDb();
-    await db.execute("UPDATE tasks SET is_active = 0 WHERE id = ?", [id]);
+    await db.execute(
+      "UPDATE tasks SET is_active = 0, deleted_at = ? WHERE id = ?",
+      [new Date().toISOString(), id],
+    );
   });
 }
 
@@ -356,8 +549,10 @@ export async function toggleUrgent(id: number, is_urgent: boolean): Promise<void
  */
 export async function markTaskCompleted(id: number, untilIso: string): Promise<void> {
   const db = await getDb();
+  // Doing it once clears the easing straight away. It was never a penalty to be
+  // worked off, so there is nothing to earn back.
   await db.execute(
-    "UPDATE tasks SET completed_until = ? WHERE id = ?",
+    "UPDATE tasks SET completed_until = ?, missed_streak = 0 WHERE id = ?",
     [untilIso, id]
   );
 }
@@ -371,6 +566,21 @@ export async function archiveTask(id: number): Promise<void> {
   await db.execute(
     "UPDATE tasks SET is_active = 0 WHERE id = ?",
     [id]
+  );
+}
+
+/**
+ * Record that a cycle boundary passed, and whether it was met. Called only when
+ * a boundary actually passes, so this touches the database about once per cycle
+ * per task rather than on any kind of loop. See lib/cycles.
+ */
+export async function recordCycleRollover(
+  id: number, checkedUntil: string, missedStreak: number,
+): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    "UPDATE tasks SET cycle_checked_until = ?, missed_streak = ? WHERE id = ?",
+    [checkedUntil, missedStreak, id],
   );
 }
 
@@ -390,8 +600,8 @@ export async function unmarkTaskCompleted(id: number): Promise<void> {
 export async function deleteTaskByName(name: string): Promise<void> {
   const db = await getDb();
   const result = await db.execute(
-    "UPDATE tasks SET is_active = 0 WHERE LOWER(name) = LOWER(?) AND is_active = 1",
-    [name]
+    "UPDATE tasks SET is_active = 0, deleted_at = ? WHERE LOWER(name) = LOWER(?) AND is_active = 1",
+    [new Date().toISOString(), name]
   );
   if (result.rowsAffected === 0) {
     throw new Error(`No task found with name "${name}"`);

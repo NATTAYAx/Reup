@@ -8,12 +8,13 @@ import {
   toDateString, isSameDay, toBuddhistYear
 } from "../lib/thaiDate";
 import {
-  getAllTasks, getTasksForDate,
-  deleteTask, createTask, getPriorityTasksForMonth, togglePriority,
+  getCalendarTasks, getTasksForDate,
+  deleteTask, createTask, togglePriority,
   toggleUrgent, markTaskCompleted, unmarkTaskCompleted
 } from "../lib/database";
 import { t } from "../lib/i18n";
-import { bangkokNow } from "../lib/dateUtil";
+import { localNow } from "../lib/dateUtil";
+import { formatClock, formatClockStr } from "../lib/clock";
 
 interface Props {
   onBack?: () => void;
@@ -43,18 +44,8 @@ const CATEGORY_LEFT: Record<string, string> = {
   personal: "border-l-green-500",
 };
 
-/** Format "HH:MM" 24h → "10:00 AM" style. Returns null if no time. */
-function fmtTime(t: string | null | undefined): string | null {
-  if (!t) return null;
-  const parts = t.split(":");
-  if (parts.length < 2) return null;
-  const h = parseInt(parts[0]);
-  const m = parseInt(parts[1]);
-  if (isNaN(h) || isNaN(m)) return null;
-  const period = h >= 12 ? "PM" : "AM";
-  const h12 = h % 12 === 0 ? 12 : h % 12;
-  return `${h12}:${String(m).padStart(2, "0")} ${period}`;
-}
+/** Follows the app language: 24-hour under Thai, AM/PM under English. */
+const fmtTime = formatClockStr;
 
 /** Get the display time for any task type, including one_time deadlines stored in event_end */
 function getTaskDisplayTime(task: any): string | null {
@@ -63,11 +54,7 @@ function getTaskDisplayTime(task: any): string | null {
     try {
       const d = new Date(task.event_end);
       if (!isNaN(d.getTime())) {
-        const h = d.getHours();
-        const m = d.getMinutes();
-        const period = h >= 12 ? "PM" : "AM";
-        const h12 = h % 12 === 0 ? 12 : h % 12;
-        return `${h12}:${String(m).padStart(2, "0")} ${period}`;
+        return formatClock(d.getHours(), d.getMinutes());
       }
     } catch { /* fall through */ }
   }
@@ -123,14 +110,38 @@ function taskOccursOnDate(task: any, ds: string, date: Date): boolean {
 }
 
 export default function CalendarView({ onBack, isVisible = true, refreshKey = 0, onTaskChanged }: Props) {
-  const [viewDate, setViewDate] = useState(() => { const n = bangkokNow(); return new Date(n.getFullYear(), n.getMonth(), 1); });
-  const [selectedDate, setSelectedDate] = useState<Date>(() => bangkokNow());
+  const [viewDate, setViewDate] = useState(() => { const n = localNow(); return new Date(n.getFullYear(), n.getMonth(), 1); });
+  const [selectedDate, setSelectedDate] = useState<Date>(() => localNow());
   const [allTasks, setAllTasks] = useState<any[]>([]);
   const [dayTasks, setDayTasks] = useState<any[]>([]);
-  const [monthPriorityTasks, setMonthPriorityTasks] = useState<any[]>([]);
+  // Daily tasks occur in EVERY cell, so naming them there fills the month with
+  // the same two lines thirty-one times and buries the one meeting that
+  // actually needed looking up. Calendar apps solve this by separating the two
+  // kinds of thing: Google keeps repeating chores in Tasks rather than as
+  // events, habit trackers use a streak grid instead of a calendar. The rule
+  // here is the same idea drawn along frequency —
+  //
+  //   daily            summarised once above the grid; it is true of every day,
+  //                    so repeating it per day carries no information
+  //   weekly and up    named in cells; four or five marks a month still tells
+  //                    you which day is which, which is the point of a calendar
+  //   one-off, dated   always named; this is what a calendar is for
+  //
+  // Kept as a toggle rather than a decision, because someone whose whole day is
+  // dailies may genuinely want to see them.
+  const [showDaily, setShowDaily] = useState(
+    () => localStorage.getItem("gamesched_cal_show_daily") === "1",
+  );
+  const toggleShowDaily = () => {
+    setShowDaily(v => {
+      localStorage.setItem("gamesched_cal_show_daily", v ? "0" : "1");
+      return !v;
+    });
+  };
+
   const [showAddForm, setShowAddForm] = useState(false);
+  const [addError, setAddError] = useState("");
   const [newTaskName, setNewTaskName] = useState("");
-  const [newTaskDesc, setNewTaskDesc] = useState("");
   const [newTaskCategory, setNewTaskCategory] = useState("personal");
 
   const year = viewDate.getFullYear();
@@ -138,10 +149,8 @@ export default function CalendarView({ onBack, isVisible = true, refreshKey = 0,
 
   const loadAll = async () => {
     try {
-      const all = await getAllTasks();
+      const all = await getCalendarTasks();
       setAllTasks(all);
-      const priority = await getPriorityTasksForMonth(year, month);
-      setMonthPriorityTasks(priority);
     } catch (e) { console.error(e); }
   };
 
@@ -158,22 +167,20 @@ export default function CalendarView({ onBack, isVisible = true, refreshKey = 0,
     loadDayTasks(selectedDate);
   }, [selectedDate, isVisible, refreshKey]);
 
-  const getDateIndicators = (date: Date): string[] => {
+  // The cells used to show a count and some coloured dots, which answered
+  // "is something on" but never "what". Answering the second question means
+  // the cell needs the tasks themselves, so this returns them, important ones
+  // first — those are the ones worth the two lines a cell can spare.
+  const tasksOnDate = (date: Date): any[] => {
     const ds = toDateString(date);
-    const cats = new Set<string>();
-    for (const t of allTasks) {
-      if (taskOccursOnDate(t, ds, date)) cats.add(t.category);
-    }
-    return Array.from(cats);
+    return allTasks
+      .filter(tk => taskOccursOnDate(tk, ds, date))
+      .filter(tk => showDaily || tk.reset_type !== "daily")
+      .sort((a, b) => (b.is_priority ?? 0) - (a.is_priority ?? 0));
   };
 
-  const getTaskCount = (date: Date): number => {
-    const ds = toDateString(date);
-    return allTasks.filter(t => taskOccursOnDate(t, ds, date)).length;
-  };
-
-  const priorityTasksOnDay = (date: Date) =>
-    monthPriorityTasks.filter(t => t.specific_date === toDateString(date));
+  /** The ones lifted out of the grid, listed once instead of thirty-one times. */
+  const dailyTasks = allTasks.filter(tk => tk.reset_type === "daily");
 
   const handleSelectDate = (date: Date) => {
     setSelectedDate(date);
@@ -186,7 +193,7 @@ export default function CalendarView({ onBack, isVisible = true, refreshKey = 0,
     try {
       await createTask({
         name: newTaskName,
-        description: newTaskDesc,
+        description: "",
         category: newTaskCategory,
         reset_type: "specific_date",
         reset_time: null,
@@ -199,12 +206,13 @@ export default function CalendarView({ onBack, isVisible = true, refreshKey = 0,
         is_priority: 0,
       });
       setNewTaskName("");
-      setNewTaskDesc("");
       setShowAddForm(false);
       await loadAll();
       await loadDayTasks(selectedDate);
     } catch (e: any) {
-      alert("Failed: " + e.message);
+      // Was a native alert: an OS dialog with the system error chime for a
+      // failed insert on a calendar page. Shown in place instead.
+      setAddError(e?.message || String(e));
     }
   };
 
@@ -254,11 +262,26 @@ export default function CalendarView({ onBack, isVisible = true, refreshKey = 0,
 
   const daysInMonth = getDaysInMonth(year, month);
   const firstDay = getFirstDayOfMonth(year, month);
+  // ALWAYS six week-rows, 42 cells, whatever the month.
+  //
+  // Only leading blanks were being added, so the grid ran to whatever length
+  // the month happened to need: February starting on a Sunday fills four rows,
+  // a 31-day month starting on a Saturday needs six. Two things went wrong with
+  // that. The last row was ragged, ending mid-week with nothing after it. And
+  // because the rows share the height with auto-rows-fr, a four-row month drew
+  // noticeably taller cells than a six-row one, so the whole calendar changed
+  // shape when paging between months.
+  //
+  // Six is the maximum any month can need, so padding to it fixes both: every
+  // row is complete and every cell is the same square in every month. This is
+  // what Apple Calendar does, and why paging through it never moves anything.
+  const WEEKS = 6;
   const cells: (Date | null)[] = [];
   for (let i = 0; i < firstDay; i++) cells.push(null);
   for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(year, month, d));
+  while (cells.length < WEEKS * 7) cells.push(null);
 
-  const todayLocal = bangkokNow();
+  const todayLocal = localNow();
   const isSelectedToday = toDateString(selectedDate) === toDateString(todayLocal);
 
   return (
@@ -278,7 +301,7 @@ export default function CalendarView({ onBack, isVisible = true, refreshKey = 0,
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => { const tl = bangkokNow(); setViewDate(new Date(tl.getFullYear(), tl.getMonth(), 1)); setSelectedDate(tl); }}
+            onClick={() => { const tl = localNow(); setViewDate(new Date(tl.getFullYear(), tl.getMonth(), 1)); setSelectedDate(tl); }}
             className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-white/60 text-xs hover:text-white transition-all"
           >
             {t("calendar.today")}
@@ -300,6 +323,44 @@ export default function CalendarView({ onBack, isVisible = true, refreshKey = 0,
         {/* ── LEFT: Calendar Grid ──────────────────────── */}
         <div className="flex-1 flex flex-col min-w-0">
 
+          {/* What repeats every day, said once. */}
+
+          {dailyTasks.length > 0 && (
+
+            <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
+
+              <span className="text-white/35 text-[10px] shrink-0">{t("calendar.everyDay")}</span>
+
+              {dailyTasks.map(tk => (
+
+                <span key={tk.id}
+
+                  className="flex items-center gap-1 rounded-full bg-white/6 px-2 py-0.5 max-w-[150px]">
+
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${CATEGORY_DOT[tk.category] || "bg-white/40"}`} />
+
+                  <span className="text-white/60 text-[10px] truncate">{tk.name}</span>
+
+                  {tk.reset_time && <span className="text-white/30 text-[9px] shrink-0">{tk.reset_time}</span>}
+
+                </span>
+
+              ))}
+
+              <button onClick={toggleShowDaily}
+
+                className="text-white/30 hover:text-white text-[10px] ml-auto shrink-0">
+
+                {showDaily ? t("calendar.hideDaily") : t("calendar.showDaily")}
+
+              </button>
+
+            </div>
+
+          )}
+
+
+
           {/* Day headers */}
           <div className="grid grid-cols-7 mb-1">
             {THAI_DAYS_SHORT.map(d => (
@@ -307,70 +368,71 @@ export default function CalendarView({ onBack, isVisible = true, refreshKey = 0,
             ))}
           </div>
 
-          {/* Day cells */}
-          <div className="grid grid-cols-7 gap-1 flex-1 auto-rows-fr">
+          {/* Day cells.
+              Two named rows per cell and a "+n" for the rest. Two is not
+              arbitrary: six week-rows have to fit a 590px window, which leaves
+              about 68px per cell, and two lines of 9px text plus the date
+              number is exactly what that holds. A third line would push the
+              last week of the month off the bottom. */}
+          {/* Ruled like a table, because that is what it is. With only a 4px
+              gap between cells an EMPTY cell had no edges at all, so the run of
+              blanks before the 1st simply vanished and there was nothing to
+              trace a weekday column down. Every real calendar rules its grid
+              for this reason. The lines are 8% white: enough to follow, not
+              enough to compete with the entries inside them.
+
+              Each cell draws its own right and bottom edge and the container
+              draws the left and top, so no line is ever painted twice. */}
+          <div className="grid grid-cols-7 flex-1 auto-rows-fr min-h-0 rounded-lg overflow-hidden border-l border-t border-white/8">
             {cells.map((date, i) => {
-              if (!date) return <div key={`e-${i}`} />;
+              // Days outside the month still get their edges, so the shape of
+              // the month reads correctly.
+              if (!date) return <div key={`e-${i}`} className="border-r border-b border-white/8" />;
 
               const isSelected = isSameDay(date, selectedDate);
               const today = toDateString(date) === toDateString(todayLocal);
-              const indicators = getDateIndicators(date);
-              const taskCount = getTaskCount(date);
-              const priorityOnDay = priorityTasksOnDay(date);
+              const dayTasksHere = tasksOnDate(date);
+              const shown = dayTasksHere.slice(0, 2);
+              const extra = dayTasksHere.length - shown.length;
 
               return (
-                <motion.button
+                <button
                   key={date.toISOString()}
-                  whileTap={{ scale: 0.92 }}
                   onClick={() => handleSelectDate(date)}
-                  className={`relative rounded-xl flex flex-col items-center justify-start pt-1.5 pb-1 px-0.5 transition-all min-h-[44px] ${
+                  // Selection is a fill and an inset ring rather than a border,
+                  // so it never fights the grid lines for the same pixels.
+                  className={`relative flex flex-col items-stretch px-1 pt-1 pb-0.5 text-left transition-colors overflow-hidden border-r border-b border-white/8 ${
                     isSelected
-                      ? "bg-indigo-600 shadow-lg shadow-indigo-500/30"
+                      ? "bg-indigo-500/25 ring-1 ring-inset ring-indigo-400"
                       : today
-                      ? "bg-white/8 border border-indigo-400/40"
-                      : "hover:bg-white/6"
+                      ? "bg-white/6"
+                      : "hover:bg-white/5"
                   }`}
                 >
-                  {/* task count badge */}
-                  {taskCount > 0 && (
-                    <div className={`absolute top-1 right-1 w-4 h-4 rounded-full text-[9px] font-bold flex items-center justify-center ${
-                      isSelected ? "bg-white/25 text-white" : "bg-indigo-500/70 text-white"
-                    }`}>
-                      {taskCount > 9 ? "9+" : taskCount}
-                    </div>
-                  )}
-
-                  {/* Date number */}
-                  <span className={`text-sm font-semibold ${
-                    isSelected ? "text-white" : today ? "text-indigo-300" : "text-white/75"
+                  <span className={`text-[11px] font-semibold leading-none mb-0.5 ${
+                    today ? "text-indigo-300" : isSelected ? "text-white" : "text-white/60"
                   }`}>
                     {date.getDate()}
                   </span>
 
-                  {/* Priority task chips */}
-                  {priorityOnDay.slice(0, 1).map(t => (
-                    <span
-                      key={t.id}
-                      className={`text-[8px] px-1 rounded truncate w-full mt-0.5 leading-tight text-center ${
-                        isSelected ? "bg-yellow-400/30 text-yellow-100" : "bg-yellow-500/20 text-yellow-300"
-                      }`}
-                    >
-                      ⭐
-                    </span>
-                  ))}
-
-                  {/* Category dots */}
-                  {priorityOnDay.length === 0 && indicators.length > 0 && (
-                    <div className="flex gap-0.5 mt-1 flex-wrap justify-center">
-                      {indicators.slice(0, 3).map(cat => (
-                        <div
-                          key={cat}
-                          className={`w-1.5 h-1.5 rounded-full ${isSelected ? "bg-white/60" : CATEGORY_DOT[cat] || "bg-white/40"}`}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </motion.button>
+                  <div className="flex flex-col gap-[2px] min-h-0">
+                    {shown.map(tk => (
+                      <span key={tk.id}
+                        title={tk.name}
+                        className="flex items-center gap-1 rounded-[3px] px-1 py-[1px] bg-white/8 min-w-0">
+                        <span className={`w-1 h-1 rounded-full shrink-0 ${CATEGORY_DOT[tk.category] || "bg-white/40"}`} />
+                        <span className={`text-[9px] leading-tight truncate ${
+                          tk.is_priority ? "text-yellow-200" : "text-white/70"
+                        }`}>
+                          {tk.name}
+                        </span>
+                      </span>
+                    ))}
+                    {extra > 0 && (
+                      <span className="text-white/35 text-[9px] leading-tight pl-1">+{extra}</span>
+                    )}
+                  </div>
+                </button>
               );
             })}
           </div>
@@ -425,30 +487,36 @@ export default function CalendarView({ onBack, isVisible = true, refreshKey = 0,
                 exit={{ opacity: 0, height: 0 }}
                 className="mb-3 space-y-1.5 overflow-hidden flex-shrink-0"
               >
+                {/* Was: a name field, a notes field, and a native <select>
+                    for the category. The select is drawn by the operating
+                    system, so it arrived white and blue in the middle of a dark
+                    app, and the notes field asked for something almost nobody
+                    fills in when jotting a date down. Adding to a day should be
+                    the same two actions as adding an expense: type it, tap what
+                    kind, done. Everything else is editable afterwards. */}
                 <input
                   autoFocus
                   value={newTaskName}
-                  onChange={e => setNewTaskName(e.target.value)}
+                  onChange={e => { setNewTaskName(e.target.value); if (addError) setAddError(""); }}
                   onKeyDown={e => e.key === "Enter" && handleAddTask()}
                   placeholder={t("calendar.taskNamePH")}
-                  className="w-full bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-white placeholder-white/25 text-xs focus:outline-none focus:border-indigo-500"
+                  className="w-full bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-white placeholder-white/25 text-xs focus:outline-none focus:border-indigo-500"
                 />
-                <input
-                  value={newTaskDesc}
-                  onChange={e => setNewTaskDesc(e.target.value)}
-                  placeholder={t("calendar.notesPH")}
-                  className="w-full bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-white placeholder-white/25 text-xs focus:outline-none focus:border-indigo-500"
-                />
-                <select
-                  value={newTaskCategory}
-                  onChange={e => setNewTaskCategory(e.target.value)}
-                  className="w-full bg-gray-800 border border-white/10 rounded-lg px-2.5 py-1.5 text-white text-xs focus:outline-none focus:border-indigo-500"
-                >
-                  <option value="game">{t("catOpt.game")}</option>
-                  <option value="school">{t("catOpt.school")}</option>
-                  <option value="work">{t("catOpt.work")}</option>
-                  <option value="personal">{t("catOpt.personal")}</option>
-                </select>
+
+                <div className="flex flex-wrap gap-1">
+                  {(["game", "school", "work", "personal"] as const).map(c => (
+                    <button key={c} type="button" onClick={() => setNewTaskCategory(c)}
+                      className={`text-[11px] rounded-full px-2.5 py-1 border transition-colors flex items-center gap-1.5 ${
+                        newTaskCategory === c
+                          ? "border-indigo-400 bg-indigo-500/20 text-white"
+                          : "border-white/10 text-white/45 hover:text-white"
+                      }`}>
+                      <span className={`w-1.5 h-1.5 rounded-full ${CATEGORY_DOT[c]}`} />
+                      {t(`catOpt.${c}`)}
+                    </button>
+                  ))}
+                </div>
+
                 <div className="flex gap-1.5">
                   <button
                     onClick={handleAddTask}

@@ -1,7 +1,7 @@
 import Database from "@tauri-apps/plugin-sql";
 import { getDb as getSharedDb } from "./database";
 import { t } from "./i18n";
-import { todayBangkok, monthBangkok } from "./dateUtil";
+import { todayLocal, monthLocal } from "./dateUtil";
 
 // All finance tables are now created inside database.ts initializeSchema,
 // so financeDatabase.ts just needs to call getDb() — no schema init needed here.
@@ -296,6 +296,13 @@ export async function updateExpense(id: number, fields: {
 
 /** AI: delete the most recent expense matching a keyword in note/category */
 export async function aiDeleteExpenseByKeyword(keyword: string): Promise<string> {
+  if (!keyword || !keyword.trim()) {
+    // Last line of defence. The caller checks too, but this function takes a
+    // string straight out of model output and used to call .toLowerCase() on
+    // it unconditionally, so a null arrived here as a TypeError rather than as
+    // a sentence anybody could act on.
+    throw new Error("ไม่รู้ว่าหมายถึงรายการไหน บอกชื่อรายการด้วยนะ");
+  }
   const d = await getDb();
   const rows = await d.select<{ id: number; amount: number; note: string; category: string }[]>(
     `SELECT id, amount, note, category FROM expenses
@@ -312,6 +319,13 @@ export async function aiDeleteExpenseByKeyword(keyword: string): Promise<string>
 export async function aiEditExpenseByKeyword(keyword: string, fields: {
   amount?: number; category?: ExpenseCategory; note?: string;
 }): Promise<string> {
+  if (!keyword || !keyword.trim()) {
+    // Last line of defence. The caller checks too, but this function takes a
+    // string straight out of model output and used to call .toLowerCase() on
+    // it unconditionally, so a null arrived here as a TypeError rather than as
+    // a sentence anybody could act on.
+    throw new Error("ไม่รู้ว่าหมายถึงรายการไหน บอกชื่อรายการด้วยนะ");
+  }
   const d = await getDb();
   const rows = await d.select<{ id: number; amount: number; note: string; category: string }[]>(
     `SELECT id, amount, note, category FROM expenses
@@ -320,6 +334,14 @@ export async function aiEditExpenseByKeyword(keyword: string, fields: {
     [`%${keyword.toLowerCase()}%`, `%${keyword.toLowerCase()}%`]
   );
   if (rows.length === 0) throw new Error(`ไม่พบรายการที่มี "${keyword}"`);
+
+  // updateExpense builds its SET clause from whatever is defined and returns
+  // quietly when that comes to nothing. Harmless there, wrong here: the caller
+  // announces "saved" as soon as this resolves, so an edit with no field to
+  // change reported success and altered nothing. Say it plainly instead.
+  const hasChange = Object.values(fields).some(v => v !== undefined);
+  if (!hasChange) throw new Error(`ไม่รู้ว่าจะเปลี่ยน "${keyword}" เป็นอะไร`);
+
   await updateExpense(rows[0].id, fields);
   return rows[0].note || rows[0].category;
 }
@@ -392,7 +414,7 @@ export async function getMonthTotal(month: string): Promise<number> {
 export async function getTodayTotal(todayOverride?: string): Promise<number> {
   const d = await getDb();
   // Use caller-supplied date (Bangkok local) or derive it here
-  const today = todayOverride ?? todayBangkok();
+  const today = todayOverride ?? todayLocal();
   const rows = await d.select<{ total: number }[]>(
     "SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE deleted = 0 AND date = ?",
     [today]
@@ -457,13 +479,13 @@ export async function deleteGoal(id: number): Promise<void> {
 
 /** Log an expense by natural language parse result */
 export async function aiLogExpense(amount: number, category: ExpenseCategory, note: string): Promise<void> {
-  const today = todayBangkok();
+  const today = todayLocal();
   await addExpense({ amount, category, note, date: today });
 }
 
 /** Get a spending summary string for the AI to read */
 export async function getSpendingSummary(): Promise<string> {
-  const month = monthBangkok();
+  const month = monthLocal();
   const [monthTotal, todayTotal, catTotals] = await Promise.all([
     getMonthTotal(month),
     getTodayTotal(),

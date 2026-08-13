@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { Calendar, ChevronLeft, ChevronRight } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { getLang } from "../lib/i18n";
-import { usePlacement } from "../lib/usePlacement";
+import { getLang, t } from "../lib/i18n";
+import { usePopoverPos, useDismiss } from "../lib/usePopover";
 
 interface Props {
   value: string;       // "YYYY-MM-DD" or ""
@@ -65,8 +66,35 @@ export default function DatePicker({ value, onChange, placeholder = "Pick a date
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  // w-72 wide; the panel is header + year row + six week rows + footer.
-  const place = usePlacement(open, ref, panelRef, { height: 340, width: 288 });
+  // Rendered into document.body: the form it sits in is a scrolling box, and an
+  // absolutely positioned calendar gets sliced off at the edge of it.
+  // A MONTH MUST NEVER SCROLL.
+  //
+  // It did. The panel asked for 344px and the contents needed about 430, so the
+  // last row of the month sat below the fold behind a scrollbar — a calendar
+  // where you cannot see the end of the month without scrolling has stopped
+  // being a calendar and become a list of numbers.
+  //
+  // Two things caused it. The height was a guess that was never checked against
+  // what is actually in the panel. And a brief attempt to let the width follow
+  // the field made it worse: square cells mean height follows width, so a wider
+  // field produced a taller calendar and pushed even more of it out of view.
+  //
+  // So both are fixed now, deliberately. The width is what a seven-column grid
+  // wants and nothing else — a calendar is not a text field and has no reason to
+  // stretch to match one. The height is the sum of the parts below, not a round
+  // number, so adding a row to this panel means changing this figure rather than
+  // finding out later that the last week of the month disappeared.
+  //
+  //   panel padding 32 · header 27 + gap 12 · weekdays 26 + gap 4
+  //   · 6 rows x 40 + gaps 10 · footer gap 12 + rule 10 + text 16   =  399
+  //
+  // The grid is always 42 cells, six rows, whatever month it is — so this is a
+  // constant, not a worst case, and the panel is the same height in February as
+  // in August. Width is 316 because seven cells plus the padding land near 40px
+  // each, matching the cell height without being told to.
+  const pos = usePopoverPos(open, ref, { height: 404, width: 316 });
+  useDismiss(open, () => setOpen(false), ref, panelRef);
 
   const today = new Date();
   today.setHours(0,0,0,0);
@@ -80,15 +108,6 @@ export default function DatePicker({ value, onChange, placeholder = "Pick a date
     const d = parseDate(value);
     if (d) { setViewYear(d.getFullYear()); setViewMonth(d.getMonth()); }
   }, [value]);
-
-  // Close on outside click
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
 
   const prevMonth = () => {
     if (viewMonth === 0) { setViewMonth(11); setViewYear(y => y - 1); }
@@ -161,8 +180,10 @@ export default function DatePicker({ value, onChange, placeholder = "Pick a date
         <button
           type="button"
           onClick={() => setOpen(o => !o)}
-          className={`w-full flex items-center gap-3 bg-white/5 border rounded-xl px-4 py-3 text-white text-sm transition-all ${
-            open ? "border-purple-500" : "border-white/10 hover:border-white/20"
+          className={`w-full flex items-center gap-3 bg-white/5 border rounded-xl px-4 py-3 text-white text-sm transition-colors focus:outline-none ${
+            open
+              ? "border-[var(--color-primary)]"
+              : "border-white/10 hover:border-white/25 focus-visible:border-[var(--color-primary)]"
           }`}
         >
           <Calendar size={15} className="text-white/40 flex-shrink-0" />
@@ -174,17 +195,17 @@ export default function DatePicker({ value, onChange, placeholder = "Pick a date
       )}
 
       {/* Dropdown calendar */}
+      {createPortal(
       <AnimatePresence>
-        {open && (
+        {open && pos && (
           <motion.div
-            initial={{ opacity: 0, y: -6, scale: 0.98 }}
+            initial={{ opacity: 0, y: -4, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -6, scale: 0.98 }}
+            exit={{ opacity: 0, y: -4, scale: 0.98 }}
             transition={{ duration: 0.12 }}
             ref={panelRef}
-            className={`absolute z-50 bg-gray-900 border border-white/10 rounded-2xl p-4 shadow-2xl shadow-black/70 w-72 max-h-[85vh] overflow-y-auto ${
-              place.up ? "bottom-full mb-2" : "top-full mt-2"
-            } ${place.right ? "right-0" : "left-0"}`}
+            style={{ position: "fixed", top: pos.top, left: pos.left, width: pos.width, maxHeight: pos.maxHeight }}
+            className="z-[70] bg-gray-900 border border-white/10 rounded-2xl p-4 shadow-2xl shadow-black/70 overflow-y-auto"
           >
             {/* Month/year header */}
             <div className="flex items-center justify-between mb-3">
@@ -217,26 +238,12 @@ export default function DatePicker({ value, onChange, placeholder = "Pick a date
               </button>
             </div>
 
-            {/* Year quick-nav */}
-            <div className="flex items-center justify-center gap-1 mb-3">
-              {[-1, 0, 1, 2].map(offset => {
-                const y = today.getFullYear() + offset;
-                return (
-                  <button
-                    key={y}
-                    type="button"
-                    onClick={() => setViewYear(y)}
-                    className={`px-2 py-0.5 rounded-lg text-xs font-semibold transition-all ${
-                      y === viewYear
-                        ? "bg-purple-600 text-white"
-                        : "bg-white/5 text-white/40 hover:bg-white/10 hover:text-white"
-                    }`}
-                  >
-                    {y}
-                  </button>
-                );
-              })}
-            </div>
+            {/* The row of year chips that used to sit here is gone. It cost 40px
+                — most of what was pushing the last week of the month off the
+                bottom — to answer a question a task deadline almost never asks.
+                The year is already in the header, and holding the month arrows
+                moves through it; four more taps for the rare case is a better
+                trade than a month that does not fit. */}
 
             {/* Day headers */}
             <div className="grid grid-cols-7 mb-1">
@@ -257,7 +264,12 @@ export default function DatePicker({ value, onChange, placeholder = "Pick a date
                     type="button"
                     onClick={() => selectDay(cell)}
                     className={`
-                      relative h-8 w-full rounded-lg text-xs font-medium transition-all
+                      /* A real height, not aspect-square: the panel is a fixed
+                         width now, so the cells do not need to chase it, and
+                         tying height to width is what made the calendar grow
+                         taller than the space it had. 40px is comfortably above
+                         the ~32px where a date stops being easy to hit. */
+                      relative h-10 w-full rounded-lg text-sm font-medium transition-all
                       ${!isCur ? "text-white/15 hover:text-white/30 hover:bg-white/5" : ""}
                       ${isCur && !todayCell && !selectedCell
                         ? "text-white/70 hover:bg-purple-500/20 hover:text-white"
@@ -283,19 +295,21 @@ export default function DatePicker({ value, onChange, placeholder = "Pick a date
                 onClick={clear}
                 className="text-xs text-white/30 hover:text-red-400 transition-colors font-medium"
               >
-                Clear
+                {t("date.clear")}
               </button>
               <button
                 type="button"
                 onClick={goToday}
                 className="text-xs text-purple-400 hover:text-purple-300 transition-colors font-semibold"
               >
-                Today
+                {t("date.today")}
               </button>
             </div>
           </motion.div>
         )}
-      </AnimatePresence>
+      </AnimatePresence>,
+      document.body,
+      )}
     </div>
   );
 }
