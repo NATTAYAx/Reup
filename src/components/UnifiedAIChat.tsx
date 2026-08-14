@@ -6,6 +6,7 @@ import { useState, useRef, useEffect } from "react";
 import { motion } from "framer-motion";
 import { X, Send, Sparkles, Brain, Wallet, CheckCircle, Wifi, WifiOff, Key } from "lucide-react";
 import { todayLocal } from "../lib/dateUtil";
+import { formatMoney, currencySymbol } from "../lib/money";
 import { getAppTimeZone } from "../lib/tz";
 import { getAllTasks } from "../lib/database";
 import {
@@ -60,7 +61,9 @@ interface ChatMessage {
   local?: true;
 }
 
-const fmt = (n: number) => `฿${n.toLocaleString("th-TH")}`;
+// One formatter for the whole app, in lib/money. There used to be two of
+// these, in two files, formatting the same expense differently.
+const fmt = (n: number, currency?: string) => formatMoney(n, currency);
 
 const DOMAIN_BADGE: Record<Domain, { label: string; color: string; icon: React.FC<any> }> = {
   task:    { label: "Tasks",   color: "from-purple-600 to-indigo-600", icon: CheckCircle },
@@ -877,7 +880,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
                   <div className="flex items-center gap-2">
                     <span className="text-white/30 text-xs w-14 flex-shrink-0">Amount</span>
                     <div className="relative flex-1">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30 text-sm pointer-events-none">฿</span>
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30 text-sm pointer-events-none">{currencySymbol()}</span>
                       <input
                         type="number"
                         value={pendingFinance.amount ?? ""}

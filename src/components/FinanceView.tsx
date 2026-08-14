@@ -17,11 +17,15 @@ import {
 import { getMonthIncome, getIncomeByMonth, addIncome, deleteIncome } from "../lib/database";
 import { t, getLang } from "../lib/i18n";
 import DatePicker from "./DatePicker";
+import ExpectedIncomeCard from "./ExpectedIncomeCard";
 import Select from "./Select";
 import { scanImage, getLastRawReply, type ScannedItem } from "../lib/slipScanner";
-import { slipAlreadyRecorded, looksLikeDuplicate } from "../lib/financeDatabase";
+import { slipAlreadyRecorded, looksLikeDuplicate, otherCurrencyTotals } from "../lib/financeDatabase";
+import { otherIncomeCurrencyTotals } from "../lib/database";
 import { learnMerchant, recallMerchant } from "../lib/aiMemory";
 import { todayLocal, monthLocal } from "../lib/dateUtil";
+import { formatMoney, currencySymbol, formatTotals, getCurrency } from "../lib/money";
+import CurrencyPicker from "./CurrencyPicker";
 
 interface Props {
   onBack: () => void;
@@ -30,7 +34,16 @@ interface Props {
 }
 
 // ─── Currency formatter ───────────────────────────────────────────────────────
-const fmt = (n: number) => `฿${n.toLocaleString("th-TH", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+// Was a second, differently-behaving copy of the chat's formatter: this one
+// truncated the satang off a scanned 2,761.78 and the other did not.
+//
+// AGGREGATES BELOW STILL ASSUME ONE CURRENCY. Each stored row now carries
+// its own, and each row is displayed in it, so nothing on screen lies about
+// an individual entry. Totals, the category bars and the calendar's daily
+// figures add rows together, which is only meaningful within one currency —
+// use sumByCurrency + formatTotals from lib/money when that stops being
+// true, which for anyone who has not travelled is never.
+const fmt = (n: number, currency?: string) => formatMoney(n, currency);
 
 // Date display — Buddhist Era (พ.ศ.) in Thai mode, Gregorian DD/MM/YYYY in English
 const toThaiDisplay = (isoDate: string): string => {
@@ -191,13 +204,14 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
   const [prevMonthTotal, setPrevMonthTotal] = useState(0);
   const [showAddIncome, setShowAddIncome] = useState(false);
   const [incForm, setIncForm] = useState(() => ({
-    amount: "", source: "", note: "", date: todayLocal(),
+    amount: "", source: "", note: "", date: todayLocal(), currency: getCurrency(),
   }));
 
   const [showAddExpense, setShowAddExpense] = useState(false);
   const [expForm, setExpForm] = useState(() => ({
     amount: "", category: "food" as ExpenseCategory, note: "", date: todayLocal(),
     slipRef: null as string | null, merchant: null as string | null,
+    currency: getCurrency(),
   }));
   const slipRef = useRef<HTMLInputElement>(null);
   const [scanning, setScanning] = useState(false);
@@ -222,7 +236,12 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
     setScanning(true);
     setScanMsg("");
     try {
-      const result = await scanImage(file, categories.map(c => ({ key: c.key, label: c.label })));
+      const result = await scanImage(
+        file,
+        categories.map(c => ({ key: c.key, label: c.label })),
+        // The spinner alone during a second attempt looks like a hang.
+        n => { if (n === 2) setScanMsg(t("finance.scanRetry")); },
+      );
       if (result.items.length === 0) {
         setScanMsg(t("finance.scanNone"));
         return;
@@ -244,7 +263,22 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
           id: i,
           // A top-up moves money between the user's own accounts. Counting it
           // as spending double-counts the same baht when it is finally spent.
-          keep: !exact && !soft && it.kind !== "topup",
+          // Off by default for anything that is not plainly money spent. A
+          // top-up moves money between the user's own accounts, so counting it
+          // as spending double-counts the same baht when it is finally spent.
+          // A bill that has not been paid is a claim about the future, not a
+          // record of anything.
+          //
+          // Incoming rows are the case where the two kinds of image want
+          // opposite defaults, which is what result.source is for. Pointing a
+          // camera at ONE payment slip means that payment, whichever way the
+          // money went — a salary slip arriving unticked is the app arguing
+          // with something the person plainly just chose to scan. A LIST is
+          // different: a wallet history is almost always opened to find
+          // spending, and it carries incoming rows as a side effect, so those
+          // start off.
+          keep: !exact && !soft && it.kind !== "topup" && it.kind !== "bill_due"
+            && (it.direction === "out" || result.source === "slip"),
           maybeDup: exact || soft,
           // A shop categorised before beats the model's guess for this image.
           category: (it.merchant && recallMerchant(it.merchant)) || it.category,
@@ -276,6 +310,25 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
     if (!review) return;
     for (const row of review) {
       if (!row.keep || row.amount == null) continue;
+
+      // Ticked on despite being incoming: the person means it, so it is saved
+      // as what it is. Writing it to expenses because that is the table this
+      // screen happens to be attached to would be the bug this field exists to
+      // prevent, just moved one step later.
+      if (row.direction === "in") {
+        await addIncome({
+          amount: row.amount,
+          // On an arriving payment the name on the slip IS the source. It was
+          // being written to the note with "other" as the source, which threw
+          // away the one thing that says where the money came from.
+          source: row.merchant?.trim() || "other",
+          note: "",
+          date: row.date ?? todayDate,
+          currency: row.currency ?? undefined,
+        });
+        continue;
+      }
+
       await addExpense({
         amount: row.amount,
         // "other", not the most recently used category. Falling back to that
@@ -286,6 +339,8 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
         note: row.merchant ?? "",
         date: row.date ?? todayDate,
         slipRef: row.reference,
+        // What the slip was printed in, not what the app is set to.
+        currency: row.currency ?? undefined,
       });
       if (row.merchant && row.category) learnMerchant(row.merchant, row.category);
     }
@@ -304,6 +359,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
 
   const [editingExpense, setEditingExpense] = useState<{
     id: number; amount: string; category: ExpenseCategory; note: string; date: string;
+    currency: string;
   } | null>(null);
 
   const handleSaveExpenseEdit = async () => {
@@ -315,6 +371,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
       category: editingExpense.category,
       note: editingExpense.note,
       date: editingExpense.date,
+      currency: editingExpense.currency,
     });
     setEditingExpense(null);
     load();
@@ -397,6 +454,9 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
       date: todayDate,
       slipRef: null,
       merchant: null,
+      // Read on open rather than once at mount, so changing the setting while
+      // the screen is up is picked up by the next entry.
+      currency: getCurrency(),
     });
     setShowAddExpense(true);
   };
@@ -406,12 +466,12 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
     if (!amt || amt <= 0) return;
     await addExpense({
       amount: amt, category: expForm.category, note: expForm.note,
-      date: expForm.date, slipRef: expForm.slipRef,
+      date: expForm.date, slipRef: expForm.slipRef, currency: expForm.currency,
     });
     // Whatever category it was saved under is the right one for that shop,
     // including when the user overrode the model's guess.
     if (expForm.merchant) learnMerchant(expForm.merchant, expForm.category);
-    setExpForm({ amount: "", category: "food", note: "", date: todayDate, slipRef: null, merchant: null });
+    setExpForm({ amount: "", category: "food", note: "", date: todayDate, slipRef: null, merchant: null, currency: getCurrency() });
     setScanMsg("");
     setShowAddExpense(false);
     load();
@@ -420,8 +480,11 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
   const handleAddIncome = async () => {
     const amt = parseFloat(incForm.amount);
     if (!amt || amt <= 0) return;
-    await addIncome({ amount: amt, source: incForm.source, note: incForm.note, date: incForm.date });
-    setIncForm({ amount: "", source: "", note: "", date: todayDate });
+    await addIncome({
+      amount: amt, source: incForm.source, note: incForm.note,
+      date: incForm.date, currency: incForm.currency,
+    });
+    setIncForm({ amount: "", source: "", note: "", date: todayDate, currency: getCurrency() });
     setShowAddIncome(false);
     load();
   };
@@ -486,22 +549,38 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
   // One list for money out and money in. Two separate lists would mean two
   // places to look for "what happened on the 26th", which is the question the
   // list exists to answer.
+  // `currency` is optional and absent means "whatever the app is set to",
+  // which is what every row written before the column existed means too.
   type Row =
-    | { kind: "expense"; id: number; date: string; amount: number; note: string; category: string }
-    | { kind: "income";  id: number; date: string; amount: number; note: string; source: string };
+    | { kind: "expense"; id: number; date: string; amount: number; currency?: string; note: string; category: string }
+    | { kind: "income";  id: number; date: string; amount: number; currency?: string; note: string; source: string };
 
   const listRows = useMemo<Row[]>(() => {
     const inc = (isCalendar ? incomes.filter(i => i.date === selectedDay) : incomes)
       .map((i): Row => ({
         kind: "income", id: i.id, date: i.date, amount: i.amount,
+        currency: i.currency ?? undefined,
         note: i.note ?? "", source: i.source ?? "",
       }));
     const exp = listExpenses.map((e): Row => ({
       kind: "expense", id: e.id, date: e.date, amount: e.amount,
+      currency: e.currency ?? undefined,
       note: e.note ?? "", category: e.category,
     }));
     return [...inc, ...exp].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   }, [isCalendar, incomes, selectedDay, listExpenses]);
+
+  // Rows this month in some other unit, which the totals above deliberately do
+  // not include. Empty almost always, and then this renders nothing at all.
+  const [otherCur, setOtherCur] = useState<Map<string, number>>(new Map());
+  useEffect(() => { otherCurrencyTotals(currentMonth).then(setOtherCur); }, [currentMonth, expenses]);
+
+  // The same question asked of income, which nobody had asked before. Without
+  // it a month whose earnings were all in dollars is indistinguishable from a
+  // month with no earnings — and the balance beside it says so in the direction
+  // most likely to frighten someone checking it because they are worried.
+  const [otherInc, setOtherInc] = useState<Map<string, number>>(new Map());
+  useEffect(() => { otherIncomeCurrencyTotals(currentMonth).then(setOtherInc); }, [currentMonth, incomes]);
 
   // Figures that need more than one month of context. Projection only makes
   // sense while a month is still running, so it is hidden once it has ended.
@@ -523,9 +602,31 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
   }, [currentMonth, todayDate, monthTotal, prevMonthTotal]);
 
   const catRows = useMemo(() => {
-    const rows = categories.map((cat: CategoryRow) => {
+    const base = getCurrency();
+    // WHY THIS IS NOT JUST `categories.map`.
+    //
+    // This panel used to be built from the visible category list alone, so any
+    // spending filed under a key that is not in it had nowhere to land: hidden
+    // categories, and keys the model invented before those were coerced. The
+    // money still counted in the figure at the top and still drew its bar on
+    // the daily chart. It simply had no row here.
+    //
+    // So the bars were free to sum to less than the headline with nothing
+    // saying so — the same failure as a total that leaves rows out silently,
+    // which is the thing this screen was just taught not to do. Anything with
+    // money in it gets a row, whether or not the list knows what it is.
+    const known = new Set(categories.map(c => c.key));
+    const strays = [...new Set(catTotals.map(c => c.category))]
+      .filter(k => !known.has(k))
+      .map(k => lookupCategory(k));
+    const rows = [...categories, ...strays].map((cat: CategoryRow) => {
       const spent = catTotals.find(c => c.category === cat.key)?.total ?? 0;
-      const budget = budgets.find(b => b.category === cat.key)?.limit_amount ?? null;
+      // A limit only means something against spending counted the same way. One
+      // recorded in another unit is kept and shown on the budget sheet, but it
+      // does not drive the bar, because a ฿5,000 line and $600 of spending have
+      // no ratio between them.
+      const bRow = budgets.find(b => b.category === cat.key);
+      const budget = bRow && (bRow.currency ?? base) === base ? bRow.limit_amount : null;
       const shareOfSpend = monthTotal > 0 ? spent / monthTotal : 0;
       const pct = budget ? Math.min(spent / budget, 1) : shareOfSpend;
       return {
@@ -590,7 +691,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                       style={{ width: `${pct}%`, background: "var(--color-primary)" }} />
                   </div>
                   <p className="text-white/25 text-[10px] mt-0.5">
-                    {fmt(g.current_amount)} / {fmt(g.target_amount)}
+                    {fmt(g.current_amount, g.currency)} / {fmt(g.target_amount, g.currency)}
                   </p>
                 </button>
 
@@ -606,7 +707,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                           value={addToGoalState?.id === g.id ? addToGoalState.value : ""}
                           onChange={e => setAddToGoalState({ id: g.id, value: e.target.value })}
                           onKeyDown={e => { if (e.key === "Enter") handleAddToGoal(); }}
-                          placeholder={t("finance.savingAmtPH")}
+                          placeholder={t("finance.savingAmtPH", { c: currencySymbol(g.currency) })}
                           className="flex-1 min-w-0 bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-white text-[11px] placeholder-white/25 focus:outline-none focus:border-white/30" />
                         <button onClick={handleAddToGoal}
                           className="theme-btn text-white rounded-lg px-2.5"><Check size={12} /></button>
@@ -681,6 +782,11 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
           <p className="text-white/40 text-[10px]">{t("finance.statMonth")}</p>
           <div className="flex items-baseline gap-1.5">
             <span className="text-white text-lg font-bold leading-tight">{fmt(monthTotal)}</span>
+            {otherCur.size > 0 && (
+              <span className="block text-white/35 text-[10px] leading-tight">
+                + {formatTotals(otherCur)}
+              </span>
+            )}
             {insights.deltaPct !== null && (
               <span className={`text-[10px] flex items-center gap-0.5 ${
                 insights.deltaPct > 0 ? "text-red-400" : "text-emerald-400"}`}>
@@ -700,20 +806,37 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
           <div className="min-w-0">
             <p className="text-white/40 text-[10px]">{t("finance.statIncome")}</p>
             <span className="text-white text-lg font-bold leading-tight">{fmt(monthIncome)}</span>
+            {otherInc.size > 0 && (
+              <span className="block text-white/35 text-[10px] leading-tight">
+                + {formatTotals(otherInc)}
+              </span>
+            )}
           </div>
-          <button onClick={() => { setIncForm({ amount: "", source: "", note: "", date: todayDate }); setShowAddIncome(true); }}
+          <button onClick={() => { setIncForm({ amount: "", source: "", note: "", date: todayDate, currency: getCurrency() }); setShowAddIncome(true); }}
             title={t("finance.incomeTitle")}
             className="text-white/35 hover:text-white transition-colors shrink-0 mt-0.5">
             <Plus size={14} />
           </button>
         </div>
 
+        {/* Income minus spending is only a subtraction when both sides are
+            counted in the same unit, and this figure is the one someone opens
+            the screen to look at. When part of either side was recorded in
+            something else it still shows — the number is true of the currency
+            it is in — with a line saying it is not the whole picture. Saying
+            nothing would be the same failure as an incomplete total that does
+            not admit it. */}
         <div className="rounded-xl bg-white/4 px-3 py-2">
           <p className="text-white/40 text-[10px]">{t("finance.statBalance")}</p>
           <span className={`text-lg font-bold leading-tight ${
             monthIncome === 0 ? "text-white/25" : balance < 0 ? "text-red-400" : "text-emerald-400"}`}>
             {monthIncome === 0 ? "—" : fmt(balance)}
           </span>
+          {(otherInc.size > 0 || otherCur.size > 0) && (
+            <span className="block text-white/35 text-[10px] leading-tight">
+              {t("finance.balancePartial")}
+            </span>
+          )}
         </div>
       </div>
 
@@ -731,6 +854,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                 <MonthCalendar month={currentMonth} data={dailyData}
                   selected={selectedDay} onPick={pickDay} />
               </div>
+              <ExpectedIncomeCard onChanged={load} />
               {goalsCard}
             </div>
           ) : (
@@ -863,7 +987,16 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                       )}
                       <span className={`text-xs font-semibold shrink-0 w-16 text-right ${
                         r.kind === "income" ? "text-emerald-400" : "text-white"}`}>
-                        {r.kind === "income" ? "+" : ""}{fmt(r.amount)}
+                        {/* IN ITS OWN CURRENCY, not the app's.
+                            This read fmt(r.amount), which falls back to the
+                            setting — so a $10,000 slip scanned and saved
+                            correctly as USD was drawn as ฿10,000 the moment the
+                            setting went back to baht. The database was right
+                            the whole time and the screen was rewriting history
+                            every time the setting changed, which looks exactly
+                            like the app converting old rows, the one thing it
+                            promises never to do. */}
+                        {r.kind === "income" ? "+" : ""}{fmt(r.amount, r.currency)}
                       </span>
                       <div className="flex gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
                         {r.kind === "expense" && (
@@ -871,6 +1004,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                             onClick={() => setEditingExpense({
                               id: r.id, amount: String(r.amount),
                               category: r.category as ExpenseCategory, note: r.note, date: r.date,
+                              currency: r.currency ?? getCurrency(),
                             })}
                             className="text-white/30 hover:text-white p-1"><Edit3 size={11} /></button>
                         )}
@@ -945,10 +1079,13 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                             placeholder={t("finance.notePH")}
                             className="flex-1 min-w-0 bg-transparent border-b border-white/10 text-white text-xs px-0.5 py-0.5 placeholder-white/25 focus:outline-none focus:border-white/40" />
                           {/* The symbol sits outside the input so the field
-                              stays a real number input: typing "฿" into one
-                              would silently clear it. */}
+                              stays a real number input: typing a symbol into
+                              one would silently clear it. It shows the currency
+                              printed on the SLIP, which on a receipt from a
+                              trip is not the one this app is set to. */}
                           <div className="flex items-baseline gap-0.5 border-b border-white/10 focus-within:border-white/40">
-                            <span className="text-white/40 text-xs">฿</span>
+                            <CurrencyPicker size="sm" value={row.currency ?? undefined}
+                              onChange={c => setReview(r => r && r.map(x => x.id === row.id ? { ...x, currency: c } : x))} />
                             <input type="number" inputMode="decimal" value={row.amount ?? ""}
                               onChange={e => setReview(r => r && r.map(x => x.id === row.id ? { ...x, amount: parseFloat(e.target.value) || null } : x))}
                               className="w-16 bg-transparent text-white text-xs font-semibold text-right px-0.5 py-0.5 focus:outline-none" />
@@ -965,11 +1102,41 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                           {row.kind === "topup" && (
                             <span className="text-amber-300/80 text-[10px]">{t("finance.scanTopup")}</span>
                           )}
+                          {/* DIRECTION IS A BUTTON, NOT A CAPTION.
+                              It is the field most likely to be wrong and the
+                              only one whose mistake is invisible: an expense
+                              misfiled as income lands in a table nobody opens,
+                              so it is not noticed the way a wrong amount on the
+                              spending list is. It was rendered here as a label,
+                              which meant the app could tell you it had guessed
+                              and give you no way to say otherwise.
+
+                              Shown on every row, not only incoming ones, so
+                              that a wrong "out" can be corrected too. */}
+                          <button
+                            onClick={() => setReview(r => r && r.map(x => x.id === row.id
+                              ? { ...x, direction: x.direction === "in" ? "out" : "in" } : x))}
+                            className={`text-[10px] px-1.5 py-0.5 rounded-md border transition-colors ${
+                              row.direction === "in"
+                                ? "border-emerald-400/40 text-emerald-300/90 hover:bg-emerald-400/10"
+                                : "border-white/10 text-white/35 hover:text-white/70"
+                            }`}>
+                            {row.direction === "in" ? t("finance.scanIncoming") : t("finance.scanOutgoing")}
+                          </button>
+                          {row.kind === "bill_due" && (
+                            <span className="text-sky-300/80 text-[10px]">{t("finance.scanBillDue")}</span>
+                          )}
                           {/* The last native <select> in the app. Chromium hands
                               the option list to Windows, so this one row was
                               still opening a grey system menu in the system font
                               in the middle of a dark app. */}
-                          <div className={`ml-auto w-40 ${row.category ? "" : "rounded-xl ring-1 ring-amber-400/40"}`}>
+                          {/* Only for money going out. A spending category on
+                              an incoming row is a question with no answer: what
+                              names an arriving payment is who sent it, which is
+                              already in the field above. It was still rendered,
+                              still demanded an answer, and the answer was
+                              discarded on save. */}
+                          <div className={`ml-auto w-40 ${row.direction === "in" ? "invisible" : row.category ? "" : "rounded-xl ring-1 ring-amber-400/40"}`}>
                             <Select
                               value={row.category ?? ""}
                               placeholder={t("finance.pickCat")}
@@ -1000,7 +1167,8 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
               {/* Amount is the only thing that always has to be typed, so it is
                   focused on open and given the whole first line. */}
               <div className="flex items-baseline gap-2 border-b border-white/15 pb-2 mb-3">
-                <span className="text-white/40 text-lg">฿</span>
+                <CurrencyPicker value={expForm.currency}
+                  onChange={c => setExpForm(f => ({ ...f, currency: c }))} />
                 <input type="number" inputMode="decimal" autoFocus
                   value={expForm.amount}
                   onChange={e => setExpForm(f => ({ ...f, amount: e.target.value }))}
@@ -1154,7 +1322,8 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
               </div>
 
               <div className="flex items-baseline gap-2 border-b border-emerald-400/40 pb-2 mb-3">
-                <span className="text-emerald-400/60 text-lg">฿</span>
+                <CurrencyPicker value={incForm.currency} tone="text-emerald-400/60"
+                  onChange={c => setIncForm(f => ({ ...f, currency: c }))} />
                 <input type="number" inputMode="decimal" autoFocus
                   value={incForm.amount}
                   onChange={e => setIncForm(f => ({ ...f, amount: e.target.value }))}
@@ -1214,17 +1383,26 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
             <motion.div initial={{ scale: 0.94, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.94, opacity: 0 }}
               onClick={e => e.stopPropagation()}
               className="bg-gray-900 border border-white/10 rounded-2xl p-4 w-full max-w-xs">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-white font-semibold text-sm">
-                  {t("finance.budgetFor")} {lookupCategory(editBudget.cat).label}
-                </h3>
-                <button onClick={() => setEditBudget(null)} className="text-white/40 hover:text-white"><X size={16} /></button>
+              <div className="flex items-start justify-between gap-2 mb-3">
+                <div className="min-w-0">
+                  <h3 className="text-white font-semibold text-sm leading-snug truncate">
+                    {lookupCategory(editBudget.cat).emoji} {lookupCategory(editBudget.cat).label}
+                  </h3>
+                  {/* The month is a fact about this dialog, not part of the
+                      category's name. It was being concatenated onto the end of
+                      the title, which is how a sentence and a noun ended up
+                      wrapped across two lines pretending to be one phrase. */}
+                  <p className="text-white/35 text-[11px] leading-snug">
+                    {t("finance.budgetFor", { month: monthLabel })}
+                  </p>
+                </div>
+                <button onClick={() => setEditBudget(null)} className="text-white/40 hover:text-white shrink-0"><X size={16} /></button>
               </div>
               <input type="number" inputMode="decimal" autoFocus
                 value={editBudget.value}
                 onChange={e => setEditBudget(b => b && { ...b, value: e.target.value })}
                 onKeyDown={e => { if (e.key === "Enter") handleSaveBudget(); }}
-                placeholder={t("finance.budgetPH")}
+                placeholder={t("finance.budgetPH", { c: currencySymbol() })}
                 className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2.5 text-white text-lg font-bold placeholder-white/20 focus:outline-none focus:border-white/30 mb-3" />
               <button onClick={handleSaveBudget}
                 className="w-full py-2.5 theme-btn rounded-xl text-white text-sm font-semibold">
@@ -1260,7 +1438,7 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
                 </div>
                 <input type="number" inputMode="decimal" value={goalForm.target}
                   onChange={e => setGoalForm(f => ({ ...f, target: e.target.value }))}
-                  placeholder={t("finance.goalAmtPH")}
+                  placeholder={t("finance.goalAmtPH", { c: currencySymbol() })}
                   className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white text-xs placeholder-white/25 focus:outline-none focus:border-white/30" />
                 <DatePicker
                   value={goalForm.deadline}
@@ -1291,7 +1469,8 @@ export default function FinanceView({ onBack, isVisible = true, refreshKey = 0 }
               </div>
 
               <div className="flex items-baseline gap-2 border-b border-white/15 pb-2 mb-3">
-                <span className="text-white/40 text-lg">฿</span>
+                <CurrencyPicker value={editingExpense.currency}
+                  onChange={c => setEditingExpense(x => x && { ...x, currency: c })} />
                 <input type="number" inputMode="decimal" autoFocus
                   value={editingExpense.amount}
                   onChange={e => setEditingExpense(x => x && { ...x, amount: e.target.value })}

@@ -1,6 +1,7 @@
 import { isPaused } from "../types";
 import Database from "@tauri-apps/plugin-sql";
 import { applySyncMigrations } from "./syncMeta";
+import { getCurrency } from "./money";
 
 let db: Database | null = null;
 let dbReadyPromise: Promise<Database> | null = null;
@@ -96,6 +97,46 @@ async function initializeSchema(db: Database): Promise<void> {
     )
   `);
 
+  // Which unit the number in `amount` is counted in. Added now, while these
+  // tables hold a few hundred rows and there is no sync protocol that would
+  // have to be renegotiated, for the same reason the sync columns were: the
+  // expensive version of this migration is the one done later.
+  //
+  // Backfilling existing rows as THB is not a guess. Every row that exists was
+  // entered when the app could only mean baht.
+  try { await db.execute("ALTER TABLE expenses ADD COLUMN currency TEXT NOT NULL DEFAULT 'THB'"); } catch (_) {}
+  try { await db.execute("ALTER TABLE income   ADD COLUMN currency TEXT NOT NULL DEFAULT 'THB'"); } catch (_) {}
+
+  // Money that should arrive and has not. Created here with every other table
+  // rather than by a helper in its own file, and NOT because that is tidier:
+  //
+  // the helper called getDb(), and this runs INSIDE getDb(). getDb sets its
+  // ready-promise, then awaits this function; the helper then asked for the
+  // database, was handed that same not-yet-resolved promise, and waited for it.
+  // A promise waiting on a function waiting on that promise. The database never
+  // opened, so nothing loaded anywhere in the app — which reads as "it lost all
+  // my data" rather than as a hang, because the screens render fine and empty.
+  //
+  // Every other table is created with a `db` already in hand. Following that
+  // made the deadlock impossible rather than merely absent.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS expected_income (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source TEXT NOT NULL,
+      amount REAL,
+      currency TEXT NOT NULL DEFAULT 'THB',
+      expect_date TEXT NOT NULL,
+      repeat TEXT,
+      note TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'waiting',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      deleted INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+  await db.execute(
+    "CREATE INDEX IF NOT EXISTS idx_expected_status ON expected_income(status, expect_date)",
+  );
+
   // ── Finance: budgets ───────────────────────────────────────
   await db.execute(`
     CREATE TABLE IF NOT EXISTS budgets (
@@ -120,6 +161,21 @@ async function initializeSchema(db: Database): Promise<void> {
       created_at TEXT DEFAULT (datetime('now'))
     )
   `);
+
+  // A limit and a target are amounts, and an amount without a unit is not one.
+  //
+  // These two columns were the last money in the database with no currency
+  // beside it, which did not matter while the app could only mean baht and
+  // became a silent rewrite the moment it could not: a ฿5,000 food budget was
+  // read as $5,000 the instant the setting changed, with nothing on screen
+  // saying so, and a 30,000 goal likewise. Nothing was converted and nothing
+  // was wrong in the row — the number was simply reinterpreted.
+  //
+  // Backfilling as THB is not a guess for the same reason it was not one for
+  // expenses: every row that exists was entered when baht was the only thing
+  // the app could mean.
+  try { await db.execute("ALTER TABLE budgets      ADD COLUMN currency TEXT NOT NULL DEFAULT 'THB'"); } catch (_) {}
+  try { await db.execute("ALTER TABLE saving_goals ADD COLUMN currency TEXT NOT NULL DEFAULT 'THB'"); } catch (_) {}
 
   // ── App settings (key-value) ───────────────────────────────
   // Generic store for app preferences like wallpaper path/enabled.
@@ -253,10 +309,14 @@ export async function getTaskById(id: number): Promise<any | null> {
   return rows[0];
 }
 
-export async function addIncome(data: { amount: number; source: string; note: string; date: string }): Promise<void> {
+export async function addIncome(data: {
+  amount: number; source: string; note: string; date: string;
+  /** Omitted means the currency in force now, which is what a manual entry is. */
+  currency?: string;
+}): Promise<void> {
   const db = await getDb();
-  await db.execute('INSERT INTO income (amount, source, note, date) VALUES (?, ?, ?, ?)',
-    [data.amount, data.source, data.note, data.date]);
+  await db.execute('INSERT INTO income (amount, source, note, date, currency) VALUES (?, ?, ?, ?, ?)',
+    [data.amount, data.source, data.note, data.date, data.currency || getCurrency()]);
 }
 
 export async function getIncomeByMonth(month: string): Promise<any[]> {
@@ -270,9 +330,56 @@ export async function getIncomeByMonth(month: string): Promise<any[]> {
 export async function getMonthIncome(month: string): Promise<number> {
   const db = await getDb();
   const rows = await db.select<{total:number}[]>(
-    "SELECT COALESCE(SUM(amount),0) as total FROM income WHERE deleted = 0 AND strftime('%Y-%m', date) = ?",
-    [month]);
+    // One currency at a time. See the note above getMonthTotal in
+    // financeDatabase: summing across units invents a number.
+    "SELECT COALESCE(SUM(amount),0) as total FROM income WHERE deleted = 0 AND currency = ? AND strftime('%Y-%m', date) = ?",
+    [getCurrency(), month]);
   return rows[0]?.total ?? 0;
+}
+
+/**
+ * Every currency that actually appears in the books, commonest first.
+ *
+ * The currency setting is a claim about the future — what the NEXT entry is
+ * counted in — and there was nothing anywhere that said what the past was
+ * counted in. That gap is what makes a mis-set currency so hard to notice: the
+ * screen fills with zeroes and correct-looking empty bars, because every total
+ * is filtered to a unit that almost nothing in the database is recorded in.
+ *
+ * Answering it costs one query, and in the ordinary single-currency life it
+ * returns one row, which the settings screen then draws nothing for.
+ */
+export async function currenciesInUse(): Promise<{ code: string; n: number }[]> {
+  const db = await getDb();
+  return await db.select<{ code: string; n: number }[]>(`
+    SELECT currency AS code, COUNT(*) AS n FROM (
+      SELECT currency FROM expenses WHERE deleted = 0
+      UNION ALL
+      SELECT currency FROM income   WHERE deleted = 0
+    ) GROUP BY currency ORDER BY n DESC, code ASC
+  `);
+}
+
+/**
+ * Income this month in currencies OTHER than the one in force.
+ *
+ * The expense side has had this since the currency column was added; the income
+ * side did not, which made the two figures at the top of the screen unequally
+ * honest. A month's spending that left rows out said so underneath itself. A
+ * month's earnings that left rows out looked exactly like a month with no
+ * earnings — and that is the direction that hurts, because the balance beside
+ * it is then income minus expenses with the income missing.
+ *
+ * This is not hypothetical for the person who wrote it: the money coming in is
+ * priced in dollars and the money going out is spent in baht.
+ */
+export async function otherIncomeCurrencyTotals(month: string): Promise<Map<string, number>> {
+  const db = await getDb();
+  const rows = await db.select<{ currency: string; total: number }[]>(
+    "SELECT currency, SUM(amount) as total FROM income WHERE deleted = 0 AND currency != ? AND strftime('%Y-%m', date) = ? GROUP BY currency",
+    [getCurrency(), month],
+  );
+  return new Map(rows.map(r => [r.currency, r.total]));
 }
 
 export async function deleteIncome(id: number): Promise<void> {

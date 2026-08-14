@@ -254,7 +254,13 @@ const translations = {
   "finance.loading":      { en: "Loading...",            th: "กำลังโหลด..." },
   "finance.noExpenses":   { en: "No expenses yet",       th: "ยังไม่มีรายการ" },
   "finance.noExpensesSub":{ en: "Tap Add or tell AI, e.g. \"Lunch 120 baht\"", th: "กด Add หรือบอก AI เช่น \"กินข้าว 120 บาท\"" },
-  "finance.budgetFor":    { en: "Set budget per category for {month}", th: "ตั้งงบประมาณรายหมวดสำหรับเดือน {month}" },
+  // Was "Set budget per category for {month}" with the category name appended
+  // by the caller, which produced two faults at once: the placeholder was never
+  // filled because nothing passed a month, and even filled it would have read
+  // "Set budget per category for August personal". The dialog is about ONE
+  // category in ONE month, so it says that, on two lines, with the month in the
+  // subtitle where it does not fight the category for the first line.
+  "finance.budgetFor":    { en: "Budget for {month}",  th: "งบประมาณของเดือน{month}" },
   "finance.notSet":       { en: "Not set",               th: "ยังไม่ได้ตั้ง" },
   "finance.addGoal":      { en: "+ Add saving goal",     th: "เพิ่มเป้าหมายการออม" },
   "finance.noGoals":      { en: "No goals yet",          th: "ยังไม่มีเป้าหมาย" },
@@ -264,18 +270,21 @@ const translations = {
   "finance.remaining":    { en: "{amt} left",            th: "เหลืออีก {amt}" },
   "finance.goalDone":     { en: "🎉 Completed!",         th: "🎉 สำเร็จแล้ว!" },
   "finance.addExpenseTitle": { en: "Record expense",     th: "บันทึกค่าใช้จ่าย" },
-  "finance.amountPH":     { en: "Amount (฿) *",          th: "จำนวนเงิน (฿) *" },
+  // The symbol is a parameter, not part of the sentence. It was baked into
+  // four translated strings, which meant the app could be set to yen and
+  // still ask for baht in its own input labels.
+  "finance.amountPH":     { en: "Amount *",               th: "จำนวนเงิน *" },
   "finance.notePH":       { en: "Note, e.g. Lunch",      th: "โน้ต เช่น กินข้าวกลางวัน" },
   "finance.saveTx":       { en: "Save",                  th: "บันทึก" },
   "finance.goalTitle":    { en: "Saving Goal",           th: "เป้าหมายการออม" },
   "finance.goalNamePH":   { en: "Goal name, e.g. Buy iPhone", th: "ชื่อเป้าหมาย เช่น ซื้อ iPhone" },
-  "finance.goalAmtPH":    { en: "Target amount (฿)",     th: "จำนวนเงินเป้าหมาย (฿)" },
+  "finance.goalAmtPH":    { en: "Target amount ({c})",    th: "จำนวนเงินเป้าหมาย ({c})" },
   "finance.goalDeadlineLabel": { en: "Target date (optional)", th: "วันที่ต้องการ (optional)" },
   "finance.goalDeadlinePH":    { en: "Pick a date",      th: "เลือกวันที่" },
   "finance.createGoal":   { en: "Create goal",           th: "สร้างเป้าหมาย" },
   "finance.addSaving":    { en: "+Save",                 th: "+ออม" },
-  "finance.savingAmtPH":  { en: "Amount to save (฿)",   th: "จำนวนเงินที่ออม (฿)" },
-  "finance.budgetPH":     { en: "Budget (฿)",            th: "งบประมาณ (฿)" },
+  "finance.savingAmtPH":  { en: "Amount to save ({c})",  th: "จำนวนเงินที่ออม ({c})" },
+  "finance.budgetPH":     { en: "Budget ({c})",           th: "งบประมาณ ({c})" },
   "finance.editSave":     { en: "Save",                  th: "บันทึก" },
   "finance.editCancel":   { en: "Cancel",                th: "ยกเลิก" },
   "finance.deadline":     { en: "Until {date}",          th: "ถึง {date}" },
@@ -498,6 +507,50 @@ const translations = {
   "finance.setBudget":  { en: "Set budget", th: "ตั้งงบ" },
   "finance.yesterday":  { en: "Yesterday",  th: "เมื่อวาน" },
   "finance.date":       { en: "Date",       th: "วันที่" },
+  "finance.scanIncoming": { en: "money in",   th: "เงินเข้า" },
+  "finance.scanOutgoing": { en: "money out",  th: "เงินออก" },
+  // Picking a unit, in the places where money is typed in. The label is short
+  // because it sits on a control the width of a currency symbol.
+  "finance.currencyPick":   { en: "Currency",            th: "สกุลเงิน" },
+  "finance.currencySearch": { en: "Search",              th: "ค้นหา" },
+  "finance.currencyNone":   { en: "No match",            th: "ไม่พบ" },
+  // Said under the balance when part of the month was recorded in another unit.
+  // Not "error", not a count — the figure above is true, it is just not all of
+  // what happened.
+  "finance.balancePartial": { en: "not counting other currencies", th: "ไม่รวมสกุลอื่น" },
+  "expect.title":         { en: "Waiting on",           th: "รอเงินเข้า" },
+  "expect.addShort":      { en: "money you're waiting for", th: "เพิ่มเงินที่รออยู่" },
+  "expect.sourcePH":      { en: "From whom",            th: "จากใคร" },
+  "expect.amountUnknown": { en: "amount?",              th: "ยอด?" },
+  "expect.once":          { en: "once",                 th: "ครั้งเดียว" },
+  "expect.monthly":       { en: "monthly",              th: "ทุกเดือน" },
+  "expect.biweekly":      { en: "2 weeks",              th: "2 สัปดาห์" },
+  "expect.weekly":        { en: "weekly",               th: "ทุกสัปดาห์" },
+  "expect.save":          { en: "Save",                 th: "บันทึก" },
+  "expect.received":      { en: "It arrived",           th: "เงินเข้าแล้ว" },
+  "expect.due":           { en: "due {d}",              th: "ราววันที่ {d}" },
+  "expect.dueToday":      { en: "due today",            th: "ราววันนี้" },
+  "expect.waitingSince":  { en: "waiting since {d}",    th: "รอมาตั้งแต่ {d}" },
+  "expect.push7":         { en: "check in a week",      th: "ไว้ดูอีกอาทิตย์" },
+  "expect.cancel":        { en: "not coming",           th: "ไม่ได้แล้ว" },
+  "expect.howMuch":       { en: "How much came in from {s}?", th: "{s} เข้ามาเท่าไหร่" },
+  // Shown only when what landed is in a different unit from what was expected,
+  // which is the ordinary case for work invoiced abroad and paid into a bank at
+  // home. It states the expectation rather than computing a rate: the rate is
+  // the bank's business and it is already inside the number being typed.
+  "expect.expectedWas":   { en: "expected {a}",         th: "ที่คาดไว้ {a}" },
+  "finance.scanBillDue":  { en: "not paid yet", th: "ยังไม่ได้จ่าย" },
+  "finance.scanRetry":    { en: "Slow to answer — trying once more…", th: "ตอบช้า กำลังลองอีกครั้ง…" },
+  "settings.currency":    { en: "Currency",   th: "สกุลเงิน" },
+  // Shown only when the books already contain more than one unit, which for
+  // most people is never. It is the shortcut back AND the diagnostic: a screen
+  // full of zeroes is almost always this setting pointing at a currency that
+  // barely anything is recorded in, and the counts say so at a glance.
+  "settings.currencyInUse":  { en: "Already in your records", th: "มีอยู่ในบันทึกแล้ว" },
+  "settings.currencyTotals": { en: "Totals on the finance screen count only the selected currency.",
+                               th: "ยอดรวมในหน้าการเงินจะนับเฉพาะสกุลที่เลือกไว้" },
+  "settings.currencySub": { en: "For new entries. Anything already saved keeps the currency it was recorded in.",
+                            th: "ใช้กับรายการใหม่ ของที่บันทึกไปแล้วยังเป็นสกุลเดิม" },
   "finance.pickDate":   { en: "Pick date",  th: "เลือกวัน" },
   "finance.ofBudget":   { en: "of budget",  th: "ของงบ" },
   "finance.viewMonth":    { en: "Month",     th: "รายเดือน" },

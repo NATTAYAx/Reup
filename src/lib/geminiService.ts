@@ -14,6 +14,7 @@
 import { smartParse, AIResult } from "./smartAI";
 import { getAppTimeZone, offsetLabel } from "./tz";
 import { todayLocal } from "./dateUtil";
+import { getCurrency, currencySymbol, formatMoney } from "./money";
 import { cacheLookup, cacheStore, recordCall } from "./aiMemory";
 import {
   PROVIDERS, getProviderId, getApiKey, setApiKey, getModel, getBaseUrl,
@@ -837,10 +838,18 @@ function financeConfidence(r: GeminiFinanceResponse): number {
   }
 }
 
+/** A currency symbol can be a regex metacharacter ($ is the obvious one). */
+const escapeRe = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 function localParse(text: string): LocalResult {
   // ── Finance detection ─────────────────────────────────────────
   const isFinance =
-    /ใช้ไป|ใช้จ่าย|จ่าย|ซื้อ|กิน.*บาท|บาท|฿|expense|spent|paid|spending|สรุป.*เงิน|ยอดเงิน|รับเงิน|เงินเดือน|income|รายได้/i.test(text) &&
+    (/ใช้ไป|ใช้จ่าย|จ่าย|ซื้อ|กิน.*บาท|บาท|฿|expense|spent|paid|spending|สรุป.*เงิน|ยอดเงิน|รับเงิน|เงินเดือน|income|รายได้/i.test(text)
+     // The words for money are not a constant. This list is Thai plus a few
+     // English verbs, so with the app set to yen "ค่าอาหาร 1200 เยน" was not
+     // recognised as being about money at all and fell through to the task
+     // parser. The active currency's own code and symbol are added to it.
+     || new RegExp(`${escapeRe(getCurrency())}|${escapeRe(currencySymbol())}`, "i").test(text)) &&
     !/รีเซ็ต|reset|daily|game|เกม|task|งาน.*ส่ง|การบ้าน/i.test(text);
 
   if (isFinance) {
@@ -903,7 +912,7 @@ function localParseFinance(text: string): GeminiFinanceResponse {
       .replace(/\s+/g, " ").trim() || "income";
     return {
       domain: "finance", intent: "log_income",
-      reply: amt ? `💰 รายรับ ฿${amt.toLocaleString()}` : "ระบุจำนวนเงินที่ได้รับด้วยนะ เช่น \"รับเงินเดือน 15000\"",
+      reply: amt ? `💰 รายรับ ${formatMoney(amt)}` : "ระบุจำนวนเงินที่ได้รับด้วยนะ เช่น \"รับเงินเดือน 15000\"",
       incomeAmount: amt ?? undefined,
       incomeNote,
     };
@@ -941,7 +950,7 @@ function localParseFinance(text: string): GeminiFinanceResponse {
     // writes it. The tick used to be printed here, so the chat said บันทึกแล้ว
     // and then asked whether to save, in that order.
     reply: amt
-      ? `💸 ${note} ฿${amt.toLocaleString()} หมวด ${category}`
+      ? `💸 ${note} ${formatMoney(amt)} หมวด ${category}`
       : `ไม่พบจำนวนเงิน ลองพิมพ์ใหม่นะ เช่น "กินข้าว 80" หรือ "กาแฟ 45 บาท"`,
     amount: amt ?? undefined,
     category,
@@ -986,7 +995,10 @@ function localParseTask(text: string): LocalResult {
 function extractAmount(text: string): number | null {
   // Priority order: explicit unit first, then verb+amount, then noun+amount, then bare number
   const withUnit = text.match(/(\d[\d,]*(?:\.\d+)?)\s*(?:บาท|baht|thb)/i)
-    || text.match(/(?:฿)\s*(\d[\d,]*(?:\.\d+)?)/);
+    || text.match(/(?:฿)\s*(\d[\d,]*(?:\.\d+)?)/)
+    // ฿ and บาท stay: they are what a Thai user types, whatever the app is
+    // set to. The active symbol is added, not substituted.
+    || text.match(new RegExp(`${escapeRe(currencySymbol())}\\s*(\\d[\\d,]*(?:\\.\\d+)?)`));
   if (withUnit) { const v = parseFloat(withUnit[1].replace(/,/g,"")); if(v>0) return v; }
 
   const withVerb = text.match(/(?:จ่าย|ซื้อ|ใช้|กิน|โอน|paid?|buy|bought|spent?)\s*(?:ไป\s*)?(\d[\d,]*(?:\.\d+)?)/i);

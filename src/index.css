@@ -1,5 +1,48 @@
 @import "tailwindcss";
 
+/* ─── Typeface ────────────────────────────────────────────────────────────────
+   Nothing in this project declared a font, so the app ran on Tailwind's default
+   stack, whose first real entry is system-ui. On Windows that is Segoe UI, and
+   Segoe UI contains no Thai. Chromium therefore filled the Thai in per
+   character from whatever else the machine had — Leelawadee UI, sometimes
+   Tahoma — which means every mixed line was set in TWO typefaces with different
+   x-heights, stroke weights and vertical metrics. "ตั้งงบประมาณ personal" was
+   two fonts pretending to be a sentence.
+
+   IBM Plex Sans Thai draws both scripts as one family with matching metrics, so
+   a Thai word and an English word on the same line finally look related. It is
+   bundled rather than fetched: font-src in the CSP is 'self' and data:, so a
+   Google Fonts URL would be blocked outright, and an app that needs the network
+   to render text correctly is not a desktop app.
+
+   Only the three weights the interface actually uses. Each is split by script,
+   so a screen with no Latin on it never downloads the Latin file. */
+@import "@fontsource/ibm-plex-sans-thai/400.css";
+@import "@fontsource/ibm-plex-sans-thai/500.css";
+@import "@fontsource/ibm-plex-sans-thai/600.css";
+@import "@fontsource/ibm-plex-sans-thai/700.css";
+
+@theme {
+  /* Leelawadee UI stays behind it as the Windows Thai fallback, so the app is
+     still readable in the instant before the bundled file is decoded, and on a
+     machine where it somehow fails to load. */
+  --font-sans: "IBM Plex Sans Thai", "Leelawadee UI", "Segoe UI", system-ui,
+               -apple-system, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* A base line-height for Thai was tried here and removed. Two reasons, and the
+   second is the one that matters.
+   
+   It did not work: `:where()` zeroes specificity, and Tailwind's preflight sets
+   line-height on `html, :host`, which wins. The rule was dead the moment it was
+   written — a declaration that reads like it does something and does nothing.
+   
+   And raising it would not have helped anyway. Nearly every piece of text here
+   carries a text-* utility, and in Tailwind v4 those set their own line-height,
+   so the base applies to almost nothing. Where Thai tone marks are genuinely
+   crowded is under explicit leading-tight, and the fix for that is to loosen
+   the element that is crowded, which is what the budget dialog heading got. */
+
 /* ─── Theme CSS variables (set by applyTheme() in JS) ────────────────────── */
 :root {
   --color-primary:   #7c3aed;

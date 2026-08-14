@@ -1,16 +1,18 @@
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, Power, Image, Palette, Upload, Sparkles, Check, RotateCcw, Bell, BellOff, Clock, Languages, Globe, ChevronDown, Moon } from "lucide-react";
+import { X, Power, Image, Palette, Upload, Sparkles, Check, RotateCcw, Bell, BellOff, Clock, Languages, Globe, Wallet, ChevronDown, Moon } from "lucide-react";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { isMuted, setMuted, getQuietHours, setQuietHours, type QuietHours } from "../lib/notifier";
 import TimePicker from "./TimePicker";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { getSetting, setSetting } from "../lib/database";
+import { getSetting, setSetting, currenciesInUse } from "../lib/database";
 import { getLang, setLang, t, type Lang } from "../lib/i18n";
 import TimeZonePicker from "./TimeZonePicker";
 import BackupCard from "./BackupCard";
 import { getTimeZonePreference, setTimeZonePreference, getAppTimeZone, offsetLabel, SYSTEM } from "../lib/tz";
+import { getCurrency, setCurrency, formatMoney, currencySymbol } from "../lib/money";
+import CurrencyPicker from "./CurrencyPicker";
 import { loadToastStyle, saveToastStyle, type ToastStyle } from "../lib/toastStyle";
 import {
   PROVIDERS, getProviderId, setProviderId, getApiKey, setApiKey,
@@ -222,6 +224,19 @@ export default function SettingsModal({ open, onClose }: Props) {
   const [tzPref, setTzPref] = useState<string>(getTimeZonePreference);
   const [pendingTz, setPendingTz] = useState<string | null>(null);
   const [tzOpen, setTzOpen] = useState(false);
+  // Read once. getCurrency() writes the first-run guess back to storage, so the
+  // answer stops depending on the machine's region from that moment on.
+  const [currencyCode, setCurrencyCode] = useState(() => getCurrency());
+  // What the ledger is actually kept in, as opposed to what the setting claims
+  // the next entry will be. Loaded when the screen opens, not on mount, so it
+  // is fresh after a session of adding things.
+  const [curInUse, setCurInUse] = useState<{ code: string; n: number }[]>([]);
+  useEffect(() => {
+    if (!open) return;
+    currenciesInUse().then(setCurInUse).catch(() => setCurInUse([]));
+  }, [open]);
+
+  const pickCurrency = (code: string) => { setCurrency(code); setCurrencyCode(code); };
   const [pendingIconUrl, setPendingIconUrl] = useState<string | null>(null);
   const [customSound, setCustomSound]   = useState<string | null>(null);
   const [soundName, setSoundName]       = useState<string>("");
@@ -1218,6 +1233,65 @@ Rules:
                   </div>
 
                   <BackupCard />
+
+                  {/* Currency, deliberately next to the timezone rather than
+                      buried in the finance screen: both answer "where am I",
+                      and asking them in two different places is two chances to
+                      answer inconsistently.
+
+                      What it does NOT do is convert anything already saved. See
+                      the header of lib/money.ts — a stored row keeps the unit it
+                      was recorded in, permanently, because a record that changes
+                      its answer depending on the day it is read is not a record.
+                      The line under the picker says so, in the place where
+                      someone is about to change it and would otherwise assume
+                      the opposite. */}
+                  <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+                    <div className="flex items-center gap-3 mb-3">
+                      <Wallet size={18} className="text-purple-400" />
+                      <div className="min-w-0">
+                        <p className="text-white text-sm font-semibold">{t("settings.currency")}</p>
+                        <p className="text-white/40 text-xs">{t("settings.currencySub")}</p>
+                      </div>
+                    </div>
+                    <CurrencyPicker variant="row" value={currencyCode} onChange={pickCurrency} />
+
+                    {/* Absent, not empty, in the ordinary one-currency life —
+                        the same rule the expected-income card follows. A row of
+                        chips saying "you use baht" to someone who has only ever
+                        used baht is a control with nothing to control. */}
+                    {curInUse.length > 1 && (
+                      <>
+                        <p className="text-white/30 text-[11px] mt-3 mb-1.5">{t("settings.currencyInUse")}</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {curInUse.map(c => (
+                            <button key={c.code} onClick={() => pickCurrency(c.code)}
+                              className={`text-[11px] rounded-full px-2.5 py-1 border transition-colors ${
+                                currencyCode === c.code
+                                  ? "theme-btn text-white border-transparent"
+                                  : "border-white/10 text-white/50 hover:text-white"
+                              }`}>
+                              {currencySymbol(c.code)} {c.code}
+                              <span className="text-white/30 ml-1">{c.n}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+
+                    {/* Reading a number in the unit you just chose settles the
+                        question faster than the code does: ¥1,235 has no
+                        decimals and ฿1,234.50 has two, and seeing that is how
+                        you know the choice took. */}
+                    <p className="text-white/30 text-[11px] mt-2.5">
+                      {formatMoney(1234.5, currencyCode)}
+                    </p>
+                    {curInUse.length > 1 && (
+                      <p className="text-white/30 text-[11px] mt-1 leading-snug">
+                        {t("settings.currencyTotals")}
+                      </p>
+                    )}
+                  </div>
 
                   {/* Timezone */}
                   <div className="bg-white/5 border border-white/10 rounded-2xl p-4">

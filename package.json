@@ -1,7 +1,7 @@
 {
   "name": "reup",
   "private": true,
-  "version": "0.2.36",
+  "version": "0.2.47",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,11 +10,15 @@
     "tauri": "tauri",
     "bump": "node scripts/bump-version.mjs",
     "release": "node scripts/bump-version.mjs && tauri build",
-    "eval": "tsc scripts/eval-parser.ts --outDir node_modules/.cache/eval --module commonjs --target es2020 --moduleResolution node --skipLibCheck --esModuleInterop && node node_modules/.cache/eval/scripts/eval-parser.js"
+    "eval": "npm run eval:parser && npm run eval:slip",
+    "eval:parser": "tsc scripts/eval-parser.ts --outDir node_modules/.cache/eval --module commonjs --target es2020 --moduleResolution node --skipLibCheck --esModuleInterop && node node_modules/.cache/eval/scripts/eval-parser.js",
+    "eval:slip": "tsc scripts/eval-slip.ts --outDir node_modules/.cache/eval --module commonjs --target es2020 --moduleResolution node --skipLibCheck --esModuleInterop && node node_modules/.cache/eval/scripts/eval-slip.js"
   },
   "dependencies": {
+    "@fontsource/ibm-plex-sans-thai": "^5.3.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-autostart": "^2.5.1",
+    "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-http": "^2.5.7",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-sql": "^2.3.2",
@@ -22,7 +26,6 @@
     "lucide-react": "^0.575.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "@tauri-apps/plugin-dialog": "^2",
     "tauri-plugin-wallpaper": "^3"
   },
   "devDependencies": {

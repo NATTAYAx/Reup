@@ -2,6 +2,7 @@ import Database from "@tauri-apps/plugin-sql";
 import { getDb as getSharedDb } from "./database";
 import { t } from "./i18n";
 import { todayLocal, monthLocal } from "./dateUtil";
+import { getCurrency, formatMoney } from "./money";
 
 // All finance tables are now created inside database.ts initializeSchema,
 // so financeDatabase.ts just needs to call getDb() — no schema init needed here.
@@ -11,6 +12,9 @@ import { todayLocal, monthLocal } from "./dateUtil";
 export interface Expense {
   id: number;
   amount: number;
+  /** ISO 4217. Fixed at the moment of entry and never rewritten — see money.ts
+   *  for why converting a stored row is the wrong feature. */
+  currency: string;
   category: ExpenseCategory;
   note: string;
   date: string;          // YYYY-MM-DD
@@ -21,6 +25,10 @@ export interface Budget {
   id: number;
   category: ExpenseCategory;
   limit_amount: number;
+  /** The unit the limit is expressed in. A budget only means anything against
+   *  spending counted the same way, so a row whose currency is not the one in
+   *  force is carried but not compared — see catRows in FinanceView. */
+  currency: string;
   month: string;         // YYYY-MM
 }
 
@@ -29,6 +37,10 @@ export interface SavingGoal {
   name: string;
   target_amount: number;
   current_amount: number;
+  /** Fixed when the goal was made. Goals are not filtered by it — a target set
+   *  in baht is still a real target after a trip — so both figures are simply
+   *  displayed in the unit they were saved in. */
+  currency: string;
   deadline: string | null;
   emoji: string;
   is_completed: number;
@@ -109,6 +121,31 @@ export function getAllCategoriesCached(): CategoryRow[] {
 
 /** Look one up by key. Falls back to a neutral row so an expense whose category
  *  was hidden or renamed still renders instead of disappearing. */
+/**
+ * A category key that exists, or "other".
+ *
+ * The model is asked for a key from a list and mostly returns one, but nothing
+ * checked. `op.category || "other"` in aiOperations catches an empty string and
+ * nothing else, so "ค่าอาหารหมา" came back as `pet` — a key with no row in
+ * expense_categories — and was written to the ledger as-is.
+ *
+ * The result was money that existed and could not be seen. The expense counted
+ * in the month total, drew its bar on the daily chart and sat in the list with
+ * the 💸 that lookupCategory hands out for keys it does not know, while the
+ * category breakdown beside it read zero for everything, because that panel is
+ * built from the category list and `pet` is not in it.
+ *
+ * Coerced rather than rejected: refusing the write would lose the expense over
+ * a field the person never typed. The note still says what it was.
+ */
+export function knownCategoryKey(key: string): string {
+  if (key && categoryCache.some(c => c.key === key)) return key;
+  if (key && key !== "other") {
+    console.warn(`[finance] unknown category "${key}" — filed under other`);
+  }
+  return "other";
+}
+
 export function lookupCategory(key: string): CategoryRow {
   const found = categoryCache.find(c => c.key === key);
   if (found) return { ...found, label: found.label || resolveLabel(found.key, null) };
@@ -240,11 +277,15 @@ export async function addExpense(expense: {
   /** Bank reference when this came from a scanned slip. Null for manual entry,
    *  and null is what makes the unique index tolerate any number of them. */
   slipRef?: string | null;
+  /** Omitted means the currency in force now. A scanned row passes the currency
+   *  that was printed on the slip, which may not be that one. */
+  currency?: string;
 }): Promise<void> {
   const d = await getDb();
   await d.execute(
-    "INSERT INTO expenses (amount, category, note, date, slip_ref) VALUES (?, ?, ?, ?, ?)",
-    [expense.amount, expense.category, expense.note, expense.date, expense.slipRef ?? null]
+    "INSERT INTO expenses (amount, currency, category, note, date, slip_ref) VALUES (?, ?, ?, ?, ?, ?)",
+    [expense.amount, expense.currency || getCurrency(), knownCategoryKey(expense.category),
+     expense.note, expense.date, expense.slipRef ?? null]
   );
 }
 
@@ -281,14 +322,19 @@ export async function updateExpense(id: number, fields: {
   category?: ExpenseCategory;
   note?: string;
   date?: string;
+  currency?: string;
 }): Promise<void> {
   const d = await getDb();
   const sets: string[] = [];
   const vals: any[] = [];
   if (fields.amount !== undefined) { sets.push("amount = ?"); vals.push(fields.amount); }
-  if (fields.category !== undefined) { sets.push("category = ?"); vals.push(fields.category); }
+  if (fields.category !== undefined) { sets.push("category = ?"); vals.push(knownCategoryKey(fields.category)); }
   if (fields.note !== undefined) { sets.push("note = ?"); vals.push(fields.note); }
   if (fields.date !== undefined) { sets.push("date = ?"); vals.push(fields.date); }
+  // The unit is editable for the same reason the amount is: the usual way a row
+  // ends up in the wrong one is a scan that read the symbol off a receipt from
+  // a trip, and the only alternative was to delete the row and retype it.
+  if (fields.currency !== undefined) { sets.push("currency = ?"); vals.push(fields.currency); }
   if (sets.length === 0) return;
   vals.push(id);
   await d.execute(`UPDATE expenses SET ${sets.join(", ")} WHERE id = ?`, vals);
@@ -304,7 +350,7 @@ export async function aiDeleteExpenseByKeyword(keyword: string): Promise<string>
     throw new Error("ไม่รู้ว่าหมายถึงรายการไหน บอกชื่อรายการด้วยนะ");
   }
   const d = await getDb();
-  const rows = await d.select<{ id: number; amount: number; note: string; category: string }[]>(
+  const rows = await d.select<{ id: number; amount: number; currency: string; note: string; category: string }[]>(
     `SELECT id, amount, note, category FROM expenses
      WHERE deleted = 0 AND (LOWER(note) LIKE ? OR LOWER(category) LIKE ?)
      ORDER BY created_at DESC LIMIT 1`,
@@ -312,7 +358,7 @@ export async function aiDeleteExpenseByKeyword(keyword: string): Promise<string>
   );
   if (rows.length === 0) throw new Error(`ไม่พบรายการที่มี "${keyword}"`);
   await d.execute("UPDATE expenses SET deleted = 1 WHERE id = ?", [rows[0].id]);
-  return `${rows[0].note || rows[0].category} ฿${rows[0].amount}`;
+  return `${rows[0].note || rows[0].category} ${formatMoney(rows[0].amount, rows[0].currency)}`;
 }
 
 /** AI: edit the most recent expense matching a keyword */
@@ -327,7 +373,7 @@ export async function aiEditExpenseByKeyword(keyword: string, fields: {
     throw new Error("ไม่รู้ว่าหมายถึงรายการไหน บอกชื่อรายการด้วยนะ");
   }
   const d = await getDb();
-  const rows = await d.select<{ id: number; amount: number; note: string; category: string }[]>(
+  const rows = await d.select<{ id: number; amount: number; currency: string; note: string; category: string }[]>(
     `SELECT id, amount, note, category FROM expenses
      WHERE deleted = 0 AND (LOWER(note) LIKE ? OR LOWER(category) LIKE ?)
      ORDER BY created_at DESC LIMIT 1`,
@@ -389,24 +435,39 @@ export async function getRecentCategories(): Promise<string[]> {
 export async function getTotalByCategory(month: string): Promise<{ category: string; total: number }[]> {
   const d = await getDb();
   return await d.select<{ category: string; total: number }[]>(
-    "SELECT category, SUM(amount) as total FROM expenses WHERE deleted = 0 AND strftime('%Y-%m', date) = ? GROUP BY category ORDER BY total DESC",
-    [month]
+    "SELECT category, SUM(amount) as total FROM expenses WHERE deleted = 0 AND currency = ? AND strftime('%Y-%m', date) = ? GROUP BY category ORDER BY total DESC",
+    [getCurrency(), month]
   );
 }
 
 export async function getDailyTotals(month: string): Promise<{ date: string; total: number }[]> {
   const d = await getDb();
   return await d.select<{ date: string; total: number }[]>(
-    "SELECT date, SUM(amount) as total FROM expenses WHERE deleted = 0 AND strftime('%Y-%m', date) = ? GROUP BY date ORDER BY date ASC",
-    [month]
+    "SELECT date, SUM(amount) as total FROM expenses WHERE deleted = 0 AND currency = ? AND strftime('%Y-%m', date) = ? GROUP BY date ORDER BY date ASC",
+    [getCurrency(), month]
   );
 }
 
+/**
+ * WHY EVERY TOTAL BELOW FILTERS BY CURRENCY.
+ *
+ * SUM(amount) over rows in different units produces a number that is true of
+ * nothing: one ฿120 lunch plus one $10,000 transfer is not 10,120 of anything.
+ * SQLite will do the addition without complaint, which is exactly the problem —
+ * no error, no warning, a plausible figure at the top of the screen.
+ *
+ * Filtering rather than grouping is deliberate. A grouped total reads well in
+ * the one headline figure and falls apart everywhere else it would have to go:
+ * a budget is set in one currency, a progress bar cannot be two lengths, and a
+ * calendar cell has room for one number. So the totals answer a question that
+ * is precisely true — how much in the currency you are living in — and the
+ * screen says separately when rows were left out. See otherCurrencyTotals.
+ */
 export async function getMonthTotal(month: string): Promise<number> {
   const d = await getDb();
   const rows = await d.select<{ total: number }[]>(
-    "SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE deleted = 0 AND strftime('%Y-%m', date) = ?",
-    [month]
+    "SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE deleted = 0 AND currency = ? AND strftime('%Y-%m', date) = ?",
+    [getCurrency(), month]
   );
   return rows[0]?.total ?? 0;
 }
@@ -416,19 +477,27 @@ export async function getTodayTotal(todayOverride?: string): Promise<number> {
   // Use caller-supplied date (Bangkok local) or derive it here
   const today = todayOverride ?? todayLocal();
   const rows = await d.select<{ total: number }[]>(
-    "SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE deleted = 0 AND date = ?",
-    [today]
+    "SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE deleted = 0 AND currency = ? AND date = ?",
+    [getCurrency(), today]
   );
   return rows[0]?.total ?? 0;
 }
 
 // ─── Budgets ──────────────────────────────────────────────────────────────────
 
+/**
+ * One budget per category per month, in whatever unit it was last set in.
+ *
+ * The unit is not asked for: a budget is a rule about the money you live in, so
+ * it is recorded in the currency in force and re-recorded if that ever changes.
+ * What matters is that it is WRITTEN DOWN, so that a limit set in baht cannot
+ * later be read as a limit in dollars.
+ */
 export async function setBudget(category: ExpenseCategory, limit: number, month: string): Promise<void> {
   const d = await getDb();
   await d.execute(
-    "INSERT INTO budgets (category, limit_amount, month) VALUES (?, ?, ?) ON CONFLICT(category, month) DO UPDATE SET limit_amount = excluded.limit_amount",
-    [category, limit, month]
+    "INSERT INTO budgets (category, limit_amount, currency, month) VALUES (?, ?, ?, ?) ON CONFLICT(category, month) DO UPDATE SET limit_amount = excluded.limit_amount, currency = excluded.currency",
+    [category, limit, getCurrency(), month]
   );
 }
 
@@ -450,8 +519,8 @@ export async function createGoal(goal: {
 }): Promise<void> {
   const d = await getDb();
   await d.execute(
-    "INSERT INTO saving_goals (name, target_amount, deadline, emoji) VALUES (?, ?, ?, ?)",
-    [goal.name, goal.target_amount, goal.deadline ?? null, goal.emoji ?? "🎯"]
+    "INSERT INTO saving_goals (name, target_amount, currency, deadline, emoji) VALUES (?, ?, ?, ?, ?)",
+    [goal.name, goal.target_amount, getCurrency(), goal.deadline ?? null, goal.emoji ?? "🎯"]
   );
 }
 
@@ -484,11 +553,28 @@ export async function aiLogExpense(
   note: string,
   /** Omitted means today, which is what almost every entry is. */
   date?: string,
+  currency?: string,
 ): Promise<void> {
-  await addExpense({ amount, category, note, date: date || todayLocal() });
+  await addExpense({ amount, category, note, date: date || todayLocal(), currency });
 }
 
 /** Get a spending summary string for the AI to read */
+/**
+ * What this month holds in currencies OTHER than the one in force.
+ *
+ * The totals above are true and incomplete, and an incomplete total that does
+ * not admit it is the same failure as a wrong one. Empty in the ordinary case,
+ * which is most months for most people, so the line it feeds renders nothing.
+ */
+export async function otherCurrencyTotals(month: string): Promise<Map<string, number>> {
+  const d = await getDb();
+  const rows = await d.select<{ currency: string; total: number }[]>(
+    "SELECT currency, SUM(amount) as total FROM expenses WHERE deleted = 0 AND currency != ? AND strftime('%Y-%m', date) = ? GROUP BY currency",
+    [getCurrency(), month],
+  );
+  return new Map(rows.map(r => [r.currency, r.total]));
+}
+
 export async function getSpendingSummary(): Promise<string> {
   const month = monthLocal();
   const [monthTotal, todayTotal, catTotals] = await Promise.all([
@@ -496,6 +582,6 @@ export async function getSpendingSummary(): Promise<string> {
     getTodayTotal(),
     getTotalByCategory(month),
   ]);
-  const catStr = catTotals.slice(0, 5).map(c => `${c.category}: ฿${c.total.toLocaleString()}`).join(", ");
-  return `วันนี้: ฿${todayTotal.toLocaleString()} | เดือนนี้: ฿${monthTotal.toLocaleString()} | หมวด: ${catStr}`;
+  const catStr = catTotals.slice(0, 5).map(c => `${c.category}: ${formatMoney(c.total)}`).join(", ");
+  return `วันนี้: ${formatMoney(todayTotal)} | เดือนนี้: ${formatMoney(monthTotal)} | หมวด: ${catStr}`;
 }

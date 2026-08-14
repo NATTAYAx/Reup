@@ -1,4 +1,4 @@
-# game-scheduler
+# Reup
 
 A desktop app that answers one question: what resets soon?
 
@@ -34,8 +34,16 @@ Countdowns tick live. Pause a task and it goes quiet without being deleted.
 Delete one and it sits in the trash for thirty days.
 
 There is a money side too — log spending in one line of plain Thai, or point it
-at a screenshot of a bank transfer slip and let it read the amount. The image
-never gets stored.
+at a picture and let it read the amount. That picture can be a bank transfer
+slip, a shop receipt, a bill, or a screenshot of a wallet history with eight
+rows on it, in which case you get eight entries to review rather than one guess.
+The image itself is never stored.
+
+Each entry records the currency it was made in and keeps it. Changing the
+currency in settings changes what new entries are counted in and touches nothing
+already saved, because a stored row converted at today's rate is a different
+number every month, and a record that changes its answer depending on the day
+you read it is not a record.
 
 ![Finance view with a month of entries, daily totals on the calendar and a running balance](docs/5-finance.png)
 
@@ -125,24 +133,54 @@ explorer can only freeze the child. That solved most of it. Not all of it.
 **Roughly 53 places still say "Gemini"** when they mean whichever AI provider is
 configured. Cosmetic, tedious, unfixed.
 
+**The slip reader is only as good as the model behind it.** The reading is done
+by a vision model, so it is not tied to any one country's banks — but the layer
+that checks what comes back only guarantees one thing, which is that it never
+invents a number. Anything it cannot verify comes back empty and lands in the
+review list for you to type. Amounts arrive already converted, and a grouped
+string like "1.234,56" is refused rather than guessed at, because the comma is a
+decimal point in about half the world and a thousands separator in the other
+half. Totals still assume everything shares one currency; individual entries do
+not.
+
+**Command parsing is Thai and English only.** The parser is a hand-written one
+that runs on the device. Anything it does not recognise goes to the model, so
+other languages work when a key is configured and not otherwise.
+
 **Windows only.** Nothing in the code is deliberately Windows-specific except
 the wallpaper, but nothing has been tested anywhere else either.
 
-https://github.com/user-attachments/assets/8aa75211-7716-4e84-ab07-39d5a2d5a89f
-
-
+[Watch the live wallpaper running (mp4, 6.9 MB)](docs/7-live-wallpaper.mp4)
 ---
 
 ## Tests
 
-`pnpm eval` runs the command parser against a corpus of sentences and reports
-one number that matters: how many it answered confidently and wrongly. That
-count must be zero. A parser that hands a sentence off to the model when it is
-unsure is fine. A parser that is certain and wrong never appears in a log,
-never throws, and quietly does the wrong thing.
+`pnpm eval` runs two suites, neither of which touches the network.
 
-The corpus is deliberately stacked with hard cases, so the on-device hit rate it
-reports is much lower than the real one.
+The first is the command parser, against a corpus of sentences. It reports one
+number that matters: how many it answered confidently and wrongly. That count
+must be zero. A parser that hands a sentence off to the model when it is unsure
+is fine. A parser that is certain and wrong never appears in a log, never
+throws, and quietly does the wrong thing.
+
+It used to compare one field — the verb — and everything passed while
+"add task gym every monday" was being saved as a ONE-OFF dated to the next
+Monday: a recurring task that fires once and never comes back, stored at 0.95
+confidence with a green tick. So it now compares the whole answer, and carries
+seven invariants that hold across every case at once, which is where the
+mistakes that are spread thinly over all of them show up. A time left sitting
+inside a task's own name looks cosmetic one sentence at a time and turns out to
+be one missing line.
+
+The second checks the slip reader's normalisers against three dozen real-world
+shapes: Swiss apostrophe grouping, Indian lakh grouping, Arabic-Indic digits,
+Buddhist and Republic-of-China years, two-digit years in both the 20xx and 25xx
+readings. Images and a model are not needed for that, because the failures were
+never in the reading. They were in the code afterwards, which assumed every
+receipt in the world had been printed in Thailand.
+
+Both corpora are deliberately stacked with hard cases, so the on-device hit rate
+they report is much lower than the real one.
 
 ---
 

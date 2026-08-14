@@ -43,6 +43,22 @@ export interface ProviderRequest {
   apiKey: string;
   /** Only meaningful for OpenAI-compatible endpoints. */
   baseUrl?: string;
+  /**
+   * Gemini 2.5 only. 0 turns reasoning off for this one request.
+   *
+   * It is on by default with a budget the model picks for itself, which is
+   * right for a question and wrong for a form. Reading eight fields off a
+   * receipt is not a reasoning problem, and letting it reason about one anyway
+   * costs two things: latency that varies from a few seconds to most of a
+   * minute for the same image — the scanner timed out twice and then worked on
+   * the third try with nothing changed in between — and output budget, because
+   * thinking tokens are billed against maxOutputTokens, so a model that thinks
+   * hard can leave too little room to finish the JSON it was asked for.
+   *
+   * The other two providers need no equivalent: neither gpt-4o-mini nor Haiku
+   * reasons unless explicitly asked to.
+   */
+  thinkingBudget?: number;
 }
 
 export interface ProviderReply {
@@ -62,6 +78,32 @@ export interface Provider {
   configurableBaseUrl: boolean;
   defaultBaseUrl?: string;
   send: (req: ProviderRequest, signal: AbortSignal) => Promise<ProviderReply>;
+}
+
+/**
+ * The HTTP status, carried on the error so a caller can tell apart the failures
+ * worth trying again from the ones that will fail identically forever.
+ *
+ * "This model is currently experiencing high demand" arrives as a 503 and is
+ * over in a second or two. A bad key arrives as a 401 and is not. Both used to
+ * come out of here as the same opaque `AI_ERROR: <text>` string, so the only
+ * way to tell them apart was to read the English sentence inside it.
+ */
+function attachStatus(e: Error, status: number): Error {
+  (e as any).status = status;
+  return e;
+}
+
+export function errorStatus(e: unknown): number | null {
+  const v = (e as any)?.status;
+  return typeof v === "number" ? v : null;
+}
+
+/** 429 is rate limiting, 5xx is the provider having a bad minute. Neither says
+ *  anything about the request itself, so both are worth one more go. */
+export function isTransient(e: unknown): boolean {
+  const s = errorStatus(e);
+  return s === 429 || s === 408 || (s !== null && s >= 500 && s < 600);
 }
 
 async function readError(res: Response): Promise<string> {
@@ -110,11 +152,14 @@ const gemini: Provider = {
           temperature: 0.2,
           maxOutputTokens: req.maxOutputTokens,
           responseMimeType: "application/json",
+          ...(req.thinkingBudget !== undefined
+            ? { thinkingConfig: { thinkingBudget: req.thinkingBudget } }
+            : {}),
         },
       }),
     });
 
-    if (!res.ok) throw new Error(`AI_ERROR: ${await readError(res)}`);
+    if (!res.ok) throw attachStatus(new Error(`AI_ERROR: ${await readError(res)}`), res.status);
     const data = await res.json();
     const um = data?.usageMetadata;
     return {
@@ -175,7 +220,7 @@ const openai: Provider = {
       }),
     });
 
-    if (!res.ok) throw new Error(`AI_ERROR: ${await readError(res)}`);
+    if (!res.ok) throw attachStatus(new Error(`AI_ERROR: ${await readError(res)}`), res.status);
     const data = await res.json();
     const u = data?.usage;
     return {
@@ -232,7 +277,7 @@ const anthropic: Provider = {
       }),
     });
 
-    if (!res.ok) throw new Error(`AI_ERROR: ${await readError(res)}`);
+    if (!res.ok) throw attachStatus(new Error(`AI_ERROR: ${await readError(res)}`), res.status);
     const data = await res.json();
     const u = data?.usage;
     const text = Array.isArray(data?.content)
