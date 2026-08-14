@@ -361,6 +361,33 @@ const translations = {
   "settings.switchEN":      { en: "🇬🇧 Switch",            th: "🇬🇧 เปลี่ยน" },
   "ai.needsOnline":  { en: "I understood, but that one needs the connection — check the API key or try again when you're online.",
                        th: "เข้าใจแล้ว แต่อันนี้ต้องต่อเน็ต ลองเช็คคีย์ API หรือลองใหม่ตอนออนไลน์" },
+  "ai.whichRow":     { en: "I do not know which entry you mean. Name it, like \"the internet bill\".",
+                       th: "ไม่รู้ว่าหมายถึงรายการไหน บอกชื่อรายการด้วยนะ" },
+  "ai.rowNotFound":  { en: "Nothing here matches \"{k}\"", th: "ไม่พบรายการที่มี \"{k}\"" },
+  "ai.changeToWhat": { en: "I do not know what to change \"{k}\" to", th: "ไม่รู้ว่าจะเปลี่ยน \"{k}\" เป็นอะไร" },
+  "ai.spendSummary": { en: "Today {d} | This month {m} | By category: {c}",
+                       th: "วันนี้ {d} | เดือนนี้ {m} | หมวด: {c}" },
+  // Edit-task screen. Same story: Thai welded into the component.
+  "edit.loadSlow":   { en: "Took too long to load — close it and open it again",
+                       th: "โหลดช้าเกินไป ลองปิดแล้วเปิดใหม่" },
+  "edit.notFound":   { en: "No task #{id}",        th: "ไม่พบงาน #{id}" },
+  "edit.loadFailed": { en: "Could not load",       th: "โหลดไม่สำเร็จ" },
+  "edit.retry":      { en: "Try again",            th: "ลองใหม่" },
+  "edit.loading":    { en: "Loading...",           th: "กำลังโหลด..." },
+  "edit.saveFailed": { en: "Could not save",       th: "บันทึกไม่สำเร็จ" },
+  "edit.noReason":   { en: "No reason given — check the console",
+                       th: "ไม่ทราบสาเหตุ ดูใน console" },
+  // Wallpaper section of settings, which was translating itself inline with
+  // getLang() ternaries — a second translation system living beside this one.
+  "wp.title":        { en: "Live Wallpaper",       th: "วอลเปเปอร์เคลื่อนไหว" },
+  "wp.enable":       { en: "Enable wallpaper",     th: "เปิดวอลเปเปอร์" },
+  "wp.change":       { en: "Change video",         th: "เปลี่ยนวิดีโอ" },
+  "wp.choose":       { en: "Choose video",         th: "เลือกวิดีโอ" },
+  "wp.drop":         { en: "or drag a file here",  th: "หรือลากไฟล์มาวางที่นี่" },
+  "wp.notVideo":     { en: "Not a video file (mp4/webm/mkv/mov)",
+                       th: "ไม่ใช่ไฟล์วิดีโอ (mp4/webm/mkv/mov)" },
+  "wp.note":         { en: "mp4 and webm. Pauses itself while a fullscreen app is in front, so it does not compete with a game.",
+                       th: "รองรับ mp4, webm หยุดเล่นเองตอนเปิดแอปเต็มจอ เพื่อไม่แย่งเครื่องตอนเล่นเกม" },
   "ai.notUnderstood":       { en: "I didn't follow that one. Try naming the thing — \"change the internet bill to 699\".",
                               th: "อันนี้ยังไม่เข้าใจ ลองบอกชื่อรายการด้วยนะ เช่น \"เปลี่ยนค่าเน็ตเป็น 699\"" },
 
@@ -460,6 +487,43 @@ const translations = {
 
   // UnifiedAIChat strings
   "ai.unifiedGreeting":     { en: "Hello! 👋 Type a task or expense",  th: "สวัสดี! 👋 พิมพ์งานหรือค่าใช้จ่ายได้เลย" },
+  // ── The AI panel ───────────────────────────────────────────────────────────
+  // Every one of these used to be a Thai string sitting in the component with
+  // the word "Gemini" welded into it, which was wrong twice over: an English
+  // reader got Thai, and everyone got told Gemini answered even when the
+  // request went to OpenAI or Anthropic. The provider arrives as {p} now, from
+  // PROVIDERS[getProviderId()].label, so the sentence stops guessing.
+  // "Add a {p} key" produces "a OpenAI" for one of the three, so the article is
+  // gone rather than special-cased. An English sentence that has to agree with
+  // a value it does not know is a sentence to rewrite, not to patch.
+  "ai.addKeyHint":     { en: "Add an API key for {p} so it understands you better (free tier available)",
+                         th: "เพิ่ม API key ของ {p} เพื่อให้เข้าใจภาษาไทยได้ดีขึ้น (มีแบบใช้ฟรี)" },
+  "ai.keyPanelTitle":  { en: "{p} API key",              th: "API key ของ {p}" },
+  "ai.keyGetOne":      { en: "get one here",             th: "ขอคีย์ที่นี่" },
+  "ai.keyLocalOnly":   { en: "Kept in this machine's localStorage. Nothing else sees it.",
+                         th: "เก็บไว้ใน localStorage ของเครื่องนี้เท่านั้น ไม่ส่งไปที่อื่น" },
+  "ai.keySaved":       { en: "✅ {p} key saved. Type anything to try it.",
+                         th: "✅ บันทึกคีย์ของ {p} แล้ว ลองพิมพ์อะไรก็ได้" },
+  "ai.keyCleared":     { en: "🔑 Key removed. Running offline.",
+                         th: "🔑 ลบคีย์แล้ว ใช้โหมดออฟไลน์" },
+  "ai.thinkingWith":   { en: "{p} is thinking...",       th: "{p} กำลังคิด..." },
+  "ai.offline":        { en: "Offline",                  th: "ออฟไลน์" },
+  // The per-answer badge. This is the one that matters most for honesty,
+  // because it is a claim about a specific message: this reply came from the
+  // network, or it did not. It said Gemini on every networked reply regardless
+  // of who actually produced it.
+  "ai.answeredBy":     { en: "✦ {p}",                    th: "✦ {p}" },
+  "ai.answeredLocal":  { en: "⬡ on device",              th: "⬡ ในเครื่อง" },
+  "ai.setKeyTitle":    { en: "Set {p} API key",          th: "ตั้งค่า API key ของ {p}" },
+  "ai.placeholderWith":{ en: "Type in any language... ({p})", th: "พิมพ์ไทยหรืออังกฤษได้เลย... ({p})" },
+  "ai.incomeSaved":    { en: "✅ Income of {a} saved (month so far {m})",
+                         th: "✅ บันทึกรายรับ {a} แล้ว (เดือนนี้รวม {m})" },
+  "ai.failed":         { en: "Failed",                   th: "ไม่สำเร็จ" },
+  // Example chips. Deliberately NOT a translation of each other — the point of
+  // an example is to be something you would actually type, and "Grab" is not
+  // what that is called everywhere.
+  "ai.quickFinance":   { en: "lunch 8 dollars|coffee 3.50|how much so far?|this month",
+                         th: "กินข้าว 80 บาท|ค่า Grab 45 บาท|ใช้ไปเท่าไรแล้ว?|สรุปเดือนนี้" },
   "ai.unifiedPlaceholder":  { en: "Tasks / Expenses / Ask anything...", th: "งาน / ค่าใช้จ่าย / ถามอะไรก็ได้..." },
   "ai.errorRetry":          { en: "❌ Something went wrong, please try again", th: "❌ เกิดข้อผิดพลาด ลองใหม่อีกครั้ง" },
   "ai.saved":               { en: "✅ Saved!",                th: "✅ บันทึกแล้ว!" },

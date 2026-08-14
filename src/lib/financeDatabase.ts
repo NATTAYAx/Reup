@@ -347,7 +347,7 @@ export async function aiDeleteExpenseByKeyword(keyword: string): Promise<string>
     // string straight out of model output and used to call .toLowerCase() on
     // it unconditionally, so a null arrived here as a TypeError rather than as
     // a sentence anybody could act on.
-    throw new Error("ไม่รู้ว่าหมายถึงรายการไหน บอกชื่อรายการด้วยนะ");
+    throw new Error(t("ai.whichRow"));
   }
   const d = await getDb();
   const rows = await d.select<{ id: number; amount: number; currency: string; note: string; category: string }[]>(
@@ -356,7 +356,7 @@ export async function aiDeleteExpenseByKeyword(keyword: string): Promise<string>
      ORDER BY created_at DESC LIMIT 1`,
     [`%${keyword.toLowerCase()}%`, `%${keyword.toLowerCase()}%`]
   );
-  if (rows.length === 0) throw new Error(`ไม่พบรายการที่มี "${keyword}"`);
+  if (rows.length === 0) throw new Error(t("ai.rowNotFound", { k: keyword }));
   await d.execute("UPDATE expenses SET deleted = 1 WHERE id = ?", [rows[0].id]);
   return `${rows[0].note || rows[0].category} ${formatMoney(rows[0].amount, rows[0].currency)}`;
 }
@@ -370,7 +370,7 @@ export async function aiEditExpenseByKeyword(keyword: string, fields: {
     // string straight out of model output and used to call .toLowerCase() on
     // it unconditionally, so a null arrived here as a TypeError rather than as
     // a sentence anybody could act on.
-    throw new Error("ไม่รู้ว่าหมายถึงรายการไหน บอกชื่อรายการด้วยนะ");
+    throw new Error(t("ai.whichRow"));
   }
   const d = await getDb();
   const rows = await d.select<{ id: number; amount: number; currency: string; note: string; category: string }[]>(
@@ -379,14 +379,14 @@ export async function aiEditExpenseByKeyword(keyword: string, fields: {
      ORDER BY created_at DESC LIMIT 1`,
     [`%${keyword.toLowerCase()}%`, `%${keyword.toLowerCase()}%`]
   );
-  if (rows.length === 0) throw new Error(`ไม่พบรายการที่มี "${keyword}"`);
+  if (rows.length === 0) throw new Error(t("ai.rowNotFound", { k: keyword }));
 
   // updateExpense builds its SET clause from whatever is defined and returns
   // quietly when that comes to nothing. Harmless there, wrong here: the caller
   // announces "saved" as soon as this resolves, so an edit with no field to
   // change reported success and altered nothing. Say it plainly instead.
   const hasChange = Object.values(fields).some(v => v !== undefined);
-  if (!hasChange) throw new Error(`ไม่รู้ว่าจะเปลี่ยน "${keyword}" เป็นอะไร`);
+  if (!hasChange) throw new Error(t("ai.changeToWhat", { k: keyword }));
 
   await updateExpense(rows[0].id, fields);
   return rows[0].note || rows[0].category;
@@ -583,5 +583,7 @@ export async function getSpendingSummary(): Promise<string> {
     getTotalByCategory(month),
   ]);
   const catStr = catTotals.slice(0, 5).map(c => `${c.category}: ${formatMoney(c.total)}`).join(", ");
-  return `วันนี้: ${formatMoney(todayTotal)} | เดือนนี้: ${formatMoney(monthTotal)} | หมวด: ${catStr}`;
+  return t("ai.spendSummary", {
+    d: formatMoney(todayTotal), m: formatMoney(monthTotal), c: catStr,
+  });
 }

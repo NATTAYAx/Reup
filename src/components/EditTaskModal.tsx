@@ -52,7 +52,7 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
     setForm(null);
     let cancelled = false;
     const timeoutId = setTimeout(() => {
-      if (!cancelled) { cancelled = true; setLoadError("โหลดช้าเกินไป — ลองปิดแล้วเปิดใหม่"); }
+      if (!cancelled) { cancelled = true; setLoadError(t("edit.loadSlow")); }
     }, 8000);
 
     getTaskById(taskId)
@@ -60,7 +60,7 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
         clearTimeout(timeoutId);
         if (cancelled) return;
         if (t) setForm({ ...t });
-        else setLoadError(`ไม่พบงาน #${taskId}`);
+        else setLoadError(t("edit.notFound", { id: String(taskId) }));
       })
       .catch(err => {
         clearTimeout(timeoutId);
@@ -129,7 +129,7 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
       setTimeout(() => onSaved(), 80);
     } catch (e: any) {
       console.error("[EditTask] FAILED:", e?.message);
-      setSaveError(String(e?.message ?? e) || "ไม่ทราบสาเหตุ — ดู console");
+      setSaveError(String(e?.message ?? e) || t("edit.noReason"));
       setSaving(false);
       savingRef.current = false;
     }
@@ -158,7 +158,7 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
 
         {loadError ? (
           <div className="text-center py-12">
-            <p className="text-red-400 text-sm mb-2">โหลดไม่สำเร็จ</p>
+            <p className="text-red-400 text-sm mb-2">{t("edit.loadFailed")}</p>
             <p className="text-white/30 text-xs">{loadError}</p>
             <button
               onClick={() => {
@@ -166,10 +166,10 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
                 getTaskById(taskId!).then(t => t && setForm({...t})).catch(e => setLoadError(String(e?.message ?? e)));
               }}
               className="mt-3 px-4 py-1.5 bg-white/10 rounded-lg text-white/60 text-xs hover:bg-white/20 transition-all"
-            >ลองใหม่</button>
+            >{t("edit.retry")}</button>
           </div>
         ) : !form ? (
-          <div className="text-center py-12 text-white/30 text-sm">กำลังโหลด...</div>
+          <div className="text-center py-12 text-white/30 text-sm">{t("edit.loading")}</div>
         ) : (
           <div className="space-y-3">
             <input value={form.name ?? ""} onChange={e => set("name", e.target.value)} placeholder={t("editTask.namePH")}
@@ -341,7 +341,7 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
               <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/30 rounded-xl px-3 py-2.5">
                 <AlertCircle size={14} className="text-red-400 flex-shrink-0 mt-0.5" />
                 <div>
-                  <p className="text-red-400 text-xs font-semibold">บันทึกไม่สำเร็จ</p>
+                  <p className="text-red-400 text-xs font-semibold">{t("edit.saveFailed")}</p>
                   <p className="text-red-300/70 text-xs mt-0.5 break-all">{saveError}</p>
                 </div>
               </div>

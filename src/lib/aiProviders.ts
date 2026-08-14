@@ -69,7 +69,16 @@ export interface ProviderReply {
 
 export interface Provider {
   id: ProviderId;
+  /** The full name, for settings, where there is room to be precise. */
   label: string;
+  /**
+   * The name for a badge nine pixels tall.
+   *
+   * "OpenAI-compatible" is the right label in settings, because that adapter
+   * also reaches OpenRouter, Groq, Together and Ollama. It is the wrong thing
+   * to print beside every single chat message.
+   */
+  shortLabel: string;
   defaultModel: string;
   /** Where the user goes to get a key, shown next to the key field. */
   keyUrl: string;
@@ -120,6 +129,7 @@ async function readError(res: Response): Promise<string> {
 const gemini: Provider = {
   id: "gemini",
   label: "Google Gemini",
+  shortLabel: "Gemini",
   defaultModel: "gemini-2.5-flash",
   keyUrl: "https://aistudio.google.com/apikey",
   configurableBaseUrl: false,
@@ -179,6 +189,7 @@ const gemini: Provider = {
 const openai: Provider = {
   id: "openai",
   label: "OpenAI-compatible",
+  shortLabel: "OpenAI",
   defaultModel: "gpt-4o-mini",
   keyUrl: "https://platform.openai.com/api-keys",
   configurableBaseUrl: true,
@@ -236,6 +247,7 @@ const openai: Provider = {
 const anthropic: Provider = {
   id: "anthropic",
   label: "Anthropic Claude",
+  shortLabel: "Claude",
   defaultModel: "claude-haiku-4-5-20251001",
   keyUrl: "https://console.anthropic.com/settings/keys",
   configurableBaseUrl: false,

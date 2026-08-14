@@ -366,7 +366,7 @@ export default function SettingsModal({ open, onClose }: Props) {
           if (event.payload?.type !== "drop") return;
           const paths: string[] = event.payload.paths || [];
           const vid = paths.find(p => /\.(mp4|webm|mkv|mov)$/i.test(p));
-          if (!vid) { setWpError("ไม่ใช่ไฟล์วิดีโอ (mp4/webm/mkv/mov)"); return; }
+          if (!vid) { setWpError(t("wp.notVideo")); return; }
           setWpPath(vid);
           setWpError("");
           setSetting("wallpaper_path", vid).catch(() => {});
@@ -1719,10 +1719,15 @@ Rules:
                     )}
                   </div>
 
-                  {/* ── Live Wallpaper ── */}
+                  {/* ── Live Wallpaper ──
+                      This block used to translate itself with `getLang() === "th" ? ... : ...`
+                      inline at six points, which is a second translation system
+                      running beside i18n: same job, different mechanism, and no
+                      chance of the two staying in step. Strings moved to i18n
+                      under wp.* — nothing about how it looks changed. */}
                   <div className="pt-2 border-t border-white/10">
                     <p className="text-white/40 text-xs font-semibold uppercase tracking-widest mb-2 px-1">
-                      {getLang() === "th" ? "วอลเปเปอร์เคลื่อนไหว" : "Live Wallpaper"}
+                      {t("wp.title")}
                     </p>
                     <div className="p-3 rounded-2xl border border-white/10 bg-white/5 space-y-3">
                       {/* Enable toggle — matches other settings switches */}
@@ -1730,7 +1735,7 @@ Rules:
                         <div className="flex items-center gap-2">
                           <Image size={15} className="text-white/50" />
                           <span className="text-white/80 text-sm font-medium">
-                            {getLang() === "th" ? "เปิดวอลเปเปอร์" : "Enable wallpaper"}
+                            {t("wp.enable")}
                           </span>
                         </div>
                         <button
@@ -1751,12 +1756,10 @@ Rules:
                       >
                         <Upload size={16} />
                         <span>
-                          {wpPath
-                            ? getLang() === "th" ? "เปลี่ยนวิดีโอ" : "Change video"
-                            : getLang() === "th" ? "เลือกวิดีโอ" : "Choose video"}
+                          {wpPath ? t("wp.change") : t("wp.choose")}
                         </span>
                         <span className="text-white/30 text-[10px]">
-                          {getLang() === "th" ? "หรือลากไฟล์มาวางที่นี่" : "or drag a file here"}
+                          {t("wp.drop")}
                         </span>
                       </button>
 
@@ -1811,9 +1814,7 @@ Rules:
                       )}
 
                       <p className="text-white/25 text-[10px] px-1 leading-relaxed">
-                        {getLang() === "th"
-                          ? "รองรับ mp4, webm หยุดเล่นเองตอนเปิดแอปเต็มจอ เพื่อไม่แย่งเครื่องตอนเล่นเกม"
-                          : "Supports mp4, webm. Auto-pauses during fullscreen apps to save resources while gaming."}
+                        {t("wp.note")}
                       </p>
                     </div>
                   </div>

@@ -23,10 +23,15 @@ import {
   loadCategories, getCategoryList, type CategoryRow, ExpenseCategory,
 } from "../lib/financeDatabase";
 import {
-  processMessage, getGeminiKey, setGeminiKey, isOnline,
+  processMessage, isOnline,
   GeminiTaskResponse, GeminiFinanceResponse,
   type ContextKind, type TokenUsage,
 } from "../lib/geminiService";
+// The provider is read here rather than assumed. Every label in this panel used
+// to say Gemini, including when the request had gone to OpenAI or Anthropic —
+// the key storage and the routing were already per-provider, only the words on
+// screen were not.
+import { PROVIDERS, getProviderId, getApiKey, setApiKey } from "../lib/aiProviders";
 import { getUsageToday, type DailyUsage } from "../lib/aiProviders";
 import { learnPreset } from "../lib/aiMemory";
 import {
@@ -130,10 +135,10 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
       const STALE_MS = 30 * 60 * 1000;
       if (Date.now() - lastActivity.current > STALE_MS) {
         clearHistory();
-        const key = getGeminiKey();
+        const key = getApiKey();
         const greeting = key
           ? t("ai.unifiedGreeting")
-          : `${t("ai.unifiedGreeting")}\n\n💡 เพิ่ม Gemini API key เพื่อให้ AI เข้าใจภาษาไทยได้ดีขึ้น (ฟรี)`;
+          : `${t("ai.unifiedGreeting")}\n\n💡 ${t("ai.addKeyHint", { p: PROVIDERS[getProviderId()].label })}`;
         setMessages([{ role: "ai", text: greeting }]);
       }
       setPendingTask(null);
@@ -141,7 +146,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
       setPendingOps(null);
       setHabits(getTopHabits(3));
       setShowKeyInput(false);
-      setKeyDraft(getGeminiKey());
+      setKeyDraft(getApiKey());
       setTimeout(() => inputRef.current?.focus(), 100);
       // Check connectivity
       isOnline().then(setOnline).catch(() => setOnline(false));
@@ -418,7 +423,11 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
             date: today,
           });
           const monthIncome = await getMonthIncome(today.slice(0, 7));
-          addMsg({ role: "ai", text: `✅ บันทึกรายรับ ${fmt(fr.incomeAmount)} แล้ว (เดือนนี้รวม ${fmt(monthIncome)})`, domain: "finance", source });
+          addMsg({
+            role: "ai",
+            text: t("ai.incomeSaved", { a: fmt(fr.incomeAmount), m: fmt(monthIncome) }),
+            domain: "finance", source,
+          });
           onFinanceChanged?.();
           setLoading(false);
           return;
@@ -564,7 +573,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
       setPendingFinance(null);
       addMsg({ role: "ai", text: t("ai.saved"), domain: "finance" });
     } catch (e: any) {
-      addMsg({ role: "ai", text: `❌ ${e.message ?? "ไม่สำเร็จ"}` });
+      addMsg({ role: "ai", text: `❌ ${e.message ?? t("ai.failed")}` });
       setPendingFinance(null);
     }
   };
@@ -599,7 +608,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
       addMsg({ role: "ai", text: t("ai.saved"), domain: "task" });
       onTaskAdded();
     } catch (e: any) {
-      addMsg({ role: "ai", text: `❌ ${e.message ?? "ไม่สำเร็จ"}` });
+      addMsg({ role: "ai", text: `❌ ${e.message ?? t("ai.failed")}` });
       setPendingTask(null);
     } finally {
       isConfirming.current = false;
@@ -614,19 +623,26 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
   };
 
   const saveKey = () => {
-    setGeminiKey(keyDraft);
+    setApiKey(keyDraft);
     setShowKeyInput(false);
     addMsg({ role: "ai", text: keyDraft
-      ? "✅ บันทึก Gemini API key แล้ว! ลองพิมพ์อะไรก็ได้"
-      : "🔑 ลบ API key แล้ว (ใช้โหมด offline)"
+      ? t("ai.keySaved", { p: PROVIDERS[getProviderId()].label })
+      : t("ai.keyCleared")
     });
   };
+
+  // One place decides what this panel calls the thing answering it. Read on
+  // every render rather than captured once, so switching provider in settings
+  // is reflected without reopening the chat.
+  const providerName = PROVIDERS[getProviderId()].label;
+  const providerShort = PROVIDERS[getProviderId()].shortLabel;
+  const providerKeyUrl = PROVIDERS[getProviderId()].keyUrl;
 
   const hasPending = !!(pendingTask || pendingFinance || pendingOps);
   const pendingDomain = pendingFinance ? "finance" : pendingTask ? "task" : null;
   const domainCfg = pendingDomain ? DOMAIN_BADGE[pendingDomain] : DOMAIN_BADGE.task;
 
-  const FINANCE_QUICK = ["กินข้าว 80 บาท", "ค่า Grab 45 บาท", "ใช้ไปเท่าไรแล้ว?", "สรุปเดือนนี้"];
+  const FINANCE_QUICK = t("ai.quickFinance").split("|");
 
   // These are teaching examples: they exist to show that a sentence typed in
   // plain language is enough. Once someone has actually sent a message they
@@ -645,7 +661,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
 
   if (!open) return null;
 
-  const hasKey = !!getGeminiKey();
+  const hasKey = !!getApiKey();
 
   return (
     <div
@@ -673,7 +689,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
                 {/* Online/offline badge */}
                 <span className={`flex items-center gap-1 ${online && hasKey ? "text-green-400" : "text-white/25"}`}>
                   {online && hasKey ? <Wifi size={9} /> : <WifiOff size={9} />}
-                  {online && hasKey ? "Gemini" : "Offline"}
+                  {online && hasKey ? providerShort : t("ai.offline")}
                 </span>
                 {/* What the last request actually cost, straight from Gemini's
                     own usageMetadata. Nothing shows until a request is really
@@ -707,7 +723,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
             {/* API key button */}
             <button
               onClick={() => setShowKeyInput(v => !v)}
-              title="Set Gemini API key"
+              title={t("ai.setKeyTitle", { p: providerName })}
               className={`p-1.5 rounded-lg transition-colors ${hasKey ? "text-green-400/60 hover:text-green-400" : "text-white/20 hover:text-yellow-400"}`}
             >
               <Key size={14} />
@@ -722,13 +738,17 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
         {showKeyInput && (
           <div className="px-4 py-3 bg-gray-900/80 border-b border-white/8 flex-shrink-0">
             <p className="text-white/40 text-[10px] mb-1.5 font-semibold uppercase tracking-wider">
-              🔑 Gemini API Key (ฟรี — <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-blue-400 underline">aistudio.google.com</a>)
+              🔑 {t("ai.keyPanelTitle", { p: providerName })}
+              {" — "}
+              <a href={providerKeyUrl} target="_blank" rel="noreferrer" className="text-blue-400 underline">
+                {t("ai.keyGetOne")}
+              </a>
             </p>
             <div className="flex gap-2">
               <input
                 value={keyDraft}
                 onChange={e => setKeyDraft(e.target.value)}
-                placeholder="AIzaSy..."
+                placeholder={getProviderId() === "gemini" ? "AIzaSy..." : "sk-..."}
                 type="password"
                 className="flex-1 bg-gray-800 border border-white/10 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-green-500 font-mono"
               />
@@ -739,7 +759,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
                 Save
               </button>
             </div>
-            <p className="text-white/20 text-[9px] mt-1">ข้อมูลเก็บใน localStorage เครื่องคุณเท่านั้น</p>
+            <p className="text-white/20 text-[9px] mt-1">{t("ai.keyLocalOnly")}</p>
           </div>
         )}
 
@@ -831,10 +851,16 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
                         <badge.icon size={9} className="text-white" />
                         <span className="text-white text-[9px] font-semibold">{badge.label}</span>
                       </div>
-                      {/* Show which backend answered */}
+                      {/* Which backend answered. The stored tag is still the
+                          string "gemini" because it means "went over the
+                          network", not "was Google" — it predates there being
+                          more than one provider. The LABEL is now whichever
+                          provider is configured; only the tag kept the name. */}
                       {msg.source && (
                         <span className={`text-[9px] ${msg.source === "gemini" ? "text-green-400/50" : "text-white/20"}`}>
-                          {msg.source === "gemini" ? "✦ Gemini" : "⬡ offline"}
+                          {msg.source === "gemini"
+                            ? t("ai.answeredBy", { p: providerShort })
+                            : t("ai.answeredLocal")}
                         </span>
                       )}
                     </div>
@@ -859,7 +885,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
                     transition={{ duration: 0.8, delay: i * 0.15, repeat: Infinity }} />
                 ))}
                 <span className="text-white/30 text-xs ml-1">
-                  {online && hasKey ? "Gemini กำลังคิด..." : t("ai.thinking")}
+                  {online && hasKey ? t("ai.thinkingWith", { p: providerShort }) : t("ai.thinking")}
                 </span>
               </div>
             </motion.div>
@@ -1036,7 +1062,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
                 onKeyDown={e => e.key === "Enter" && !e.shiftKey && sendMessage()}
                 placeholder={
                   online && hasKey
-                    ? "พิมพ์ภาษาไทยหรืออังกฤษได้เลย... (Gemini)"
+                    ? t("ai.placeholderWith", { p: providerShort })
                     : t("ai.unifiedPlaceholder")
                 }
                 disabled={loading}
