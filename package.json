@@ -12,7 +12,13 @@
     "release": "node scripts/bump-version.mjs && tauri build",
     "eval": "npm run eval:parser && npm run eval:slip",
     "eval:parser": "tsc scripts/eval-parser.ts --outDir node_modules/.cache/eval --module commonjs --target es2020 --moduleResolution node --skipLibCheck --esModuleInterop && node node_modules/.cache/eval/scripts/eval-parser.js",
-    "eval:slip": "tsc scripts/eval-slip.ts --outDir node_modules/.cache/eval --module commonjs --target es2020 --moduleResolution node --skipLibCheck --esModuleInterop && node node_modules/.cache/eval/scripts/eval-slip.js"
+    "eval:slip": "tsc scripts/eval-slip.ts --outDir node_modules/.cache/eval --module commonjs --target es2020 --moduleResolution node --skipLibCheck --esModuleInterop && node node_modules/.cache/eval/scripts/eval-slip.js",
+    "gen:sync-vectors": "tsc scripts/gen-sync-vectors.ts --outDir node_modules/.cache/syncgen --module commonjs --target es2020 --moduleResolution node --skipLibCheck --esModuleInterop && node node_modules/.cache/syncgen/scripts/gen-sync-vectors.js ../reup-shared/sync-vectors.json",
+    "gen:crypto-vectors": "tsc scripts/gen-crypto-vectors.ts --outDir node_modules/.cache/syncgen --module commonjs --target es2020 --moduleResolution node --skipLibCheck --esModuleInterop --lib es2020,dom && node node_modules/.cache/syncgen/scripts/gen-crypto-vectors.js ../reup-shared/crypto-vectors.json",
+    "check:sync": "tsc scripts/check-sync.ts --outDir node_modules/.cache/syncgen --module commonjs --target es2020 --moduleResolution node --skipLibCheck --esModuleInterop --lib es2020,dom && node node_modules/.cache/syncgen/scripts/check-sync.js",
+    "gen:engine-vectors": "tsc scripts/gen-engine-vectors.ts --outDir node_modules/.cache/syncgen --module commonjs --target es2020 --moduleResolution node --skipLibCheck --esModuleInterop --lib es2020,dom && node node_modules/.cache/syncgen/scripts/gen-engine-vectors.js ../reup-shared/engine-vectors.json",
+    "gen:store-vectors": "tsc scripts/gen-store-vectors.ts --outDir node_modules/.cache/syncgen --module commonjs --target es2020 --moduleResolution node --skipLibCheck --esModuleInterop --lib es2020,dom && node node_modules/.cache/syncgen/scripts/gen-store-vectors.js ../reup-shared/store-vectors.json",
+    "gen:vectors": "npm run gen:sync-vectors && npm run gen:crypto-vectors && npm run gen:engine-vectors && npm run gen:store-vectors"
   },
   "dependencies": {
     "@fontsource/ibm-plex-sans-thai": "^5.3.0",
@@ -35,7 +41,7 @@
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
     "tailwindcss": "^4.2.1",
-    "typescript": "~5.8.3",
+    "typescript": "^5.6.3",
     "vite": "^7.0.4"
   }
 }

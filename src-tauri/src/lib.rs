@@ -7,6 +7,7 @@ use tauri::{
 use tauri_plugin_autostart::MacosLauncher;
 
 mod wallpaper;
+mod sync_http;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct NotificationPayload {
@@ -484,6 +485,7 @@ pub fn run() {
             read_text_file,
             write_snapshot,
             set_tray_icon,
+            sync_http::sync_request,
             wallpaper::attach_wallpaper,
             wallpaper::start_wallpaper,
             wallpaper::stop_wallpaper,

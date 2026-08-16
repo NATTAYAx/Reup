@@ -105,6 +105,52 @@ const translations = {
   "backup.errNotJson":   { en: "That file is not readable as JSON.", th: "ไฟล์นั้นอ่านเป็น JSON ไม่ได้" },
   "backup.errNotBackup": { en: "That file is not a backup from this app.", th: "ไฟล์นั้นไม่ใช่ไฟล์สำรองของแอปนี้" },
   "backup.errTooNew":    { en: "That backup came from a newer version of the app.", th: "ไฟล์สำรองนั้นมาจากแอปเวอร์ชันใหม่กว่า" },
+
+  // ─── sync ──────────────────────────────────────────────────────────────────
+  // The pairing code is the encryption key. Every string here that touches it
+  // has to be able to be read once, quickly, by someone who is about to close
+  // the window — so it says what is lost and who cannot get it back, not that
+  // the feature is secure.
+  "sync.title":     { en: "Sync with your phone", th: "ซิงก์กับโทรศัพท์" },
+  "sync.subOn":     { en: "Through a folder on your own server", th: "ผ่านโฟลเดอร์บนเซิร์ฟเวอร์ของเธอเอง" },
+  "sync.subOff":    { en: "Off. This computer keeps everything to itself.", th: "ปิดอยู่ เครื่องนี้เก็บทุกอย่างไว้เอง" },
+
+  "sync.server":     { en: "WebDAV folder", th: "โฟลเดอร์ WebDAV" },
+  "sync.username":   { en: "Username", th: "ชื่อผู้ใช้" },
+  "sync.password":   { en: "Password", th: "รหัสผ่าน" },
+  "sync.save":       { en: "Save", th: "บันทึก" },
+  "sync.saved":      { en: "Saved", th: "บันทึกแล้ว" },
+  "sync.serverNote": { en: "Nextcloud, a NAS, or anything that speaks WebDAV. What is stored there is already encrypted.", th: "Nextcloud หรือ NAS หรืออะไรก็ได้ที่พูด WebDAV ได้ ของที่ไปกองอยู่ตรงนั้นถูกเข้ารหัสไว้แล้ว" },
+  "sync.driveLater": { en: "Google Drive is written and tested, but nothing can sign you in yet, so it is not offered.", th: "Google Drive เขียนกับเทสต์ไว้แล้ว แต่ยังไม่มีตัวพาล็อกอิน เลยยังไม่เปิดให้เลือก" },
+
+  "sync.pairing":    { en: "Pairing code", th: "รหัสจับคู่" },
+  "sync.pairingWhy": { en: "This one string is the folder and the key. The server holds your data and cannot read a word of it — and for the same reason, nobody can get it back for you. Not the server, not this app.", th: "สตริงเดียวนี้คือทั้งโฟลเดอร์และกุญแจ เซิร์ฟเวอร์เก็บข้อมูลไว้แต่อ่านไม่ออกสักคำ และด้วยเหตุผลเดียวกันนั้น ไม่มีใครกู้คืนให้เธอได้ ทั้งเซิร์ฟเวอร์และแอปนี้" },
+  "sync.pairingWriteDown": { en: "Write it down somewhere that is not this computer. The backup file leaves it out on purpose.", th: "จดไว้ที่ที่ไม่ใช่เครื่องนี้ ไฟล์สำรองไม่มีรหัสนี้อยู่ข้างในโดยตั้งใจ" },
+  "sync.pairingNone":   { en: "No code yet.", th: "ยังไม่มีรหัส" },
+  "sync.pairingBroken": { en: "This code cannot be read. It is kept rather than deleted — check it against what you wrote down.", th: "รหัสนี้อ่านไม่ออก เก็บไว้ไม่ได้ลบทิ้ง ลองเทียบกับที่จดไว้ดู" },
+
+  "sync.newCode":     { en: "Make a new code", th: "สร้างรหัสใหม่" },
+  "sync.newCodeWarn": { en: "A new code is a new empty folder. Whatever is in the old one stays there, locked, and this app will not be able to open it again.", th: "รหัสใหม่คือกล่องใหม่ที่ว่างเปล่า ของที่อยู่ในกล่องเดิมจะค้างอยู่ตรงนั้นแบบล็อกไว้ และแอปนี้จะเปิดมันไม่ได้อีก" },
+  "sync.newCodeGo":   { en: "Make a new one", th: "สร้างอันใหม่" },
+  "sync.paste":       { en: "Enter a code", th: "ใส่รหัสที่มีอยู่" },
+  "sync.pasteHint":   { en: "Paste the code from your other device", th: "วางรหัสจากอีกเครื่อง" },
+  "sync.pasteGo":     { en: "Use this code", th: "ใช้รหัสนี้" },
+  "sync.pasteBad":    { en: "That is not a usable code, so it was not saved.", th: "อันนั้นไม่ใช่รหัสที่ใช้ได้ เลยยังไม่บันทึกให้" },
+  "sync.cancel":      { en: "Cancel", th: "ยกเลิก" },
+
+  "sync.now":      { en: "Sync now", th: "ซิงก์ตอนนี้" },
+  "sync.running":  { en: "Syncing", th: "กำลังซิงก์" },
+  "sync.notReady": { en: "Needs a folder and a pairing code before it can run.", th: "ต้องมีทั้งโฟลเดอร์และรหัสจับคู่ก่อนถึงจะรันได้" },
+  "sync.saveFirst":{ en: "Save the folder settings first.", th: "บันทึกการตั้งค่าโฟลเดอร์ก่อน" },
+  "sync.result":   { en: "Took {applied} in, sent {pushed} out, read {read} batches.", th: "รับเข้ามา {applied} ส่งออกไป {pushed} อ่านไป {read} ก้อน" },
+  "sync.resultQuiet": { en: "Both sides already agreed.", th: "สองฝั่งตรงกันอยู่แล้ว" },
+  "sync.skipped":  { en: "{n} file(s) could not be read. They are left alone and tried again next time.", th: "มี {n} ไฟล์ที่อ่านไม่ได้ ปล่อยไว้แล้วลองใหม่รอบหน้า" },
+
+  "sync.errConfig":   { en: "That address cannot be used. Check it starts with https and points at a folder.", th: "ที่อยู่นั้นใช้ไม่ได้ ดูว่าขึ้นต้นด้วย https และชี้ไปที่โฟลเดอร์รึเปล่า" },
+  "sync.errAuth":     { en: "The server refused that username or password.", th: "เซิร์ฟเวอร์ไม่รับชื่อผู้ใช้หรือรหัสผ่านนั้น" },
+  "sync.errNotFound": { en: "The server has no folder at that address.", th: "เซิร์ฟเวอร์ไม่มีโฟลเดอร์ที่อยู่นั้น" },
+  "sync.errNetwork":  { en: "Could not reach the server.", th: "ต่อไปหาเซิร์ฟเวอร์ไม่ติด" },
+  "sync.errServer":   { en: "The server had a problem. Nothing here was lost — try again later.", th: "เซิร์ฟเวอร์มีปัญหา ของฝั่งนี้ไม่ได้หายไปไหน เดี๋ยวลองใหม่" },
   "settings.timezone":    { en: "Time zone",   th: "เขตเวลา" },
   "settings.timezoneSub": { en: "What time task deadlines are counted in", th: "เวลาที่ใช้นับกำหนดส่งของงาน" },
   "tz.auto":     { en: "Follow this computer", th: "ตามเครื่องนี้" },

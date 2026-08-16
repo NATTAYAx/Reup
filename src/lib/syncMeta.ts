@@ -51,8 +51,29 @@ const SQL_UUID4 = `(
   lower(hex(randomblob(6)))
 )`;
 
-/** ISO-8601 UTC with milliseconds, so ordering is unambiguous across devices. */
-const SQL_NOW = `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
+/**
+ * A clock that only ever moves forward, one row in one table.
+ *
+ * `strftime('now')` alone is not enough. On Windows the system timer ticks about
+ * every sixteen milliseconds, so a delete and the row created to replace it can
+ * both land on the same reading. Two rows sharing a timestamp is not a rounding
+ * error: "what have I changed since my last push" is `updated_at > watermark`,
+ * and a row written in the same tick as the watermark is never seen again. It is
+ * not sent, no error is raised anywhere, and the other device simply never
+ * learns about it.
+ *
+ * Bumping to `max(now, previous + 1ms)` makes two equal stamps impossible, so
+ * the strict comparison is correct by construction rather than by luck. It also
+ * survives the system clock being set backwards, which `now` on its own does
+ * not.
+ *
+ * The cost is one extra UPDATE per write, against a single-row table, inside a
+ * database that only allows one writer at a time anyway.
+ */
+const SQL_BUMP = `UPDATE sync_clock SET t = max(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', t, '+0.001 seconds')) WHERE id = 1`;
+
+/** The reading itself. Always preceded by a bump, never used alone. */
+const SQL_CLOCK = `(SELECT t FROM sync_clock WHERE id = 1)`;
 
 interface SyncTable {
   name: string;
@@ -63,10 +84,17 @@ interface SyncTable {
 }
 
 export const SYNC_TABLES: SyncTable[] = [
-  { name: "tasks",        needsDeleted: false, hasCreatedAt: true  },
+  // tasks and budgets were once false here, with the reasoning that is_active =
+  // 0 already keeps the row so no tombstone was needed. That is true of the
+  // trash, which is a state a row is in, and false of the purge button and of
+  // the thirty-day sweep, which both run a real DELETE. Under sync a deleted
+  // row that leaves no trace is worse than one that stays: the other device
+  // still has it, pushes it back, and it returns from the dead with no error
+  // anywhere. A tombstone costs one column.
+  { name: "tasks",        needsDeleted: true,  hasCreatedAt: true  },
   { name: "income",       needsDeleted: true,  hasCreatedAt: true  },
   { name: "expenses",     needsDeleted: true,  hasCreatedAt: true  },
-  { name: "budgets",      needsDeleted: false, hasCreatedAt: false },
+  { name: "budgets",      needsDeleted: true,  hasCreatedAt: false },
   { name: "saving_goals", needsDeleted: true,  hasCreatedAt: true  },
   // Hidden is not deleted, so the tombstone here is only for a category a
   // future version might truly remove. It costs one column to have it ready.
@@ -75,22 +103,50 @@ export const SYNC_TABLES: SyncTable[] = [
   { name: "expected_income", needsDeleted: false, hasCreatedAt: true },
 ];
 
-/** ALTER TABLE ADD COLUMN throws if the column is already there. That is the
- *  normal path on every launch after the first, so it is not an error. */
-async function addColumn(db: Database, table: string, ddl: string): Promise<void> {
-  try {
-    await db.execute(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
-  } catch (_) {
-    // already present
-  }
+/**
+ * One statement, and whether failing is normal.
+ *
+ * The migrations are returned as data rather than run inline for one reason:
+ * the phone has to apply exactly these, and a second implementation that has to
+ * match this one by somebody remembering is the disease this project keeps
+ * curing. As a list, the two can be compared string by string in a vector file.
+ */
+export interface Migration {
+  sql: string;
+  /** ALTER TABLE ADD COLUMN throws when the column is already there, which is
+   *  the normal path on every launch after the first. */
+  ignoreErrors?: boolean;
 }
 
-export async function applySyncMigrations(db: Database): Promise<void> {
+/**
+ * Every statement needed to bring any database, new or old, up to what sync
+ * expects. Pure — it touches nothing and can be printed, compared or replayed.
+ */
+export function syncMigrations(): Migration[] {
+  const out: Migration[] = [];
+
+  // The clock has to exist before anything can read it, so it goes first.
+  out.push({
+    sql: `CREATE TABLE IF NOT EXISTS sync_clock (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            t  TEXT NOT NULL
+          )`,
+  });
+  out.push({
+    sql: `INSERT OR IGNORE INTO sync_clock (id, t) VALUES (1, '1970-01-01T00:00:00.000Z')`,
+  });
+  // Seeded forward on every launch. Starting at the epoch would otherwise mean
+  // the first few writes after a fresh install carry 1970 timestamps.
+  out.push({ sql: SQL_BUMP });
+
   for (const t of SYNC_TABLES) {
-    await addColumn(db, t.name, "uid TEXT");
-    await addColumn(db, t.name, "updated_at TEXT");
+    out.push({ sql: `ALTER TABLE ${t.name} ADD COLUMN uid TEXT`, ignoreErrors: true });
+    out.push({ sql: `ALTER TABLE ${t.name} ADD COLUMN updated_at TEXT`, ignoreErrors: true });
     if (t.needsDeleted) {
-      await addColumn(db, t.name, "deleted INTEGER NOT NULL DEFAULT 0");
+      out.push({
+        sql: `ALTER TABLE ${t.name} ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0`,
+        ignoreErrors: true,
+      });
     }
 
     // Backfill rows that existed before this migration. randomblob() is
@@ -101,48 +157,72 @@ export async function applySyncMigrations(db: Database): Promise<void> {
     // comparison, which is all "changed since X" has, quietly wrong. So old
     // values are reformatted rather than copied.
     const source = t.hasCreatedAt ? "COALESCE(updated_at, created_at)" : "updated_at";
-    const seed = `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${source}), ${SQL_NOW})`;
-    await db.execute(
-      `UPDATE ${t.name}
+    const seed = `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${source}), ${SQL_CLOCK})`;
+    out.push({
+      sql: `UPDATE ${t.name}
           SET uid = COALESCE(uid, ${SQL_UUID4}),
               updated_at = ${seed}
         WHERE uid IS NULL OR updated_at IS NULL`,
-    );
+    });
 
-    // uid is the identity a server will key on, so it must be unique. NULLs are
+    // uid is the identity a server keys on, so it must be unique. NULLs are
     // allowed to repeat in SQLite, which is fine: the insert trigger fills them.
-    await db.execute(
-      `CREATE UNIQUE INDEX IF NOT EXISTS idx_${t.name}_uid ON ${t.name}(uid)`,
-    );
+    out.push({
+      sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_${t.name}_uid ON ${t.name}(uid)`,
+    });
     // "everything changed since my last sync" is the one query sync runs most.
-    await db.execute(
-      `CREATE INDEX IF NOT EXISTS idx_${t.name}_updated ON ${t.name}(updated_at)`,
-    );
+    out.push({
+      sql: `CREATE INDEX IF NOT EXISTS idx_${t.name}_updated ON ${t.name}(updated_at)`,
+    });
+
+    // Both triggers are dropped before they are created. They are created with
+    // IF NOT EXISTS, which means an install that already has the old body would
+    // silently keep it: the migration would report success and change nothing.
+    out.push({ sql: `DROP TRIGGER IF EXISTS ${t.name}_sync_insert` });
+    out.push({ sql: `DROP TRIGGER IF EXISTS ${t.name}_sync_update` });
 
     // New rows: stamp identity and time, whatever code did the insert.
-    await db.execute(`
+    out.push({
+      sql: `
       CREATE TRIGGER IF NOT EXISTS ${t.name}_sync_insert
       AFTER INSERT ON ${t.name}
       FOR EACH ROW WHEN NEW.uid IS NULL OR NEW.updated_at IS NULL
       BEGIN
+        ${SQL_BUMP};
         UPDATE ${t.name}
            SET uid = COALESCE(NEW.uid, ${SQL_UUID4}),
-               updated_at = COALESCE(NEW.updated_at, ${SQL_NOW})
+               updated_at = COALESCE(NEW.updated_at, ${SQL_CLOCK})
          WHERE id = NEW.id;
       END;
-    `);
+    `,
+    });
 
     // Any write bumps the clock. The WHEN guard means a statement that sets
     // updated_at itself is left alone, which is how an incoming sync keeps the
-    // server's timestamp, and it also stops the trigger firing on itself.
-    await db.execute(`
+    // sender's timestamp, and it also stops the trigger firing on itself.
+    out.push({
+      sql: `
       CREATE TRIGGER IF NOT EXISTS ${t.name}_sync_update
       AFTER UPDATE ON ${t.name}
       FOR EACH ROW WHEN NEW.updated_at IS OLD.updated_at
       BEGIN
-        UPDATE ${t.name} SET updated_at = ${SQL_NOW} WHERE id = NEW.id;
+        ${SQL_BUMP};
+        UPDATE ${t.name} SET updated_at = ${SQL_CLOCK} WHERE id = NEW.id;
       END;
-    `);
+    `,
+    });
+  }
+
+  return out;
+}
+
+export async function applySyncMigrations(db: Database): Promise<void> {
+  for (const m of syncMigrations()) {
+    try {
+      await db.execute(m.sql);
+    } catch (e) {
+      if (!m.ignoreErrors) throw e;
+    }
   }
 }
 

@@ -1,4 +1,5 @@
 import { getDb } from "./database";
+import { keepInBackup, MACHINE_ONLY_SETTINGS } from "./sync/config";
 import { PREFIX, isSecretKey, sanitizeForBackup } from "./storageKeys";
 
 // ─── backup.ts — the one thing missing that could actually lose everything ────
@@ -80,7 +81,8 @@ export async function buildBackup(): Promise<BackupFile> {
 
   for (const name of TABLES) {
     try {
-      tables[name] = await db.select<unknown[]>(`SELECT * FROM ${name}`);
+      const rows = await db.select<unknown[]>(`SELECT * FROM ${name}`);
+      tables[name] = rows.filter((r) => keepInBackup(name, r));
     } catch (err) {
       // A table that does not exist in an older database should not sink the
       // whole backup. Better to save six tables than none.
@@ -148,6 +150,9 @@ export function parseBackup(text: string): BackupFile {
 /** Column names SQLite manages itself and that must not be written back. */
 const SKIP_COLUMNS = new Set<string>([]);
 
+// The rule about which settings rows may leave the machine lives with the keys
+// it names, in sync/config.ts, so that it can be tested without a database.
+
 /**
  * The columns a table actually has right now, straight from SQLite.
  *
@@ -194,9 +199,19 @@ export async function restoreBackup(file: BackupFile): Promise<RestoreReport> {
       const known = await tableColumns(db, name);
       const dropped = new Set<string>();
 
-      await db.execute(`DELETE FROM ${name}`);
+      // Everything except this machine's own place in the sync. Wiping that
+      // would make the device forget which batches it has already issued, so it
+      // would start reissuing sequence numbers that are already in the bucket.
+      if (name === "app_settings") {
+        const marks = [...MACHINE_ONLY_SETTINGS].map(() => "?").join(", ");
+        await db.execute(`DELETE FROM ${name} WHERE key NOT IN (${marks})`, [...MACHINE_ONLY_SETTINGS]);
+      } else {
+        await db.execute(`DELETE FROM ${name}`);
+      }
       for (const row of rows) {
         if (!row || typeof row !== "object") continue;
+        // A file written before this rule existed still carries these rows.
+        if (!keepInBackup(name, row)) continue;
         const entries = Object.entries(row as Record<string, unknown>)
           .filter(([col]) => {
             if (SKIP_COLUMNS.has(col)) return false;

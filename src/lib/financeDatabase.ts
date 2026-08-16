@@ -312,9 +312,25 @@ export async function getExpensesLast30Days(): Promise<Expense[]> {
   );
 }
 
+/**
+ * Tombstone, and an empty one.
+ *
+ * `deleted = 1` alone would leave the amount and the note sitting in the row
+ * forever, which means every sync batch and every backup keeps carrying a line
+ * the person deleted. Tasks have cleared their payload since the purge button
+ * was written; two shapes of tombstone in one app is the disease this project
+ * keeps curing, and this is the cheaper of the two to change.
+ *
+ * `updated_at` is deliberately not set here. The trigger stamps it from the one
+ * clock, and a delete that stamped its own time would be a second clock writing
+ * into a column that is only ever compared as a string.
+ */
 export async function deleteExpense(id: number): Promise<void> {
   const d = await getDb();
-  await d.execute("UPDATE expenses SET deleted = 1 WHERE id = ?", [id]);
+  await d.execute(
+    "UPDATE expenses SET deleted = 1, note = '', amount = 0, slip_ref = NULL WHERE id = ? AND deleted = 0",
+    [id],
+  );
 }
 
 export async function updateExpense(id: number, fields: {
@@ -357,7 +373,9 @@ export async function aiDeleteExpenseByKeyword(keyword: string): Promise<string>
     [`%${keyword.toLowerCase()}%`, `%${keyword.toLowerCase()}%`]
   );
   if (rows.length === 0) throw new Error(t("ai.rowNotFound", { k: keyword }));
-  await d.execute("UPDATE expenses SET deleted = 1 WHERE id = ?", [rows[0].id]);
+  // Same tombstone as the button. Two ways to delete one thing that leave two
+  // different rows behind is how the two drift apart.
+  await deleteExpense(rows[0].id as number);
   return `${rows[0].note || rows[0].category} ${formatMoney(rows[0].amount, rows[0].currency)}`;
 }
 
@@ -541,7 +559,10 @@ export async function getGoals(): Promise<SavingGoal[]> {
 
 export async function deleteGoal(id: number): Promise<void> {
   const d = await getDb();
-  await d.execute("UPDATE saving_goals SET deleted = 1 WHERE id = ?", [id]);
+  await d.execute(
+    "UPDATE saving_goals SET deleted = 1, name = '', target_amount = 0, current_amount = 0 WHERE id = ? AND deleted = 0",
+    [id],
+  );
 }
 
 // ─── AI-callable helpers ──────────────────────────────────────────────────────

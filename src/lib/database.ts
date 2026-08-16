@@ -1,14 +1,15 @@
 import { isPaused } from "../types";
 import Database from "@tauri-apps/plugin-sql";
-import { applySyncMigrations } from "./syncMeta";
+import { applySyncMigrations, SYNC_TABLES } from "./syncMeta";
+import { sweepTrash, sweepTombstones, PURGE_TASK_SQL } from "./tombstones";
 import { getCurrency } from "./money";
 
 let db: Database | null = null;
 let dbReadyPromise: Promise<Database> | null = null;
 
 /** Single shared DB — ALL tables (tasks + finance) created here before any caller proceeds */
-/** How long a deleted task stays recoverable. */
-export const TRASH_TTL_DAYS = 30;
+/** Re-exported so callers keep one import. Defined with the rules that use it. */
+export { TRASH_TTL_DAYS } from "./tombstones";
 
 export async function getDb(): Promise<Database> {
   if (db) return db;
@@ -238,17 +239,20 @@ async function initializeSchema(db: Database): Promise<void> {
   // later is still recoverable, and short enough that the bin does not turn
   // into an archive of everything ever made — which would then ride along in
   // every backup file forever.
-  try {
-    const cutoff = new Date(Date.now() - TRASH_TTL_DAYS * 86_400_000).toISOString();
-    await db.execute("DELETE FROM tasks WHERE deleted_at IS NOT NULL AND deleted_at < ?", [cutoff]);
-  } catch (err) {
-    console.error("[db] could not purge trash:", err);
-  }
+  // Emptying the bin leaves a tombstone rather than removing the row. A row
+  // that vanishes cannot be told apart from one the other device never received,
+  // so it would be pushed back and the task would return from the dead.
+  await sweepTrash(db);
 
   // Give every row a device-independent identity and a modification time, so
   // the phone app can eventually sync with this one. See src/lib/syncMeta.ts.
   // Runs last, after every table exists. Idempotent, so it is safe every boot.
   await applySyncMigrations(db);
+
+  // And the other end of the same story: a tombstone nobody could still need is
+  // finally removed. Runs after the migrations because it needs the `deleted`
+  // column that they add.
+  await sweepTombstones(db, SYNC_TABLES.map((t) => t.name));
 }
 
 
@@ -301,7 +305,7 @@ export async function updateTask(id: number, fields: Partial<{
 export async function getTaskById(id: number): Promise<any | null> {
   const db = await getDb();
   const numId = Number(id);
-  const rows = await db.select<any[]>('SELECT * FROM tasks WHERE id = ?', [numId]);
+  const rows = await db.select<any[]>('SELECT * FROM tasks WHERE id = ? AND deleted = 0', [numId]);
   if (!rows || rows.length === 0) {
     console.warn(`[DB] getTaskById(${id}): no rows`);
     return null;
@@ -386,7 +390,10 @@ export async function deleteIncome(id: number): Promise<void> {
   const db = await getDb();
   // Tombstone, not a real delete: a row that simply vanishes tells the other
   // device nothing, so it would be re-uploaded on the next sync.
-  await db.execute('UPDATE income SET deleted = 1 WHERE id = ?', [id]);
+  await db.execute(
+    "UPDATE income SET deleted = 1, source = '', note = '', amount = 0 WHERE id = ? AND deleted = 0",
+    [id],
+  );
 }
 
 export async function getAllTasks(): Promise<any[]> {
@@ -467,7 +474,10 @@ export async function getTrashedTasks(): Promise<any[]> {
   return dbQueue(async () => {
     const db = await getDb();
     return await db.select<any[]>(
-      "SELECT * FROM tasks WHERE is_active = 0 AND deleted_at IS NOT NULL ORDER BY deleted_at DESC",
+      // `deleted = 0` matters here and only here: a purged task keeps its
+      // deleted_at, so without it the bin would show a nameless ghost row for
+      // every task that was ever emptied out of it.
+      "SELECT * FROM tasks WHERE is_active = 0 AND deleted_at IS NOT NULL AND deleted = 0 ORDER BY deleted_at DESC",
     );
   });
 }
@@ -477,7 +487,7 @@ export async function restoreTask(id: number): Promise<void> {
   return dbQueue(async () => {
     const db = await getDb();
     await db.execute(
-      "UPDATE tasks SET is_active = 1, deleted_at = NULL, missed_streak = 0, cycle_checked_until = NULL WHERE id = ?",
+      "UPDATE tasks SET is_active = 1, deleted_at = NULL, missed_streak = 0, cycle_checked_until = NULL WHERE id = ? AND deleted = 0",
       [id],
     );
   });
@@ -487,7 +497,7 @@ export async function restoreTask(id: number): Promise<void> {
 export async function purgeTask(id: number): Promise<void> {
   return dbQueue(async () => {
     const db = await getDb();
-    await db.execute("DELETE FROM tasks WHERE id = ? AND deleted_at IS NOT NULL", [id]);
+    await db.execute(PURGE_TASK_SQL, [id]);
   });
 }
 

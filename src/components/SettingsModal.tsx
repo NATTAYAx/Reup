@@ -10,6 +10,7 @@ import { getSetting, setSetting, currenciesInUse } from "../lib/database";
 import { getLang, setLang, t, type Lang } from "../lib/i18n";
 import TimeZonePicker from "./TimeZonePicker";
 import BackupCard from "./BackupCard";
+import SyncCard from "./SyncCard";
 import { getTimeZonePreference, setTimeZonePreference, getAppTimeZone, offsetLabel, SYSTEM } from "../lib/tz";
 import { getCurrency, setCurrency, formatMoney, currencySymbol } from "../lib/money";
 import CurrencyPicker from "./CurrencyPicker";
@@ -1233,6 +1234,11 @@ Rules:
                   </div>
 
                   <BackupCard />
+
+                  {/* Sync sits under backup on purpose: one of them is the
+                      copy you keep, the other is the copy that keeps moving,
+                      and the pairing code is deliberately in only one. */}
+                  <SyncCard />
 
                   {/* Currency, deliberately next to the timezone rather than
                       buried in the finance screen: both answer "where am I",
