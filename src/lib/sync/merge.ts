@@ -65,8 +65,23 @@
 // row wins, and the task comes back undone. The app has just lied about the one
 // thing it is for.
 //
-// Completion only moves forward inside a cycle, so "furthest along" is the
-// right rule rather than "written last".
+// The first version of this compared `completed_until` itself: furthest along
+// wins, because completion only moves forward inside a cycle. That protected
+// the tick and quietly made UNDOING one impossible. Clearing the tick writes a
+// value that is behind the old one by definition, so the other device's copy
+// won every time, came back, and was pushed again — deterministic, not a race,
+// and unfixable by syncing more often.
+//
+// So the group is decided by WHEN the tick was last touched rather than by how
+// far it reaches. Ticking and un-ticking are both touches, so both travel, and
+// the property the old rule existed for survives intact: a device that renames
+// the task at eleven has not touched the tick, so its stale completion loses to
+// the phone's ten o'clock tick exactly as before.
+//
+// Rows written before this column existed carry null in it, and null sorts
+// behind everything. Two such rows tie on `by` and fall through to the
+// remaining fields in sorted order, where `completed_until` decides — which is
+// the old rule, still running, for every row nobody has touched since.
 //
 // It cannot be one field, though. `missed_streak` resets to 0 on completion and
 // `cycle_checked_until` moves with it, so choosing each field independently can
@@ -84,8 +99,8 @@ interface FieldGroup {
 const GROUPS: Record<string, FieldGroup[]> = {
   tasks: [
     {
-      by: "completed_until",
-      fields: ["completed_until", "cycle_checked_until", "missed_streak"],
+      by: "completed_at",
+      fields: ["completed_at", "completed_until", "cycle_checked_until", "missed_streak"],
     },
   ],
 };
@@ -229,7 +244,11 @@ export function merge(a: ChangeRecord, b: ChangeRecord): ChangeRecord {
   // apart. The suite failed on exactly that, twice, before this was structural.
   for (const g of groupsFor(a.table)) {
     const from = groupGreater(a, b, g) ? a : b;
-    for (const f of g.fields) fields[f] = from.fields[f] ?? null;
+    // Only what the winner actually carries. Writing every field of the group
+    // unconditionally invents keys: a group naming a column that no row in the
+    // batch has — a device still on the previous schema, say — would gain that
+    // column as an explicit null, and merge(a, a) would stop returning a.
+    for (const f of g.fields) if (f in from.fields) fields[f] = from.fields[f];
   }
 
   return {

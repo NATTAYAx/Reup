@@ -3,6 +3,8 @@
 // Timezone always stays Asia/Bangkok regardless of language.
 export type Lang = "en" | "th";
 
+import { putSetting } from "./userSettings";
+
 const LANG_KEY = "gamesched_lang_v1";
 
 export function getLang(): Lang {
@@ -10,7 +12,9 @@ export function getLang(): Lang {
   return v === "th" ? "th" : "en";
 }
 export function setLang(lang: Lang) {
-  localStorage.setItem(LANG_KEY, lang);
+  // Through the mirror rather than straight to localStorage, so the other
+  // device hears about it. See userSettings.ts for why the cache is still here.
+  putSetting(LANG_KEY, lang);
 }
 
 const translations = {
@@ -113,6 +117,7 @@ const translations = {
   // the feature is secure.
   "sync.title":     { en: "Sync with your phone", th: "ซิงก์กับโทรศัพท์" },
   "sync.subOn":     { en: "Through a folder on your own server", th: "ผ่านโฟลเดอร์บนเซิร์ฟเวอร์ของเธอเอง" },
+  "sync.subDrive":  { en: "Through a hidden folder in your Google Drive", th: "ผ่านโฟลเดอร์ที่ซ่อนไว้ใน Google Drive ของเธอ" },
   "sync.subOff":    { en: "Off. This computer keeps everything to itself.", th: "ปิดอยู่ เครื่องนี้เก็บทุกอย่างไว้เอง" },
 
   "sync.server":     { en: "WebDAV folder", th: "โฟลเดอร์ WebDAV" },
@@ -121,6 +126,17 @@ const translations = {
   "sync.save":       { en: "Save", th: "บันทึก" },
   "sync.saved":      { en: "Saved", th: "บันทึกแล้ว" },
   "sync.serverNote": { en: "Nextcloud, a NAS, or anything that speaks WebDAV. What is stored there is already encrypted.", th: "Nextcloud หรือ NAS หรืออะไรก็ได้ที่พูด WebDAV ได้ ของที่ไปกองอยู่ตรงนั้นถูกเข้ารหัสไว้แล้ว" },
+  "sync.where":        { en: "Where it goes", th: "เก็บไว้ที่ไหน" },
+  "sync.webdav":       { en: "Your own server", th: "เซิร์ฟเวอร์ของเธอเอง" },
+  "sync.drive":        { en: "Google Drive", th: "Google Drive" },
+  "sync.driveWhat":    { en: "A hidden folder only this app can see. Google cannot read what is in it, and neither can anyone who gets into your Drive.", th: "โฟลเดอร์ที่ซ่อนไว้ซึ่งมีแต่แอปนี้เห็น Google อ่านของข้างในไม่ได้ และคนที่เข้าถึง Drive เธอได้ก็อ่านไม่ได้เหมือนกัน" },
+  "sync.driveWhy":     { en: "Unlike your own server, this one is reachable when the computer is off — which is most of the time you are out.", th: "ต่างจากเซิร์ฟเวอร์ของเธอเองตรงที่อันนี้เข้าถึงได้ตอนคอมปิด ซึ่งคือเกือบทุกครั้งที่ออกจากบ้าน" },
+  "sync.driveConnect": { en: "Connect Google Drive", th: "เชื่อม Google Drive" },
+  "sync.driveOpening": { en: "Waiting for the browser", th: "รอที่เบราว์เซอร์" },
+  "sync.driveOn":      { en: "Connected", th: "เชื่อมแล้ว" },
+  "sync.driveOff":     { en: "Disconnect", th: "ตัดการเชื่อมต่อ" },
+  "sync.driveOffNote": { en: "Forgets the sign-in on this computer only. Your phone keeps working.", th: "ลืมการล็อกอินเฉพาะเครื่องนี้ โทรศัพท์ยังใช้ได้ต่อ" },
+  "sync.driveCancel":  { en: "The sign-in was cancelled. Nothing changed.", th: "การล็อกอินถูกยกเลิก ไม่มีอะไรเปลี่ยน" },
   "sync.driveLater": { en: "Google Drive is written and tested, but nothing can sign you in yet, so it is not offered.", th: "Google Drive เขียนกับเทสต์ไว้แล้ว แต่ยังไม่มีตัวพาล็อกอิน เลยยังไม่เปิดให้เลือก" },
 
   "sync.pairing":    { en: "Pairing code", th: "รหัสจับคู่" },
@@ -148,6 +164,8 @@ const translations = {
 
   "sync.errConfig":   { en: "That address cannot be used. Check it starts with https and points at a folder.", th: "ที่อยู่นั้นใช้ไม่ได้ ดูว่าขึ้นต้นด้วย https และชี้ไปที่โฟลเดอร์รึเปล่า" },
   "sync.errAuth":     { en: "The server refused that username or password.", th: "เซิร์ฟเวอร์ไม่รับชื่อผู้ใช้หรือรหัสผ่านนั้น" },
+  "sync.errDriveAuth": { en: "Google refused the request. Connect the account again.", th: "Google ปฏิเสธคำขอ ต้องกดเชื่อมบัญชีใหม่อีกครั้ง" },
+  "sync.mismatch":    { en: "Google is connected, but sync is set to your own server. Pick Google Drive above.", th: "เชื่อม Google ไว้แล้ว แต่ซิงก์ยังตั้งไว้ที่เซิร์ฟเวอร์ของเธอเอง เลือก Google Drive ข้างบนก่อน" },
   "sync.errNotFound": { en: "The server has no folder at that address.", th: "เซิร์ฟเวอร์ไม่มีโฟลเดอร์ที่อยู่นั้น" },
   "sync.errNetwork":  { en: "Could not reach the server.", th: "ต่อไปหาเซิร์ฟเวอร์ไม่ติด" },
   "sync.errServer":   { en: "The server had a problem. Nothing here was lost — try again later.", th: "เซิร์ฟเวอร์มีปัญหา ของฝั่งนี้ไม่ได้หายไปไหน เดี๋ยวลองใหม่" },

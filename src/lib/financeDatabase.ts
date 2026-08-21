@@ -1,4 +1,11 @@
 import Database from "@tauri-apps/plugin-sql";
+import {
+  EXPENSE_COLUMNS,
+  SQL_DELETE_EXPENSE,
+  SQL_MONTH_SPENT,
+  expenseValues,
+  resolveCategory,
+} from "./moneyDraft";
 import { getDb as getSharedDb } from "./database";
 import { t } from "./i18n";
 import { todayLocal, monthLocal } from "./dateUtil";
@@ -138,12 +145,21 @@ export function getAllCategoriesCached(): CategoryRow[] {
  * Coerced rather than rejected: refusing the write would lose the expense over
  * a field the person never typed. The note still says what it was.
  */
+/** The keys the table currently holds, for anything that has to file a row. */
+export function knownCategoryKeys(): string[] {
+  return categoryCache.map((c) => c.key);
+}
+
 export function knownCategoryKey(key: string): string {
-  if (key && categoryCache.some(c => c.key === key)) return key;
-  if (key && key !== "other") {
+  // The rule itself moved to lib/expenseDraft, so that the phone can reproduce
+  // it against a vector file rather than from reading this. What stays here is
+  // the line in the console, which is about this app's own log and not about
+  // what gets written.
+  const filed = resolveCategory(key, knownCategoryKeys());
+  if (key && key !== filed && key !== "other") {
     console.warn(`[finance] unknown category "${key}" — filed under other`);
   }
-  return "other";
+  return filed;
 }
 
 export function lookupCategory(key: string): CategoryRow {
@@ -282,10 +298,28 @@ export async function addExpense(expense: {
   currency?: string;
 }): Promise<void> {
   const d = await getDb();
+  // The six coercions moved to lib/expenseDraft so the phone can reproduce them
+  // against a vector file. Nothing about what gets written changed; the vectors
+  // were generated from the values this function used to build.
+  //
+  // The currency is resolved here rather than in there, because "whatever the
+  // setting says right now" is a fact about this screen and this moment, and a
+  // shared function that reached for it would be filing money in whichever unit
+  // a machine happened to be set to.
+  const marks = EXPENSE_COLUMNS.map(() => "?").join(", ");
   await d.execute(
-    "INSERT INTO expenses (amount, currency, category, note, date, slip_ref) VALUES (?, ?, ?, ?, ?, ?)",
-    [expense.amount, expense.currency || getCurrency(), knownCategoryKey(expense.category),
-     expense.note, expense.date, expense.slipRef ?? null]
+    `INSERT INTO expenses (${EXPENSE_COLUMNS.join(", ")}) VALUES (${marks})`,
+    expenseValues(
+      {
+        amount: expense.amount,
+        currency: expense.currency || getCurrency(),
+        category: expense.category,
+        note: expense.note,
+        date: expense.date,
+        slip_ref: expense.slipRef ?? null,
+      },
+      knownCategoryKeys(),
+    ),
   );
 }
 
@@ -327,10 +361,16 @@ export async function getExpensesLast30Days(): Promise<Expense[]> {
  */
 export async function deleteExpense(id: number): Promise<void> {
   const d = await getDb();
-  await d.execute(
-    "UPDATE expenses SET deleted = 1, note = '', amount = 0, slip_ref = NULL WHERE id = ? AND deleted = 0",
+  // The statement itself lives in moneyDraft because the phone runs it too, and
+  // which columns a tombstone clears is a decision rather than a detail. It is
+  // keyed by uid, which this screen does not carry, so the id is turned into one
+  // first: `id` is an autoincrement and means a different row on each machine.
+  const found = await d.select<{ uid: string }[]>(
+    "SELECT uid FROM expenses WHERE id = ?",
     [id],
   );
+  if (found.length === 0 || !found[0].uid) return;
+  await d.execute(SQL_DELETE_EXPENSE, [found[0].uid]);
 }
 
 export async function updateExpense(id: number, fields: {
@@ -484,7 +524,7 @@ export async function getDailyTotals(month: string): Promise<{ date: string; tot
 export async function getMonthTotal(month: string): Promise<number> {
   const d = await getDb();
   const rows = await d.select<{ total: number }[]>(
-    "SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE deleted = 0 AND currency = ? AND strftime('%Y-%m', date) = ?",
+    SQL_MONTH_SPENT,
     [getCurrency(), month]
   );
   return rows[0]?.total ?? 0;

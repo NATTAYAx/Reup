@@ -1,7 +1,7 @@
 {
   "name": "reup",
   "private": true,
-  "version": "0.2.48",
+  "version": "0.2.51",
   "type": "module",
   "scripts": {
     "dev": "vite",

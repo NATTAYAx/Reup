@@ -116,12 +116,34 @@ export function tokensFromResponse(
   };
 }
 
-export function refreshBody(clientId: string, refreshToken: string): Uint8Array {
+/**
+ * WHY THE SECRET IS HERE, AND WHY IT WAS NOT
+ *
+ * Google's client types split into public and confidential. Android and iOS
+ * clients are public: no secret exists and none is sent, which is why the phone
+ * has worked from the first day. A Desktop or Web client is confidential and
+ * Google requires `client_secret` on every token call — not just the first one.
+ *
+ * `exchangeBody` has taken one since it was written, so connecting worked. This
+ * did not, so the very first refresh failed with `client_secret is missing.`
+ * and every one after it. Connecting again produced a fresh token that lasted
+ * exactly one hour, which is why it looked like the connection kept "dropping"
+ * rather than like a request that had never once succeeded.
+ *
+ * Optional, because the phone genuinely has no secret to send and sending an
+ * empty one is its own error.
+ */
+export function refreshBody(
+  clientId: string,
+  refreshToken: string,
+  clientSecret?: string,
+): Uint8Array {
   const form = new URLSearchParams({
     client_id: clientId,
     refresh_token: refreshToken,
     grant_type: "refresh_token",
   });
+  if (clientSecret) form.set("client_secret", clientSecret);
   return new TextEncoder().encode(form.toString());
 }
 
@@ -133,6 +155,8 @@ export class GoogleTokenSource implements AccessTokenSource {
     private readonly clientId: string,
     private readonly store: TokenStore,
     private readonly nowSec: () => number = () => Math.floor(Date.now() / 1000),
+    /** Present for a confidential client, absent for a public one. */
+    private readonly clientSecret?: string,
   ) {}
 
   async token(): Promise<string> {
@@ -151,15 +175,61 @@ export class GoogleTokenSource implements AccessTokenSource {
       method: "POST",
       url: TOKEN_URL,
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: refreshBody(this.clientId, t.refreshToken),
+      body: refreshBody(this.clientId, t.refreshToken, this.clientSecret),
     });
     if (res.status !== 200) {
-      // A refresh token is revoked when the user removes the app, changes
-      // password, or leaves it unused for six months. None of those are worth
-      // retrying, so the stored grant is dropped and the person is asked once.
-      await this.store.clear();
-      this.cached = null;
-      throw new StorageError("Google Drive needs to be connected again", "auth", res.status);
+      // ── WHY THIS NO LONGER THROWS THE GRANT AWAY ON ANY FAILURE ────────────
+      //
+      // A refresh token IS revoked when the app is removed, the password
+      // changes, or it goes unused for six months — none worth retrying, so the
+      // first version of this cleared the grant on any non-200 and asked the
+      // person to sign in again.
+      //
+      // That was survivable while a sync only happened when somebody pressed a
+      // button. It stopped being survivable the moment sync became automatic:
+      // one timeout, one 500 from Google, one moment on a train, and the app
+      // signs itself out — repeatedly, which is exactly how this was found.
+      // The frequency did not create the bug, it just stopped hiding it.
+      //
+      // Google says which of the two it is. `invalid_grant` means the grant is
+      // gone and asking again is the only way forward; a 429 or a 5xx means try
+      // later, and clearing a working grant because a server was busy costs the
+      // person a sign-in for nothing. It is the same distinction the request
+      // path already draws between "you may not" and "you are going too fast",
+      // one layer down and never applied here.
+      const text = new TextDecoder().decode(res.body);
+      // Google names the failure in the body. Carried into the message rather
+      // than thrown away, because "400" on its own is the difference between a
+      // dead grant, a malformed request and a client that has changed, and
+      // those are three different things to do about it.
+      let named = "";
+      try {
+        const j = JSON.parse(text) as { error?: string; error_description?: string };
+        named = j.error_description || j.error || "";
+      } catch {
+        named = text.slice(0, 120);
+      }
+
+      // A 4xx from the token endpoint is always about this grant, never about
+      // the weather. Only some of them mean the grant is gone for good, and
+      // that is the ONLY case worth destroying it over — but every one of them
+      // needs the person, so none of them may be reported as "trying again".
+      if (res.status === 400 || res.status === 401 || res.status === 403) {
+        const dead = /invalid_grant|invalid_client|unauthorized_client/.test(text);
+        if (dead) {
+          await this.store.clear();
+          this.cached = null;
+        }
+        throw new StorageError(
+          named || "Google refused the refresh",
+          "auth",
+          res.status,
+        );
+      }
+
+      // Everything else really is the weather. The refresh token is kept and
+      // the next attempt reuses it.
+      throw new StorageError(named || "Google could not refresh right now", "network", res.status);
     }
     const next = tokensFromResponse(
       JSON.parse(new TextDecoder().decode(res.body)),

@@ -101,6 +101,16 @@ export const SYNC_TABLES: SyncTable[] = [
   { name: "expense_categories", needsDeleted: true, hasCreatedAt: false },
   // Already has its own deleted flag, so only uid and updated_at are added.
   { name: "expected_income", needsDeleted: false, hasCreatedAt: true },
+  // Append-only, so the tombstone column is dead weight: nothing here is ever
+  // deleted or edited, and two devices merging events is a union rather than a
+  // negotiation. It still needs uid and updated_at like everything else,
+  // because that is how a row travels at all.
+  { name: "task_events", needsDeleted: true, hasCreatedAt: false },
+  // The settings that describe a person. A tombstone because a key can be
+  // retired, and a retired key that leaves no trace is a setting the other
+  // device pushes back and resurrects — the same failure as a deleted task,
+  // with the difference that nobody would think to look for it here.
+  { name: "user_settings", needsDeleted: true, hasCreatedAt: false },
 ];
 
 /**
@@ -111,6 +121,19 @@ export const SYNC_TABLES: SyncTable[] = [
  * match this one by somebody remembering is the disease this project keeps
  * curing. As a list, the two can be compared string by string in a vector file.
  */
+/**
+ * One row into the outbox, from inside a trigger on `table`.
+ *
+ * Reads the row back by rowid rather than using NEW, because on an insert the
+ * uid and the timestamp are filled by a second trigger and NEW still holds the
+ * nulls the statement arrived with. Reading the table gives whatever is there
+ * once every trigger on this statement has run.
+ */
+const outboxEnqueue = (table: string) => `INSERT INTO sync_outbox (tbl, uid, updated_at)
+          SELECT '${table}', uid, updated_at FROM ${table}
+           WHERE id = NEW.id AND uid IS NOT NULL AND updated_at IS NOT NULL
+        ON CONFLICT (tbl, uid) DO UPDATE SET updated_at = excluded.updated_at`;
+
 export interface Migration {
   sql: string;
   /** ALTER TABLE ADD COLUMN throws when the column is already there, which is
@@ -122,6 +145,51 @@ export interface Migration {
  * Every statement needed to bring any database, new or old, up to what sync
  * expects. Pure — it touches nothing and can be printed, compared or replayed.
  */
+/**
+ * Queue every row there is, once.
+ *
+ * WHY EVERYTHING RATHER THAN A CUTOFF
+ *
+ * On the launch the outbox first appears it is empty, and the only record of
+ * what has been sent is the watermark — the number this table exists because it
+ * cannot be trusted. Seeding everything costs one full upload per device, once,
+ * which the far side applies as zero rows because merge is idempotent. It
+ * cannot lose an edit, which the cheaper version can.
+ *
+ * WHY A FLAG RATHER THAN "IF THE OUTBOX IS EMPTY"
+ *
+ * An outbox that is empty because everything has been sent is the normal state.
+ * Seeding on that would re-upload the database on every launch for ever.
+ *
+ * Exported because changing folders needs exactly this and nothing else: a new
+ * folder has heard none of it. See outboxReseed.
+ */
+export function outboxSeed(): Migration[] {
+  const out: Migration[] = [];
+  for (const t of SYNC_TABLES) {
+    out.push({
+      sql: `INSERT INTO sync_outbox (tbl, uid, updated_at)
+            SELECT '${t.name}', uid, updated_at FROM ${t.name}
+             WHERE uid IS NOT NULL AND updated_at IS NOT NULL
+               AND (SELECT seeded FROM sync_outbox_state WHERE id = 1) = 0
+          ON CONFLICT (tbl, uid) DO UPDATE SET updated_at = excluded.updated_at`,
+    });
+  }
+  out.push({ sql: `UPDATE sync_outbox_state SET seeded = 1 WHERE id = 1` });
+  return out;
+}
+
+/**
+ * The same thing again, for a folder that has heard none of it.
+ *
+ * Lowering the flag first is what makes the shared list run a second time. The
+ * alternative was a second copy of the same seven statements without the guard,
+ * which is the shape of every bug this project has spent a month removing.
+ */
+export function outboxReseed(): Migration[] {
+  return [{ sql: `UPDATE sync_outbox_state SET seeded = 0 WHERE id = 1` }, ...outboxSeed()];
+}
+
 export function syncMigrations(): Migration[] {
   const out: Migration[] = [];
 
@@ -138,6 +206,60 @@ export function syncMigrations(): Migration[] {
   // Seeded forward on every launch. Starting at the epoch would otherwise mean
   // the first few writes after a fresh install carry 1970 timestamps.
   out.push({ sql: SQL_BUMP });
+
+  // ── the outbox ───────────────────────────────────────────────────────────
+  //
+  // What this device has not sent yet, as a fact rather than as a comparison.
+  //
+  // It used to be a comparison: every row whose updated_at is above a
+  // watermark. That reads as a question about this device answered with a
+  // number, and the number is one that other devices also write into. Rows
+  // arriving from a phone carry the phone's clock; the watermark is set to the
+  // newest timestamp the run looked at, phone rows included. A phone an hour
+  // ahead therefore pushes this device's watermark an hour into the future,
+  // and every local edit made in that hour is stamped by this device's own
+  // clock, lands below the watermark, and is never sent. No error, no retry,
+  // and the two databases quietly stop agreeing.
+  //
+  // A row in a table cannot be contaminated by anyone else's clock. Nothing
+  // reads this table yet — the engine still uses the watermark — and that is
+  // deliberate: the table and its triggers land in the same round on both
+  // devices, and the switch is one change on its own afterwards.
+  out.push({
+    sql: `CREATE TABLE IF NOT EXISTS sync_outbox (
+            tbl        TEXT NOT NULL,
+            uid        TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tbl, uid)
+          )`,
+  });
+  // Whether the one-time seed below has already run. A separate table rather
+  // than a column on sync_clock, because the clock is read inside triggers on
+  // every write and this is read once per launch.
+  out.push({
+    sql: `CREATE TABLE IF NOT EXISTS sync_outbox_state (
+            id     INTEGER PRIMARY KEY CHECK (id = 1),
+            seeded INTEGER NOT NULL DEFAULT 0
+          )`,
+  });
+  out.push({ sql: `INSERT OR IGNORE INTO sync_outbox_state (id, seeded) VALUES (1, 0)` });
+
+  // ── the spill ────────────────────────────────────────────────────────────
+  //
+  // Columns that arrived on a row this database has no column for, kept beside
+  // the row so that sending it back does not strip them. See rows.ts:spillRead.
+  //
+  // Not a column on each table, because the whole point is that this schema has
+  // nowhere to put them — a column would only move the problem one level up.
+  out.push({
+    sql: `CREATE TABLE IF NOT EXISTS sync_spill (
+            tbl  TEXT NOT NULL,
+            uid  TEXT NOT NULL,
+            cols TEXT NOT NULL,
+            PRIMARY KEY (tbl, uid)
+          )`,
+  });
+
 
   for (const t of SYNC_TABLES) {
     out.push({ sql: `ALTER TABLE ${t.name} ADD COLUMN uid TEXT`, ignoreErrors: true });
@@ -211,7 +333,60 @@ export function syncMigrations(): Migration[] {
       END;
     `,
     });
+
+    // The outbox triggers, and why they have no WHEN guard.
+    //
+    // The two above skip a write that sets updated_at itself, which is how an
+    // incoming sync keeps the sender's timestamp. These must not skip it,
+    // because softDelete also sets updated_at itself and a delete that is
+    // never queued is a row that comes back from the dead on the other device.
+    // So everything written to a synced table is queued, including rows that
+    // arrived from elsewhere, and apply() removes those again by name and
+    // version. One rule with one exception undone in the one place that knows
+    // it is an exception, rather than a guard that has to be right about four
+    // different callers.
+    out.push({ sql: `DROP TRIGGER IF EXISTS ${t.name}_outbox_insert` });
+    out.push({ sql: `DROP TRIGGER IF EXISTS ${t.name}_outbox_update` });
+    out.push({ sql: `DROP TRIGGER IF EXISTS ${t.name}_outbox_delete` });
+
+    out.push({
+      sql: `
+      CREATE TRIGGER IF NOT EXISTS ${t.name}_outbox_insert
+      AFTER INSERT ON ${t.name}
+      FOR EACH ROW
+      BEGIN
+        ${outboxEnqueue(t.name)};
+      END;
+    `,
+    });
+    out.push({
+      sql: `
+      CREATE TRIGGER IF NOT EXISTS ${t.name}_outbox_update
+      AFTER UPDATE ON ${t.name}
+      FOR EACH ROW
+      BEGIN
+        ${outboxEnqueue(t.name)};
+      END;
+    `,
+    });
+    // A real DELETE only happens to a tombstone old enough to sweep, so what
+    // it leaves behind is an entry naming a row that no longer exists. The
+    // pending query joins the table and would simply not see it, which means
+    // it would sit there for the life of the install without ever being wrong
+    // enough to notice.
+    out.push({
+      sql: `
+      CREATE TRIGGER IF NOT EXISTS ${t.name}_outbox_delete
+      AFTER DELETE ON ${t.name}
+      FOR EACH ROW
+      BEGIN
+        DELETE FROM sync_outbox WHERE tbl = '${t.name}' AND uid = OLD.uid;
+      END;
+    `,
+    });
   }
+
+  out.push(...outboxSeed());
 
   return out;
 }
@@ -224,16 +399,4 @@ export async function applySyncMigrations(db: Database): Promise<void> {
       if (!m.ignoreErrors) throw e;
     }
   }
-}
-
-/** Rows changed since a point in time — the read half of a future sync push. */
-export async function changedSince(
-  db: Database,
-  table: string,
-  isoTime: string,
-): Promise<any[]> {
-  return db.select<any[]>(
-    `SELECT * FROM ${table} WHERE updated_at > ? ORDER BY updated_at ASC`,
-    [isoTime],
-  );
 }

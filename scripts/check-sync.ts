@@ -43,6 +43,7 @@ import {
   syncWith,
   keepInBackup,
   MACHINE_ONLY_SETTINGS,
+  saveSyncConfig,
 } from "../src/lib/sync/config";
 import {
   PURGE_TASK_SQL,
@@ -51,6 +52,26 @@ import {
   TOMBSTONE_TTL_DAYS,
 } from "../src/lib/tombstones";
 import type { SyncStorage } from "../src/lib/sync/storage";
+import { SYNC_TABLES } from "../src/lib/syncMeta";
+import { TASK_COLUMNS, TASK_EDITABLE, taskProblems, taskUpdate, taskValues } from "../src/lib/taskDraft";
+import {
+  EXPENSE_COLUMNS,
+  SQL_MONTH_OTHER_COUNT,
+  SQL_MONTH_RECEIVED,
+  SQL_MONTH_SPENT,
+  SQL_RECENT_MONEY,
+  SQL_DELETE_EXPENSE,
+  SQL_DELETE_INCOME,
+  expenseProblems,
+  expenseValues,
+} from "../src/lib/moneyDraft";
+import {
+  CURRENCY_KEY,
+  QUIET_KEY,
+  parseQuiet,
+  readSettings,
+  writeSetting,
+} from "../src/lib/userSettings";
 
 declare const require: (m: string) => any;
 declare const process: { argv: string[]; exit(code: number): void };
@@ -258,6 +279,203 @@ async function main(): Promise<void> {
       await runSync(cloud, b);
     }
     check("an idle sync writes nothing at all", cloud.files.size === settled);
+  }
+
+  // ── moving to a different folder ──────────────────────────────────────────
+  {
+    // Connecting Drive and pressing sync reported "sent 0 out" against a folder
+    // that was empty, because pushedThrough still said everything had been
+    // uploaded — to WebDAV, hours before. Both devices would have gone on
+    // reporting success while the new folder never received the history.
+    //
+    // Whole-round-trip rather than a unit test of sameTarget, because the bug
+    // was not in deciding; it was in nobody asking.
+    const cloud = new MemoryStorage();
+    const a = await makeDevice();
+    a.db.raw.prepare("INSERT INTO tasks (name, reset_type) VALUES (?, ?)").run("dailies", "daily");
+
+    const code = "reup://pair?b=" + "A".repeat(22) + "&k=" + "B".repeat(43);
+    const webdav = {
+      backend: { kind: "webdav", baseUrl: "https://one/dav", username: "u", password: "p" },
+      pairing: code,
+    } as const;
+
+    await saveSyncConfig(a.db as never, webdav);
+    const first = await runSync(cloud, a);
+    check("the first folder receives the database", first.pushed > 0);
+
+    const settled = await runSync(cloud, a);
+    check("and a second run against it is quiet", settled.pushed === 0);
+
+    // Same key, different folder. This is the Drive switch.
+    await saveSyncConfig(a.db as never, { backend: { kind: "drive" }, pairing: code });
+    a.store = await SqlLocalStore.open(a.db);
+
+    const empty = new MemoryStorage();
+    const moved = await runSync(empty, a);
+    check("a new folder receives the database too", moved.pushed === first.pushed);
+    check("and it is not empty afterwards", empty.files.size === 1);
+
+    // A file name must never be reused, even in a folder that never saw it.
+    const usedOnce = [...cloud.files.keys()][0];
+    check(
+      "and the sequence number was not handed out twice",
+      ![...empty.files.keys()].includes(usedOnce),
+    );
+
+  }
+
+  // ── correcting a setting that does not change the folder ──────────────────
+  {
+    // The rule has to cut both ways, or every saved keystroke re-uploads the
+    // database. A password typed wrong and then typed right is the same folder
+    // behind the same door.
+    const cloud = new MemoryStorage();
+    const a = await makeDevice();
+    a.db.raw.prepare("INSERT INTO tasks (name, reset_type) VALUES (?, ?)").run("dailies", "daily");
+
+    const code = "reup://pair?b=" + "A".repeat(22) + "&k=" + "B".repeat(43);
+    const at = (password: string) =>
+      ({
+        backend: { kind: "webdav", baseUrl: "https://one/dav", username: "u", password },
+        pairing: code,
+      }) as const;
+
+    await saveSyncConfig(a.db as never, at("wrng"));
+    await runSync(cloud, a);
+    check("settled against the folder first", (await runSync(cloud, a)).pushed === 0);
+
+    await saveSyncConfig(a.db as never, at("right"));
+    a.store = await SqlLocalStore.open(a.db);
+    check(
+      "fixing a password does not re-upload everything",
+      (await runSync(cloud, a)).pushed === 0,
+    );
+
+    // A new key is a new bucket, even at the same address.
+    await saveSyncConfig(a.db as never, {
+      backend: at("right").backend,
+      pairing: "reup://pair?b=" + "C".repeat(22) + "&k=" + "D".repeat(43),
+    });
+    a.store = await SqlLocalStore.open(a.db);
+    const fresh = new MemoryStorage();
+    check(
+      "but a new pairing code does",
+      (await runSync(fresh, a)).pushed > 0,
+    );
+  }
+
+  // ── the backend survives being written down ───────────────────────────────
+  {
+    // The Drive backend has no fields, which made it look like there was
+    // nothing to check. There was: the parser has to recognise the name, and
+    // when it did not, the settings screen showed Drive selected out of React
+    // state while every sync read `off` back from the database and returned
+    // null. No error anywhere, and the result line simply never appeared.
+    //
+    // A round trip is the cheapest test in this file and it is the one that was
+    // missing for the one backend that carries nothing.
+    const code = "reup://pair?b=" + "A".repeat(22) + "&k=" + "B".repeat(43);
+    for (const backend of [
+      { kind: "drive" } as const,
+      { kind: "webdav", baseUrl: "https://x/dav", username: "u", password: "p" } as const,
+      { kind: "off" } as const,
+    ]) {
+      const before = { backend, pairing: code };
+      const after = parseSyncConfig(serialiseSyncConfig(before));
+      check(
+        `a ${backend.kind} backend reads back as ${backend.kind}`,
+        after.backend.kind === backend.kind,
+      );
+      check(`and a ${backend.kind} config keeps its pairing code`, after.pairing === code);
+    }
+
+    check(
+      "an unknown backend from a newer version reads as off, not as a crash",
+      parseSyncConfig(JSON.stringify({ backend: { kind: "sftp" }, pairing: code })).backend.kind ===
+        "off",
+    );
+  }
+
+  // ── a unique index on a column that is allowed to be null ─────────────────
+  {
+    // expenses has UNIQUE(slip_ref), and slip_ref is null for every expense
+    // that was typed in rather than scanned — which is nearly all of them.
+    //
+    // SQLite does not constrain those rows: nulls are distinct in a unique
+    // index, so any number of slip-less expenses is legal and always was. The
+    // store used to ask about them anyway, with `slip_ref IS ?` and a null
+    // bound, which is `IS NULL`, which matches every one of them. It concluded
+    // they were all the same expense, kept whichever uuid sorted first, and
+    // filed the rest as tombstones. Those tombstones then synced, so the other
+    // device deleted its copies too.
+    //
+    // Nothing errored. The rows were just gone, and which ones survived was
+    // decided by random uuids. The existing echo check missed it because it
+    // seeds one task and no expenses at all, and because it measures the folder
+    // only after the first exchange has already happened.
+    const cloud = new MemoryStorage();
+    const a = await makeDevice();
+    const b = await makeDevice();
+
+    const ins = a.db.raw.prepare(
+      "INSERT INTO expenses (amount, category, note, date, slip_ref) VALUES (?, ?, ?, ?, ?)",
+    );
+    ins.run(1200, "food", "dog food", "2026-08-16", null);
+    ins.run(60.5, "food", "", "2026-08-16", null);
+    ins.run(90, "transport", "", "2026-08-16", null);
+
+    await runSync(cloud, a);
+    const first = await runSync(cloud, b);
+
+    check("a device's first sync pushes nothing back", first.pushed === 0);
+    check("and writes no file for it", first.wrote === null);
+    check(
+      "every slip-less expense survives the trip",
+      rows(b.db, "SELECT * FROM expenses WHERE deleted = 0").length === 3,
+    );
+
+    await runSync(cloud, a);
+    check(
+      "and none of them is deleted back on the sender",
+      rows(a.db, "SELECT * FROM expenses WHERE deleted = 0").length === 3,
+    );
+  }
+
+  // ── but the same slip really scanned on both devices still settles ─────────
+  {
+    // The rule above must not become "stop checking". A slip_ref that is
+    // actually set is a real natural key, and two rows holding it is exactly
+    // the collision the clash rule exists to absorb — without it SQLite refuses
+    // the insert, apply throws, and sync stops for good.
+    const cloud = new MemoryStorage();
+    const a = await makeDevice();
+    const b = await makeDevice();
+
+    const ins = (d: { db: NodeDb }, amount: number) =>
+      d.db.raw
+        .prepare("INSERT INTO expenses (amount, category, note, date, slip_ref) VALUES (?, ?, ?, ?, ?)")
+        .run(amount, "food", "", "2026-08-16", "slip-abc");
+    ins(a, 1200);
+    ins(b, 1250);
+
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+
+    const la = rows(a.db, "SELECT * FROM expenses WHERE deleted = 0");
+    const lb = rows(b.db, "SELECT * FROM expenses WHERE deleted = 0");
+    check("one row holds the slip on each device", la.length === 1 && lb.length === 1);
+    check("and both devices kept the same one", la[0]?.uid === lb[0]?.uid);
+    check(
+      "the loser is a tombstone, not a hole",
+      rows(a.db, "SELECT * FROM expenses").length === 2,
+    );
+    check(
+      "and it let go of the slip so nothing else collides with it",
+      rows(a.db, "SELECT * FROM expenses WHERE deleted = 1")[0]?.slip_ref !== "slip-abc",
+    );
   }
 
   // ── ticking a task done on one device ─────────────────────────────────────
@@ -524,7 +742,12 @@ async function main(): Promise<void> {
     const after = await reopened.loadState();
     check("the device id is the same after a restart", before.device === after.device);
     check("the sequence number is the same after a restart", before.seq === after.seq);
-    check("the watermark is the same after a restart", before.pushedThrough === after.pushedThrough);
+    // There is deliberately nothing else to compare. What has been sent used to
+    // live in this blob as a timestamp; it lives in sync_outbox now, so the
+    // blob carrying it across a restart is no longer what makes the next line
+    // true.
+    check("the queue is empty once everything has been sent",
+      rows(a.db, "SELECT * FROM sync_outbox").length === 0);
 
     // And nothing new is written, because there is nothing new to say.
     const settled = cloud.files.size;
@@ -728,6 +951,11 @@ async function main(): Promise<void> {
   // ── what a backup is allowed to carry ─────────────────────────────────────
   {
     check("a task row is always kept", keepInBackup("tasks", { id: 1, name: "x" }));
+    // The settings that were promoted out of app_settings are ordinary rows in
+    // an ordinary table, and the rule that guards the pairing key must not be
+    // reading their names as if they were still in there with it.
+    check("a promoted setting is not caught by the app_settings rule",
+      keepInBackup("user_settings", { key: QUIET_KEY, value: "{}" }));
     check("an ordinary setting is kept", keepInBackup("app_settings", { key: "currency", value: "THB" }));
     for (const k of MACHINE_ONLY_SETTINGS) {
       check(`${k} never reaches the file`, !keepInBackup("app_settings", { key: k, value: "..." }));
@@ -775,6 +1003,798 @@ async function main(): Promise<void> {
       "and a device that understands everything reports nothing",
       reopened.unknownFields.size === 0,
     );
+  }
+
+  // ── a device whose clock runs ahead cannot freeze the other one ───────────
+  {
+    // The bug the outbox exists for, and the only one in this file that leaves
+    // no trace at all when it happens.
+    //
+    // "What have I not sent" used to be answered by comparing updated_at to a
+    // watermark, and the watermark was moved to the newest timestamp the run
+    // had looked at — rows pulled from the other device included. Those carry
+    // the other device's clock. One device an hour ahead therefore pushed the
+    // other's watermark an hour into the future, and every local edit made in
+    // that hour was stamped by its own clock, landed below the watermark, and
+    // was never sent. No error, no retry, and the two databases quietly stopped
+    // agreeing until real time caught up.
+    const cloud = new MemoryStorage();
+    const a = await makeDevice();
+    const b = await makeDevice();
+
+    // b is an hour fast. Not contrived: two machines agreeing on the
+    // millisecond is the thing that does not happen.
+    b.db.raw.prepare("UPDATE sync_clock SET t = ? WHERE id = 1").run(
+      new Date(Date.now() + 60 * 60 * 1000).toISOString().replace("Z", "Z"),
+    );
+    b.db.raw
+      .prepare("INSERT INTO tasks (name, reset_type, is_active) VALUES (?, ?, 1)")
+      .run("from the fast one", "daily");
+
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+    check(
+      "the fast device's row arrives",
+      rows(a.db, "SELECT * FROM tasks WHERE deleted = 0").length === 1,
+    );
+
+    // Now the slow device makes its own change, stamped by its own clock, which
+    // is an hour behind everything it just took in.
+    a.db.raw
+      .prepare("INSERT INTO tasks (name, reset_type, is_active) VALUES (?, ?, 1)")
+      .run("from the slow one", "daily");
+
+    const out = await runSync(cloud, a);
+    check("a local edit is still sent after taking in a future timestamp", out.pushed === 1);
+
+    await runSync(cloud, b);
+    check(
+      "and it reaches the other device",
+      rows(b.db, "SELECT * FROM tasks WHERE deleted = 0 AND name = 'from the slow one'").length === 1,
+    );
+
+    const idle = await runSync(cloud, a);
+    check("while an idle run still sends nothing", idle.pushed === 0 && idle.wrote === null);
+  }
+
+  // ── ticking done, which is the write both devices will actually make ──────
+  //
+  // Everything above proves rows travel. This proves the one row that will be
+  // written on both sides at once does, because that is what the notification
+  // is for: it goes off on the phone, it is ticked there, and the desktop must
+  // not hand back the version from before the tick.
+  //
+  // The statement is the desktop's own markTaskCompleted, spelled by uid rather
+  // than by local id because that is the only name the phone can use.
+  {
+    const cloud = new MemoryStorage();
+    const a = await makeDevice();
+    const b = await makeDevice();
+
+    a.db.raw
+      .prepare("INSERT INTO tasks (name, reset_type, is_active) VALUES (?, ?, 1)")
+      .run("blood pressure meds", "daily");
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+
+    const uid = rows(b.db, "SELECT uid FROM tasks")[0].uid as string;
+    b.db.raw
+      .prepare("UPDATE tasks SET completed_until = ?, missed_streak = 0 WHERE uid = ?")
+      .run("2026-08-19T09:00:00.000Z", uid);
+
+    check(
+      "ticking done queues the row without anyone saying so",
+      rows(b.db, "SELECT * FROM sync_outbox WHERE tbl = 'tasks' AND uid = ?", [uid]).length === 1,
+    );
+
+    // Meanwhile the other device renames it, which is the case that decides
+    // whether the completion group is doing its job: the name is newer, so it
+    // wins the row, and the completion still has to survive.
+    //
+    // WHY THE CLOCK IS PUSHED FORWARD BY HAND FIRST
+    //
+    // Written without this, the two writes land in the same millisecond often
+    // enough that the check failed about one run in three — and failed
+    // correctly. LWW here is per row, not per field, so when the rename is not
+    // strictly newer the tick's whole row wins and the rename is genuinely
+    // gone. That is the trade this design took knowingly, and a check that
+    // trips over it at random is testing the trade rather than the thing it
+    // was written for. Forcing the order pins the question this is about: with
+    // the rename winning the row, does the completion still survive.
+    a.db.raw.prepare("UPDATE sync_clock SET t = ? WHERE id = 1")
+      .run(new Date(Date.now() + 60_000).toISOString());
+    a.db.raw.prepare("UPDATE tasks SET name = ? WHERE uid = ?").run("ยาความดัน", uid);
+
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+
+    const back = rows(a.db, "SELECT name, completed_until FROM tasks WHERE uid = ?", [uid])[0];
+    check("the tick reaches the other device", back.completed_until === "2026-08-19T09:00:00.000Z");
+    check("and the rename made at the same time is not lost", back.name === "ยาความดัน");
+
+    const mirror = rows(b.db, "SELECT name, completed_until FROM tasks WHERE uid = ?", [uid])[0];
+    check("both devices end up holding the same row",
+      mirror.name === back.name && mirror.completed_until === back.completed_until);
+
+    const quiet = await runSync(cloud, a);
+    check("and nothing is left queued afterwards", quiet.pushed === 0 &&
+      rows(a.db, "SELECT * FROM sync_outbox").length === 0);
+  }
+
+  // ── a column one device has never heard of ───────────────────────────────
+  //
+  // The version gap, made real: device A has grown a column, device B has not.
+  // Before this round B could only ever receive, so dropping the column cost
+  // nothing on the way back. B ticks things done now, which means B pushes,
+  // which means B is capable of handing A a row with a value quietly missing
+  // from it — a value neither person edited and nobody would be told about.
+  {
+    const cloud = new MemoryStorage();
+    const a = await makeDevice();
+    const b = await makeDevice();
+
+    // A is the newer build. Only A has this column.
+    //
+    // The store is reopened afterwards on purpose: it reads the shape of every
+    // table once, at open, and a column added to the table behind a store that
+    // is already running is a column that store will never send. Which is the
+    // real thing too — the schema changes when the app starts, not while it is
+    // running.
+    a.db.raw.prepare("ALTER TABLE tasks ADD COLUMN mood_after INTEGER").run();
+    a.store = await SqlLocalStore.open(a.db);
+
+    a.db.raw
+      .prepare("INSERT INTO tasks (name, reset_type, is_active, mood_after) VALUES (?, ?, 1, ?)")
+      .run("เดินเล่น", "daily", 3);
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+
+    const uid = rows(b.db, "SELECT uid FROM tasks")[0].uid as string;
+    check(
+      "the older device takes the row in and says what it could not hold",
+      rows(b.db, "SELECT name FROM tasks WHERE uid = ?", [uid])[0].name === "เดินเล่น",
+    );
+    check(
+      "and keeps the column it cannot read, rather than dropping it",
+      rows(b.db, "SELECT cols FROM sync_spill WHERE tbl = 'tasks' AND uid = ?", [uid]).length === 1,
+    );
+
+    // Now the older device does the one thing it learned to do this round.
+    b.db.raw
+      .prepare("UPDATE tasks SET completed_until = ?, missed_streak = 0 WHERE uid = ?")
+      .run("2026-08-19T09:00:00.000Z", uid);
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+
+    const back = rows(a.db, "SELECT completed_until, mood_after FROM tasks WHERE uid = ?", [uid])[0];
+    check("the tick made on the older device arrives", back.completed_until === "2026-08-19T09:00:00.000Z");
+    check("and the column the older device cannot read survives the trip", back.mood_after === 3);
+
+    // And it must not cost a batch a run, for ever, by looking different from
+    // the copy the far side holds.
+    const quiet = await runSync(cloud, b);
+    check("a row carrying a spill is not re-sent every run", quiet.pushed === 0 && quiet.wrote === null);
+
+    // A tombstone has no body, so nothing may be re-attached to it later.
+    //
+    // Stamped from A's own clock rather than from a date typed in here. This
+    // line used to read "2026-08-20T00:00:00.000Z", which worked until the day
+    // that stopped being in the future — and then B's ordinary copy, stamped
+    // with the real time, beat the tombstone and the spill was never cleared.
+    // A test with a use-by date on it is worse than no test, because it goes
+    // green for a year first.
+    //
+    // A has already pulled everything B wrote, and a device's clock is never
+    // behind what it has been told, so this is newer than B's copy by
+    // construction rather than by arithmetic.
+    a.db.raw.prepare("UPDATE tasks SET deleted = 1, updated_at = ? WHERE uid = ?")
+      .run(await dbNow(a.db), uid);
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    check(
+      "a deleted row keeps no columns beside it",
+      rows(b.db, "SELECT cols FROM sync_spill WHERE tbl = 'tasks' AND uid = ?", [uid]).length === 0,
+    );
+  }
+
+  // ── taking a tick back ────────────────────────────────────────────────────
+  //
+  // The bug this column exists for. Completion used to be decided by whichever
+  // side reached further, which protects a tick and makes UNDOING one
+  // impossible: clearing it writes a value that is behind the old one by
+  // definition, so the other device's copy won, came back, and was pushed
+  // again. Deterministic, not a race, and syncing more often only made it
+  // happen faster.
+  {
+    const cloud = new MemoryStorage();
+    const a = await makeDevice();
+    const b = await makeDevice();
+
+    a.db.raw.prepare("INSERT INTO tasks (name, reset_type, is_active) VALUES (?, ?, 1)")
+      .run("fgo dailies", "daily");
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    const uid = rows(b.db, "SELECT uid FROM tasks")[0].uid as string;
+
+    // Ticked on one device, seen on the other.
+    b.db.raw.prepare("UPDATE tasks SET completed_until = ?, completed_at = ?, missed_streak = 0 WHERE uid = ?")
+      .run("2026-08-19T04:00:00.000Z", "2026-08-18T10:00:00.000Z", uid);
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+    check("the tick reaches the other device",
+      rows(a.db, "SELECT completed_until FROM tasks WHERE uid = ?", [uid])[0].completed_until
+        === "2026-08-19T04:00:00.000Z");
+
+    // And taken back on the device that did not tick it.
+    a.db.raw.prepare("UPDATE tasks SET completed_until = NULL, completed_at = ? WHERE uid = ?")
+      .run("2026-08-18T11:00:00.000Z", uid);
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    check("taking the tick back reaches the other device too",
+      rows(b.db, "SELECT completed_until FROM tasks WHERE uid = ?", [uid])[0].completed_until === null);
+
+    // The half that matters: the device that still remembers the tick must not
+    // hand it back on the next run, which is what made this unfixable by
+    // pressing sync again.
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+    check("and the old tick is not handed back on the next run",
+      rows(a.db, "SELECT completed_until FROM tasks WHERE uid = ?", [uid])[0].completed_until === null);
+
+    // A device that renames the task has not touched the tick, so its stale
+    // completion must still lose — the property the old rule existed for.
+    b.db.raw.prepare("UPDATE tasks SET completed_until = ?, completed_at = ? WHERE uid = ?")
+      .run("2026-08-19T04:00:00.000Z", "2026-08-18T12:00:00.000Z", uid);
+    a.db.raw.prepare("UPDATE sync_clock SET t = ? WHERE id = 1")
+      .run(new Date(Date.now() + 60_000).toISOString());
+    a.db.raw.prepare("UPDATE tasks SET name = ? WHERE uid = ?").run("เอฟจีโอ", uid);
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+    const both = rows(a.db, "SELECT name, completed_until FROM tasks WHERE uid = ?", [uid])[0];
+    check("a rename does not undo a tick it never touched",
+      both.name === "เอฟจีโอ" && both.completed_until === "2026-08-19T04:00:00.000Z");
+  }
+
+  // ── the history, which is the only thing that remembers ──────────────────
+  //
+  // `completed_until` is one field that gets overwritten every cycle, so
+  // yesterday leaves no trace in it. These rows are the trace, and because they
+  // are append-only they are also the easiest thing in the schema to sync:
+  // merging two devices' events is a union with nothing to negotiate.
+  {
+    const cloud = new MemoryStorage();
+    const a = await makeDevice();
+    const b = await makeDevice();
+
+    a.db.raw.prepare("INSERT INTO tasks (name, reset_type, is_active) VALUES (?, ?, 1)")
+      .run("fgo dailies", "daily");
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    const uid = rows(a.db, "SELECT uid FROM tasks")[0].uid as string;
+
+    // Two ticks a day apart, and an undo in between, each written on whichever
+    // device happened to be to hand.
+    a.db.raw.prepare("INSERT INTO task_events (task_uid, kind, at, for_cycle) VALUES (?,?,?,?)")
+      .run(uid, "done", "2026-08-18T03:10:00.000Z", "2026-08-19T04:00:00.000Z");
+    b.db.raw.prepare("INSERT INTO task_events (task_uid, kind, at, for_cycle) VALUES (?,?,?,?)")
+      .run(uid, "undone", "2026-08-18T03:20:00.000Z", null);
+    a.db.raw.prepare("INSERT INTO task_events (task_uid, kind, at, for_cycle) VALUES (?,?,?,?)")
+      .run(uid, "done", "2026-08-19T05:00:00.000Z", "2026-08-20T04:00:00.000Z");
+
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+
+    const onA = rows(a.db, "SELECT kind, at FROM task_events ORDER BY at");
+    const onB = rows(b.db, "SELECT kind, at FROM task_events ORDER BY at");
+    check("every event reaches both devices", onA.length === 3 && onB.length === 3);
+    check("and in the same order on each",
+      JSON.stringify(onA) === JSON.stringify(onB));
+    check("an undo is kept rather than erasing the tick before it",
+      onA.map(r => r.kind).join(",") === "done,undone,done");
+
+    // Append-only means nothing to negotiate, so syncing again must be silent.
+    const quiet = await runSync(cloud, a);
+    check("history does not churn once it has settled",
+      quiet.pushed === 0 && quiet.wrote === null);
+
+    // And a day can be asked about, which is the entire point of the table.
+    const thatDay = rows(
+      a.db,
+      "SELECT kind FROM task_events WHERE at >= ? AND at < ? ORDER BY at",
+      ["2026-08-18T00:00:00.000Z", "2026-08-19T00:00:00.000Z"],
+    );
+    check("a single day can be read back out", thatDay.length === 2);
+  }
+
+  // ── the folder cleans itself up under a device that was away ──────────────
+  //
+  // The one block in this file where the failure being tested for is a deletion
+  // this code performs on purpose. Everything else can be re-run; a file that
+  // has been removed from the folder is gone.
+  //
+  // Device B syncs once and then does not sync again for a hundred batches. By
+  // the time it wakes up, every file it stopped at has been deleted by A. What
+  // makes that safe is not that B notices — it does not, and there is nothing to
+  // notice — but that A never deletes below a snapshot of its own, so whatever
+  // is left in the folder is a complete copy plus everything since.
+  {
+    const cloud = new MemoryStorage();
+    const a = await makeDevice();
+    const b = await makeDevice();
+
+    a.db.raw.prepare("INSERT INTO tasks (name, reset_type, is_active) VALUES (?, ?, 1)")
+      .run("\u0e22\u0e32\u0e04\u0e27\u0e32\u0e21\u0e14\u0e31\u0e19", "daily");
+    a.db.raw.prepare("INSERT INTO expenses (amount, category, note, date) VALUES (?, ?, ?, ?)")
+      .run(1200, "food", "ค่าอาหารหมา", "2026-08-14");
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    check("the sleeping device starts in step",
+      rows(b.db, "SELECT uid FROM tasks").length === 1 &&
+      rows(b.db, "SELECT uid FROM expenses").length === 1);
+
+    const asleepAt = (await b.store.loadState()).cursor[a.store.device] ?? 0;
+    const expenseUid = rows(a.db, "SELECT uid FROM expenses")[0].uid as string;
+
+    // Everything that happens while B is in a drawer, including the deletion,
+    // which is the row that would come back from the dead if a snapshot carried
+    // only live rows.
+    await a.store.softDelete("expenses", expenseUid);
+
+    for (let i = 1; i <= 100; i++) {
+      a.db.raw.prepare("INSERT INTO tasks (name, reset_type, is_active) VALUES (?, ?, 1)")
+        .run(`งาน ${i}`, "daily");
+      await runSync(cloud, a);
+    }
+    // A few runs with nothing new to say, which is where a prune that ran out of
+    // its per-run budget finishes.
+    for (let i = 0; i < 4; i++) await runSync(cloud, a);
+
+    const mine = [...cloud.files.keys()].filter((n) => n.startsWith(`${a.store.device}-`));
+    const seqOf = (n: string) => Number(n.slice(a.store.device.length + 1, -".reup".length));
+    check("the folder is bounded rather than cumulative", mine.length < 101);
+    check("and the files the sleeping device stopped at are gone",
+      Math.min(...mine.map(seqOf)) > asleepAt);
+    check("and a device only ever deletes its own",
+      [...cloud.files.keys()].every((n) => n.startsWith(`${a.store.device}-`)));
+
+    // B has no idea any of that happened. Its cursor still points into the hole.
+    check("the sleeping device noticed nothing",
+      ((await b.store.loadState()).cursor[a.store.device] ?? 0) === asleepAt);
+
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+
+    check("it still ends up with every row",
+      rows(b.db, "SELECT uid FROM tasks").length ===
+      rows(a.db, "SELECT uid FROM tasks").length);
+    check("including the hundred announced only in files that are gone",
+      rows(b.db, "SELECT uid FROM tasks WHERE is_active = 1").length === 101);
+    check("and the deletion made in the same window is not undone",
+      row(b.db, "SELECT deleted FROM expenses WHERE uid = ?", [expenseUid])?.deleted === 1);
+    check("nor does the desktop get the deleted row back",
+      row(a.db, "SELECT deleted FROM expenses WHERE uid = ?", [expenseUid])?.deleted === 1);
+
+    const quiet = await runSync(cloud, a);
+    check("and the two of them settle rather than trading snapshots",
+      quiet.pushed === 0 && quiet.wrote === null);
+  }
+
+  // ── the settings that belong to a person ──────────────────────────────────
+  //
+  // The named bug: the phone had a hardcoded 23:00 to 08:00 because there was
+  // no way for it to learn what night means here, and Repo.kt says so in a
+  // comment. What makes that fixable is that the row is in a table the sync
+  // layer already reads, rather than behind a rule about key names.
+  {
+    const cloud = new MemoryStorage();
+    const a = await makeDevice();
+    const b = await makeDevice();
+
+    await writeSetting(a.db, QUIET_KEY, JSON.stringify({ enabled: true, start: "23:30", end: "07:00" }));
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+
+    const onB = parseQuiet((await readSettings(b.db)).get(QUIET_KEY));
+    check("quiet hours reach the other device",
+      onB.kind === "window" && onB.start === "23:30" && onB.end === "07:00");
+
+    // Off has to arrive as off. A device that reads it as "nothing stored" puts
+    // its own default night back, which is an alarm at four in the morning on
+    // somebody who explicitly turned quiet hours off.
+    await writeSetting(a.db, QUIET_KEY, JSON.stringify({ enabled: false, start: "23:30", end: "07:00" }));
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    check("turning them off is not the same as never having said",
+      parseQuiet((await readSettings(b.db)).get(QUIET_KEY)).kind === "off");
+
+    // The whole reason this is a second table. app_settings holds the pairing
+    // key and the WebDAV password, and a wallpaper path that means nothing on a
+    // phone; promoting three settings out of it must not have dragged it along.
+    a.db.raw.prepare("INSERT INTO app_settings (key, value) VALUES (?, ?)")
+      .run("wallpaper_path", "D:\\\\wallpapers\\\\rain.mp4");
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    check("nothing from app_settings travels with it",
+      rows(b.db, "SELECT key FROM app_settings WHERE key = 'wallpaper_path'").length === 0);
+    check("and only the settings that were promoted are in the new table",
+      rows(b.db, "SELECT key FROM user_settings").length === 1);
+
+    // A save with nothing changed is a file on the wire, every time, on both
+    // devices, for ever. The upsert carries a WHERE for exactly this.
+    await writeSetting(a.db, QUIET_KEY, JSON.stringify({ enabled: false, start: "23:30", end: "07:00" }));
+    check("a write that changes nothing queues nothing",
+      rows(a.db, "SELECT * FROM sync_outbox WHERE tbl = 'user_settings'").length === 0);
+
+    // Both devices pick a currency before either has heard of the other's. The
+    // key is unique, so this is the natural-key clash the store already knows
+    // how to settle — and settling it is the difference between one currency
+    // and a table with two rows nobody chose between.
+    await writeSetting(a.db, CURRENCY_KEY, "THB");
+    await wait(A_TICK_APART);
+    await writeSetting(b.db, CURRENCY_KEY, "USD");
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+
+    const liveA = rows(a.db, "SELECT key, value FROM user_settings WHERE key = ? AND deleted = 0", [CURRENCY_KEY]);
+    const liveB = rows(b.db, "SELECT key, value FROM user_settings WHERE key = ? AND deleted = 0", [CURRENCY_KEY]);
+    check("two devices inventing the same setting end up with one row",
+      liveA.length === 1 && liveB.length === 1);
+    check("and they agree which one it is", liveA[0].value === liveB[0].value);
+    // Which one, deliberately not asserted. The clash is settled by comparing
+    // uids, not clocks, because the two devices have to reach the same answer
+    // without trusting each other's time — see incomingLosesClash. So the first
+    // convergence of a setting invented twice is arbitrary, once, and then the
+    // row has one uid and every later edit is ordinary last-write-wins.
+    //
+    // Asserting "the later one wins" here passed on this machine about a third
+    // of the time, which is the same shape as the test that went green three
+    // times before falling over on the first machine that was not this one.
+    check("and it is one of the two that were actually set",
+      liveA[0].value === "THB" || liveA[0].value === "USD");
+
+    // What matters day to day, and this one is not arbitrary.
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    await writeSetting(b.db, CURRENCY_KEY, "JPY");
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+    check("once they hold the same row, the later edit wins",
+      rows(a.db, "SELECT value FROM user_settings WHERE key = ? AND deleted = 0", [CURRENCY_KEY])[0]
+        .value === "JPY");
+
+    const quiet = await runSync(cloud, a);
+    check("and settings stop churning once they have settled",
+      quiet.pushed === 0 && quiet.wrote === null);
+  }
+
+  // ── the backup covers what the database holds ───────────────────────────
+  //
+  // backup.ts cannot be loaded from here — it reaches the database and the
+  // language files — so this checks the property that made its list go stale
+  // rather than the list itself: every table the sync layer knows about exists,
+  // and a table that exists is one an export has to be able to read.
+  //
+  // The list in backup.ts is now derived from this one, so the two cannot drift
+  // again. What is checked here is that this one is complete.
+  {
+    const d = await makeDevice();
+    for (const t of SYNC_TABLES) {
+      const cols = rows(d.db, `PRAGMA table_info(${t.name})`).map((c: any) => c.name as string);
+      check(`${t.name} exists and is readable`, cols.length > 0);
+      check(`${t.name} carries the columns a restored row needs`,
+        cols.includes("uid") && cols.includes("updated_at"));
+    }
+  }
+
+  // ── a task written from a draft, by either device ──────────────────────
+  //
+  // The column list and the sixteen coercions beside it are about to be
+  // reproduced in Kotlin. What rots a list like that is not the other language
+  // — vectors hold that side — but this one: a column renamed in schema.sql
+  // with nothing pointing back here, and an INSERT that names a column the
+  // table no longer has.
+  {
+    const d = await makeDevice();
+    const cols = rows(d.db, "PRAGMA table_info(tasks)").map((c: any) => c.name as string);
+    for (const c of TASK_COLUMNS) {
+      check(`tasks still has a column called ${c}`, cols.includes(c));
+    }
+
+    const draft = {
+      name: "\u0e22\u0e32\u0e04\u0e27\u0e32\u0e21\u0e14\u0e31\u0e19",
+      reset_type: "weekly",
+      reset_day: 0,
+      reset_time: "09:00",
+      is_priority: true,
+      specific_date: "",
+    };
+    check("a draft the engine can schedule has nothing wrong with it",
+      taskProblems(draft).length === 0);
+
+    const marks = TASK_COLUMNS.map(() => "?").join(", ");
+    d.db.raw.prepare(`INSERT INTO tasks (${TASK_COLUMNS.join(", ")}) VALUES (${marks})`)
+      .run(...taskValues(draft));
+
+    const saved = row(d.db, "SELECT * FROM tasks WHERE name = ?", [draft.name]);
+    check("the row lands with the values the draft asked for",
+      saved.reset_type === "weekly" && saved.reset_day === 0 &&
+      saved.reset_time === "09:00" && saved.is_priority === 1);
+    // Sunday is zero. A guard written as a truthiness test drops it, and the
+    // symptom is one day of the week that weekly tasks cannot be set to.
+    check("Sunday survives being falsy", saved.reset_day === 0);
+    check("a blank date is stored as nothing, not as an empty string",
+      saved.specific_date === null);
+    check("and the triggers gave it an identity without being asked",
+      typeof saved.uid === "string" && saved.uid.length > 0 &&
+      typeof saved.updated_at === "string");
+    check("and queued it for the next sync",
+      rows(d.db, "SELECT * FROM sync_outbox WHERE tbl = 'tasks' AND uid = ?", [saved.uid]).length === 1);
+
+    // The edit side of the same list. Column names go into the SQL text rather
+    // than being bound, so a name that has drifted out of the schema is not a
+    // wrong answer, it is a statement that will not run at all.
+    for (const c of Object.keys(TASK_EDITABLE)) {
+      check(`tasks still has an editable column called ${c}`, cols.includes(c));
+    }
+
+    const edit = taskUpdate({
+      name: "\u0e22\u0e32\u0e04\u0e27\u0e32\u0e21\u0e14\u0e31\u0e19 \u0e40\u0e0a\u0e49\u0e32",
+      reset_time: "08:00",
+      is_priority: false,
+      // Not a column. Must never reach the statement — this is the line that
+      // stands between an object from a model reply and arbitrary SQL.
+      drop_table_tasks: 1,
+    });
+    check("an unknown key never reaches the statement",
+      !edit.columns.includes("drop_table_tasks") && edit.columns.length === 3);
+    d.db.raw.prepare(`UPDATE tasks SET ${edit.columns.map((c) => `${c} = ?`).join(", ")} WHERE uid = ?`)
+      .run(...edit.values, saved.uid);
+
+    const edited = row(d.db, "SELECT * FROM tasks WHERE uid = ?", [saved.uid]);
+    check("the edit lands", edited.reset_time === "08:00" && edited.is_priority === 0);
+    check("and the columns it did not name are untouched", edited.reset_day === 0);
+    check("and the row is queued again", rows(d.db,
+      "SELECT * FROM sync_outbox WHERE tbl = 'tasks' AND uid = ?", [saved.uid]).length === 1);
+  }
+
+  // ── the bin, across two devices ───────────────────────────────────
+  //
+  // The phone can now throw a task away, and it writes the same two columns
+  // this does: is_active to take it off the list, deleted_at to say it was
+  // discarded rather than finished. Neither of those is the sync layer's
+  // `deleted` flag, and that is the point — a task in the bin is a live row
+  // that travels, not a tombstone.
+  //
+  // What is checked here is the property both screens depend on: throwing
+  // something away on one device removes it from the other's list without
+  // making it unrecoverable on either.
+  {
+    const cloud = new MemoryStorage();
+    const a = await makeDevice();
+    const b = await makeDevice();
+
+    a.db.raw.prepare("INSERT INTO tasks (name, reset_type, is_active) VALUES (?, ?, 1)")
+      .run("\u0e22\u0e32\u0e04\u0e27\u0e32\u0e21\u0e14\u0e31\u0e19", "daily");
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    const uid = rows(a.db, "SELECT uid FROM tasks")[0].uid as string;
+    check("both devices have it on the list",
+      rows(b.db, "SELECT uid FROM tasks WHERE is_active = 1 AND deleted = 0").length === 1);
+
+    // A's clock is pushed ahead first, because that is the situation this fails
+    // in and it is not a contrived one.
+    //
+    // The clock is `max(system time, last value + 1ms)`, so a device that has
+    // done more writes than the other inside one tick of the system timer ends
+    // up further ahead of it. On Windows that tick is about sixteen
+    // milliseconds, which is long enough for a whole sync, and the two devices
+    // are then several milliseconds apart with nothing wrong anywhere. Five
+    // minutes here rather than five milliseconds only so the test does not
+    // depend on the granularity of the machine running it.
+    a.db.raw.prepare(
+      "UPDATE sync_clock SET t = strftime('%Y-%m-%dT%H:%M:%fZ','now','+5 minutes') WHERE id = 1",
+    ).run();
+
+    // Exactly what the phone's deleteTask writes, and what the desktop's does.
+    a.db.raw.prepare(
+      "UPDATE tasks SET is_active = 0, deleted_at = ? WHERE uid = ? AND is_active = 1 AND deleted = 0",
+    ).run(await dbNow(a.db), uid);
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+
+    const there = row(b.db, "SELECT * FROM tasks WHERE uid = ?", [uid]);
+    check("it leaves the other device's list", there.is_active === 0);
+    check("without becoming a tombstone", there.deleted === 0);
+    check("and it says it was thrown away, not finished", there.deleted_at !== null);
+    check("so the other device can still offer it back",
+      rows(b.db,
+        "SELECT uid FROM tasks WHERE is_active = 0 AND deleted_at IS NOT NULL AND deleted = 0",
+      ).length === 1);
+
+    // Restoring is the desktop's own statement, and it has to travel too, or
+    // undeleting something would look like it worked and then come back.
+    //
+    // B has never had a reason to move its own clock that far. What stops the
+    // restore being stamped older than the deletion it undoes is that applying
+    // A's row moved B's clock up to meet it. Without that, this write travels
+    // and is thrown away at the far end with nothing reported anywhere.
+    b.db.raw.prepare(
+      "UPDATE tasks SET is_active = 1, deleted_at = NULL WHERE uid = ? AND deleted = 0",
+    ).run(uid);
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+    check("and undeleting travels back the other way",
+      row(a.db, "SELECT * FROM tasks WHERE uid = ?", [uid]).is_active === 1);
+    check("because a device's clock never sits behind what it has been told",
+      row(b.db, "SELECT t FROM sync_clock WHERE id = 1").t >=
+        row(b.db, "SELECT updated_at FROM tasks WHERE uid = ?", [uid]).updated_at);
+  }
+
+  // ── an expense recorded away from the desk ──────────────────────────
+  //
+  // The phone is about to be able to do this, so the column list and the six
+  // coercions beside it are about to exist in Kotlin too. Vectors hold that
+  // side. What rots a list like this is the other direction: a column renamed
+  // in schema.sql with nothing pointing back at the INSERT that names it.
+  {
+    const cloud = new MemoryStorage();
+    const a = await makeDevice();
+    const b = await makeDevice();
+
+    const cols = rows(a.db, "PRAGMA table_info(expenses)").map((c: any) => c.name as string);
+    for (const c of EXPENSE_COLUMNS) {
+      check(`expenses still has a column called ${c}`, cols.includes(c));
+    }
+
+    // Seeded here, because schema.sql builds the table and the app fills it on
+    // first run. An empty list is not a broken fixture either — it is what a
+    // database looks like before the app has ever opened it, and everything
+    // then files under `other`, which is the behaviour and not a bug.
+    for (const [i, key] of ["food", "transport", "other"].entries()) {
+      a.db.raw.prepare(
+        "INSERT INTO expense_categories (key, emoji, sort_order) VALUES (?, ?, ?)",
+      ).run(key, "\u{1F4E6}", i);
+    }
+    const known = rows(a.db, "SELECT key FROM expense_categories").map((r: any) => r.key as string);
+    const draft = {
+      amount: "60",
+      currency: "THB",
+      category: "food",
+      note: "\u0e01\u0e32\u0e41\u0e1f",
+      date: "2026-08-19",
+    };
+    check("a draft the books can hold has nothing wrong with it",
+      expenseProblems(draft, known).length === 0);
+
+    const marks = EXPENSE_COLUMNS.map(() => "?").join(", ");
+    const insert = `INSERT INTO expenses (${EXPENSE_COLUMNS.join(", ")}) VALUES (${marks})`;
+    a.db.raw.prepare(insert).run(...expenseValues(draft, known));
+
+    const saved = row(a.db, "SELECT * FROM expenses WHERE note = ?", [draft.note]);
+    check("the row lands with the amount and the unit it was counted in",
+      saved.amount === 60 && saved.currency === "THB" && saved.category === "food");
+    // Null rather than "", because the unique index tolerates any number of
+    // nulls and exactly one of each string. Two manual entries writing "" would
+    // collide from the second one onwards.
+    check("a manual entry leaves the slip reference empty, not blank",
+      saved.slip_ref === null);
+    a.db.raw.prepare(insert).run(...expenseValues({ ...draft, note: "\u0e19\u0e49\u0e33" }, known));
+    check("so a second one can be recorded the same minute",
+      rows(a.db, "SELECT id FROM expenses").length === 2);
+
+    // An unknown category is filed, not refused. Somebody standing at a counter
+    // should not lose a number because a label was renamed on the other device.
+    a.db.raw.prepare(insert)
+      .run(...expenseValues({ ...draft, category: "gadgets", note: "x" }, known));
+    check("an unknown category is filed under other rather than losing the row",
+      row(a.db, "SELECT category FROM expenses WHERE note = 'x'").category === "other");
+
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    check("and spending recorded on one device reaches the other",
+      rows(b.db, "SELECT id FROM expenses WHERE deleted = 0").length === 3);
+    check("with the unit it was counted in, not the reader's",
+      row(b.db, "SELECT currency FROM expenses WHERE note = ?", [draft.note]).currency === "THB");
+
+    // The three statements a phone screen asks the month with, run against a
+    // real database rather than read. A query that names a column the table
+    // does not have is not a wrong answer, it is a statement that will not run.
+    b.db.raw.prepare(insert)
+      .run(...expenseValues({ ...draft, amount: "40", currency: "USD", note: "usd" }, known));
+    b.db.raw.prepare(
+      "INSERT INTO income (amount, source, note, date, currency) VALUES (?, ?, ?, ?, ?)",
+    ).run(6516, "TELUS", "", "2026-08-19", "THB");
+
+    const spent = row(b.db, SQL_MONTH_SPENT, ["THB", "2026-08"]).total as number;
+    const got = row(b.db, SQL_MONTH_RECEIVED, ["THB", "2026-08"]).total as number;
+    const others = row(b.db, SQL_MONTH_OTHER_COUNT, ["THB", "2026-08", "THB", "2026-08"]).n as number;
+    // Three at sixty, all in baht. The fourth is in dollars and is the one
+    // that has to be counted separately rather than added in.
+    check("the month adds up in one unit at a time", spent === 180 && got === 6516);
+    check("and says how many rows it left out rather than filtering in silence",
+      others === 1);
+
+    // ─── the list under that line ────────────────────────────────────────────
+    //
+    // A total cannot say the same coffee went in twice: two identical rows move
+    // it by exactly what one row for twice the price would. So the list is not
+    // decoration on the summary, it is the part of the question the summary
+    // cannot answer.
+    //
+    // And unlike the three above, it does NOT filter by unit — every row prints
+    // the unit it was counted in, so nothing is being added together. Which
+    // makes it the place the rows those totals left out become visible instead
+    // of merely counted.
+    b.db.raw.prepare(insert).run(
+      ...expenseValues({ ...draft, amount: "12", note: "\u0e40\u0e01\u0e48\u0e32", date: "2026-07-02" }, known),
+    );
+    b.db.raw.prepare(insert).run(
+      ...expenseValues({ ...draft, amount: "99", note: "\u0e17\u0e34\u0e49\u0e07", date: "2026-08-19" }, known),
+    );
+    b.db.raw.prepare("UPDATE expenses SET deleted = 1 WHERE note = ?")
+      .run("\u0e17\u0e34\u0e49\u0e07");
+
+    const recent = rows(b.db, SQL_RECENT_MONEY);
+    check("the list carries both directions and every unit, unlike the totals",
+      recent.length === 6
+      && recent.some((r: any) => r.kind === "in" && r.amount === 6516)
+      && recent.some((r: any) => r.kind === "out" && r.currency === "USD"));
+    check("with the name on a payment where a category would be",
+      recent.find((r: any) => r.kind === "in").tag === "TELUS"
+      && recent.some((r: any) => r.kind === "out" && r.tag === "food"));
+    check("newest day first, and a row that was deleted is not in it at all",
+      recent[0].date === "2026-08-19"
+      && recent[recent.length - 1].date === "2026-07-02"
+      && !recent.some((r: any) => r.note === "\u0e17\u0e34\u0e49\u0e07"));
+
+    // The cap is inside the statement rather than beside it, so this is the
+    // only place either side could disagree about what "lately" means.
+    for (let i = 0; i < 20; i++) {
+      b.db.raw.prepare(insert).run(
+        ...expenseValues({ ...draft, amount: "5", note: `x${i}`, date: "2026-08-20" }, known),
+      );
+    }
+    const capped = rows(b.db, SQL_RECENT_MONEY);
+    check("and it stops at twenty rather than growing without end",
+      capped.length === 20 && capped.every((r: any) => r.date === "2026-08-20"));
+
+    // ─── taking one back ─────────────────────────────────────────────────────
+    //
+    // A tombstone rather than a real delete, because a row that simply vanishes
+    // tells the other device nothing and comes back on the next sync. What is
+    // worth checking is the other half: that the payload goes with it. A row
+    // somebody has said they did not want recorded should not keep travelling
+    // with the amount and the note still in it.
+    const before = row(b.db, SQL_MONTH_SPENT, ["THB", "2026-08"]).total as number;
+    const target = row(b.db, "SELECT uid, note FROM expenses WHERE note = ?", [draft.note]);
+    b.db.raw.prepare(SQL_DELETE_EXPENSE).run(target.uid);
+    const stone = row(b.db, "SELECT * FROM expenses WHERE uid = ?", [target.uid]);
+    check("a deleted row stays as a tombstone rather than vanishing",
+      stone !== undefined && stone.deleted === 1);
+    check("and nothing readable is left in it to travel or be backed up",
+      stone.note === "" && stone.amount === 0 && stone.slip_ref === null);
+
+    const incomeUid = row(b.db, "SELECT uid FROM income LIMIT 1").uid;
+    b.db.raw.prepare(SQL_DELETE_INCOME).run(incomeUid);
+    check("the same is true of a payment, name on it included",
+      row(b.db, "SELECT * FROM income WHERE uid = ?", [incomeUid]).source === "");
+
+    // Twice is not a second write. It would only restamp updated_at, which is
+    // one more version for the other device to receive and agree with itself
+    // about.
+    const stamped = row(b.db, "SELECT updated_at FROM expenses WHERE uid = ?", [target.uid]).updated_at;
+    b.db.raw.prepare(SQL_DELETE_EXPENSE).run(target.uid);
+    check("deleting the same row twice does not write a second version",
+      row(b.db, "SELECT updated_at FROM expenses WHERE uid = ?", [target.uid]).updated_at === stamped);
+
+    // And it leaves the totals, which is the point of the flag.
+    check("the month stops counting it",
+      (row(b.db, SQL_MONTH_SPENT, ["THB", "2026-08"]).total as number) === before - 60);
   }
 
   console.log("");

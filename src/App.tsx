@@ -4,6 +4,8 @@ import { Plus, Settings, Gamepad2, Clock, CalendarDays, CheckCircle2, Brain, Wal
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { useCountdowns } from "./hooks/useCountdowns";
+import { onDataChanged } from "./lib/dataChanged";
+import { startAutoSync } from "./lib/autoSync";
 import { loadTheme, applyTheme } from "./lib/theme";
 import { deleteTask, togglePriority, toggleUrgent, getSetting, pauseTask } from "./lib/database";
 import { PAUSE_FOREVER } from "./types";
@@ -148,6 +150,32 @@ export default function App() {
     setCalendarKey(k => k + 1);
     setFinanceKey(k => k + 1);
   }, [refreshTasks]);
+
+  // Started once, for the life of the window. Nothing is passed in and nothing
+  // comes back: it announces what it wrote through dataChanged like any other
+  // sync, so the effect below is what makes the screen follow.
+  useEffect(() => startAutoSync(), []);
+
+  // ── rows that arrived without anyone pressing anything ────────────────────
+  //
+  // Sync writes straight into SQLite. Every other write in this file is started
+  // by a handler that refreshes on its way out; a task ticked done on the phone
+  // has no handler, so without this the list stays as it was and the only way
+  // to see the truth is to reload the window — which tears down the webview,
+  // reopens the database and restarts the notify loop to show one changed row.
+  //
+  // Only what actually moved is redrawn. A sync carrying one budget should not
+  // make every countdown reload and re-run its cycle reconciliation.
+  useEffect(() => onDataChanged((tables) => {
+    if (tables.has("tasks")) refreshTasks();
+    if (tables.has("expenses") || tables.has("income") || tables.has("budgets") ||
+        tables.has("saving_goals") || tables.has("expected_income") ||
+        tables.has("expense_categories")) {
+      setFinanceKey(k => k + 1);
+    }
+    // The calendar reads tasks and expenses both, so it follows either.
+    if (tables.size > 0) setCalendarKey(k => k + 1);
+  }), [refreshTasks]);
 
   const handleDelete = useCallback(async (id: number) => {
     try { await deleteTask(id); } catch (e) { console.error("deleteTask failed:", e); }

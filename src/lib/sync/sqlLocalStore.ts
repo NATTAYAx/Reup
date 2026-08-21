@@ -37,12 +37,18 @@
 
 import { emptyState, rowKey, type LocalStore, type RowKey, type SyncState } from "./engine";
 import type { ChangeRecord } from "./protocol";
+import { outboxReseed } from "../syncMeta";
 import {
   byUids,
-  changedSince,
+  pending,
+  settle,
   chunk,
   deletionsFirst,
+  spillDrop,
+  spillRead,
+  spillWrite,
   unknownFieldNames,
+  unknownFields,
   freeNaturalKeys,
   incomingLosesClash,
   naturalKeyClash,
@@ -50,6 +56,7 @@ import {
   upsert,
   type Row,
   type TableShape,
+  keyIsHeld,
 } from "./rows";
 
 /** The slice of the Tauri SQL plugin this file uses, and nothing more. */
@@ -77,6 +84,31 @@ export interface Db {
 export const SQL_BUMP = "UPDATE sync_clock SET t = max(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', t, '+0.001 seconds')) WHERE id = 1";
 
 export const SQL_CLOCK_READ = "SELECT t FROM sync_clock WHERE id = 1";
+
+/**
+ * Never behind something already seen.
+ *
+ * The bump above keeps this device's clock ahead of its own past. It says
+ * nothing about the other device's, and the two are not related: a phone whose
+ * wall clock is two seconds slow than the desktop's is an ordinary phone.
+ *
+ * Without this, an edit made straight after receiving a row can carry a stamp
+ * OLDER than the row it is editing. Last-write-wins then reads it as the older
+ * of the two and keeps the copy that was just replaced, so the edit lands
+ * locally, travels, and is thrown away at the far end — no error, no retry, and
+ * the person watching sees their change quietly undone a few seconds later.
+ *
+ * Restoring a task from the bin is exactly that shape, which is how this was
+ * found: delete on one device, restore on the other, and the restore does not
+ * take. It passed here for weeks because a millisecond clock and a few
+ * milliseconds of work between the two are enough to hide it. It showed up on
+ * the first machine whose timer ticks every sixteen.
+ *
+ * So the clock takes the highest stamp it has ever seen, from anywhere. That
+ * makes "my next write is newer than everything I have been told about" true by
+ * construction rather than by luck.
+ */
+export const SQL_SEEN = "UPDATE sync_clock SET t = max(t, ?) WHERE id = 1";
 
 /**
  * Bump, then read. Never read alone.
@@ -114,6 +146,8 @@ export const SYNCED_TABLES = [
   "saving_goals",
   "expense_categories",
   "expected_income",
+  "task_events",
+  "user_settings",
 ] as const;
 
 // ─── reading the shape out of the database ───────────────────────────────────
@@ -188,6 +222,15 @@ export class SqlLocalStore implements LocalStore {
    */
   readonly unknownFields = new Set<string>();
 
+  /**
+   * Tables this store has written rows into on somebody else's behalf.
+   *
+   * Named rather than counted because the screen has to decide what to redraw,
+   * and a sync that carried one budget should not make every countdown reload
+   * and re-reconcile its cycles.
+   */
+  readonly appliedTables = new Set<string>();
+
   static async open(
     db: Db,
     now: () => Promise<string> = () => dbNow(db),
@@ -230,16 +273,52 @@ export class SqlLocalStore implements LocalStore {
   /**
    * Every synced table, oldest change first.
    *
-   * Sorted across tables and not just within them, because the watermark is one
-   * timestamp for the whole database. If the batch were ordered per table, the
-   * newest row in it might belong to a table the engine had already passed, and
-   * the watermark would jump over rows in the others.
+   * Still sorted across tables and not just within them. The reason is no
+   * longer the watermark — it is that a batch reads better in the order things
+   * happened, and that two devices reading the same batch should walk it the
+   * same way.
    */
-  async changedSince(since: string): Promise<ChangeRecord[]> {
+  /**
+   * Put back the columns this schema cannot hold.
+   *
+   * Called on every path that turns rows into records for somebody else to
+   * look at — the outgoing queue AND the lookup that decides whether the far
+   * side already has a row. Both, and for the same reason: if only the queue
+   * re-attached them, every row carrying a spill would compare as different
+   * from the copy the far side holds and be re-sent on every single run,
+   * for ever.
+   */
+  private async withSpill(records: ChangeRecord[]): Promise<ChangeRecord[]> {
+    if (records.length === 0) return records;
+    const q = spillRead(records.map((r) => ({ table: r.table, uid: r.uid })));
+    const rows = await this.db.select<{ tbl: string; uid: string; cols: string }[]>(q.sql, q.params);
+    if (rows.length === 0) return records;
+
+    const byKey = new Map<string, Record<string, unknown>>();
+    for (const row of rows) {
+      try {
+        byKey.set(`${row.tbl}\u0000${row.uid}`, JSON.parse(row.cols) as Record<string, unknown>);
+      } catch {
+        // Unreadable spill is dropped rather than thrown on. Losing a column
+        // nobody here can read is the small failure; refusing to sync until
+        // somebody edits a hidden table by hand is the large one.
+      }
+    }
+
+    return records.map((r) => {
+      const extra = byKey.get(`${r.table}\u0000${r.uid}`);
+      // The row's own columns win. The spill is what this schema could not
+      // hold, so a name collision means the schema has since grown the column
+      // and the live value is the true one.
+      return extra ? { ...r, fields: { ...extra, ...r.fields } } : r;
+    });
+  }
+
+  async pending(): Promise<ChangeRecord[]> {
     const out: ChangeRecord[] = [];
     for (const t of SYNCED_TABLES) {
       const shape = this.shape(t);
-      const rows = await this.db.select<Row[]>(changedSince(shape).sql, [since]);
+      const rows = await this.db.select<Row[]>(pending(shape).sql, []);
       for (const r of rows) out.push(recordFromRow(shape, r, this.state.device));
     }
     out.sort((a, b) =>
@@ -253,7 +332,30 @@ export class SqlLocalStore implements LocalStore {
           ? -1
           : 1,
     );
-    return out;
+    return this.withSpill(out);
+  }
+
+  /**
+   * These versions have been dealt with: either sent, or found already present
+   * on the far side, which is a decision rather than a postponement.
+   */
+  /**
+   * Put every row back in the outbox, so the next push is the whole database.
+   *
+   * The statements are `outboxReseed()`'s, not a second copy of them. There is
+   * one list of synced tables that fills that queue and it lives with the
+   * triggers; a second one here is the shape of every bug this project has
+   * spent a month removing.
+   */
+  async reseed(): Promise<void> {
+    for (const m of outboxReseed()) await this.db.execute(m.sql);
+  }
+
+  async settle(records: ChangeRecord[]): Promise<void> {
+    for (const r of records) {
+      const q = settle(r.table, r.uid, r.updatedAt);
+      await this.db.execute(q.sql, q.params);
+    }
   }
 
   async lookup(keys: RowKey[]): Promise<ChangeRecord[]> {
@@ -274,10 +376,35 @@ export class SqlLocalStore implements LocalStore {
         for (const r of rows) out.push(recordFromRow(shape, r, this.state.device));
       }
     }
-    return out;
+    return this.withSpill(out);
   }
 
   async apply(records: ChangeRecord[]): Promise<void> {
+    // Before anything is written, and before any failure can stop it. A clock
+    // that only moves forward is safe to move early; the cost of moving it and
+    // then writing nothing is one millisecond of nothing. See SQL_SEEN.
+    let seen = "";
+    for (const r of records) if (r.updatedAt > seen) seen = r.updatedAt;
+    if (seen) await this.db.execute(SQL_SEEN, [seen]);
+
+    // WHY THIS DOES NOT UNQUEUE WHAT IT WRITES
+    //
+    // Every write here queues a row, because the outbox triggers cannot tell an
+    // incoming row from a local edit — deliberately, since the one guard that
+    // could would also skip softDelete, which sets updated_at itself.
+    //
+    // The obvious answer, unqueueing them here, is wrong, and the vector
+    // generator caught it: a row that arrives while this device has its own
+    // newer edit of the same row is merged, and the merged record carries this
+    // device's version. Unqueueing by name and version then removes the entry
+    // the local edit had made, and that edit is never sent. The far side keeps
+    // the old name for ever, with nothing reporting anything.
+    //
+    // Nothing is needed instead. The push half runs after this, sees these rows
+    // as pending, and drops the ones the far side already holds at that exact
+    // version — which is every row that arrived unchanged, and none of the ones
+    // merging produced. Then it settles the lot. The only cost is a run that
+    // dies between here and there, which repeats one batch that merge absorbs.
     for (const r of deletionsFirst(records)) {
       if (!this.shapes.has(r.table)) continue; // a table this version does not have
       const shape = this.shape(r.table);
@@ -287,6 +414,20 @@ export class SqlLocalStore implements LocalStore {
       // loss is something the app can say out loud rather than something that
       // happens quietly. See unknownFieldNames for what keeping them would cost.
       for (const name of unknownFieldNames(shape, r)) this.unknownFields.add(name);
+
+      // And kept, beside the row. Written before the row itself so that a run
+      // dying between the two leaves a spill for a row at its previous version,
+      // which the next apply overwrites — rather than a row whose extra columns
+      // were dropped for good.
+      const extra = unknownFields(shape, r);
+      const hasExtra = Object.keys(extra).length > 0;
+      if (r.deleted || !hasExtra) {
+        const d = spillDrop(r.table, r.uid);
+        await this.db.execute(d.sql, d.params);
+      } else {
+        const w = spillWrite(r.table, r.uid, JSON.stringify(extra));
+        await this.db.execute(w.sql, w.params);
+      }
 
       // A row arriving with a natural key another row already holds has to be
       // settled before the insert, because SQLite will otherwise refuse the
@@ -312,12 +453,17 @@ export class SqlLocalStore implements LocalStore {
       }
 
       await this.write(shape, incoming);
+      this.appliedTables.add(r.table);
     }
   }
 
   /** The live row, if any, holding one of this record's natural keys. */
   private async findClash(shape: TableShape, r: ChangeRecord): Promise<Row | null> {
     for (const key of shape.naturalKeys) {
+      // A key with a NULL in it constrains nothing, and the query for it is
+      // actively harmful: `slip_ref IS ?` with null bound becomes `IS NULL`,
+      // which returns every slip-less expense in the table. See keyIsHeld.
+      if (!keyIsHeld(key, r.fields)) continue;
       const where = key.map((c) => `${c} IS ?`).join(" AND ");
       const params = key.map((c) => r.fields[c] ?? null);
       const found = await this.db.select<Row[]>(
@@ -396,7 +542,11 @@ export function parseState(text: string): SyncState {
       device: raw.device,
       seq: typeof raw.seq === "number" ? raw.seq : 0,
       cursor: typeof raw.cursor === "object" && raw.cursor !== null ? raw.cursor : {},
-      pushedThrough: typeof raw.pushedThrough === "string" ? raw.pushedThrough : "",
+      // Missing means never, which is the honest reading of a state written
+      // before snapshots existed, and the safe one: the device writes a fresh
+      // snapshot on its next sync and deletes nothing until the one after that.
+      snapshotSeq: typeof raw.snapshotSeq === "number" ? raw.snapshotSeq : 0,
+      priorSnapshotSeq: typeof raw.priorSnapshotSeq === "number" ? raw.priorSnapshotSeq : 0,
     };
   } catch {
     return emptyState(newDeviceId());

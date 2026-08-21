@@ -9,6 +9,10 @@ import {
   loadSyncConfig, saveSyncConfig, newPairing, pairingOf, isReady,
   SYNC_OFF, syncNow, type SyncConfig,
 } from "../lib/sync/config";
+import {
+  connectGoogleDrive, disconnectGoogleDrive, driveTokenSource,
+  googleClient, googleConnected,
+} from "../lib/sync/googleAuth";
 import { decodePairing } from "../lib/sync/crypto";
 import { StorageError } from "../lib/sync/storage";
 import { TauriHttpTransport } from "../lib/sync/transport";
@@ -54,14 +58,31 @@ type Phase =
  * an unexpected failure that has been rewritten into a friendly sentence is an
  * unexpected failure nobody can report.
  */
-function reasonOf(e: unknown): string {
+function reasonOf(e: unknown, backend: SyncConfig["backend"]["kind"]): string {
   if (e instanceof StorageError) {
+    // The status is appended because "auth" covers two failures that look
+    // identical here and are fixed in completely different places, and because
+    // a report that says only "refused" cannot be acted on by anyone.
+    const code = e.status ? ` (${e.status})` : "";
+    // What the far side actually said, when it said anything. A sentence
+    // written here can only describe a category; the category is what to feel
+    // and the detail is what to do, and dropping it is why a 400 spent a day
+    // looking like a server having a bad morning.
+    const said = e.message ? ` — ${e.message}` : "";
     switch (e.kind) {
-      case "config":   return t("sync.errConfig");
-      case "auth":     return t("sync.errAuth");
-      case "notFound": return t("sync.errNotFound");
-      case "network":  return t("sync.errNetwork");
-      case "server":   return t("sync.errServer");
+      case "config":   return t("sync.errConfig") + code + said;
+      // WHY THIS ONE ASKS WHICH BACKEND
+      //
+      // Both adapters raise "auth", and the sentence written for it talks about
+      // a username and a password. On Drive there is neither: the account is a
+      // Google account and the fix is to sign in again. Telling someone to check
+      // a password they do not have is worse than saying nothing, because they
+      // will go and check it.
+      case "auth":
+        return (backend === "drive" ? t("sync.errDriveAuth") : t("sync.errAuth")) + code + said;
+      case "notFound": return t("sync.errNotFound") + code + said;
+      case "network":  return t("sync.errNetwork") + code;
+      case "server":   return t("sync.errServer") + code + said;
     }
   }
   return e instanceof Error ? e.message : String(e);
@@ -85,6 +106,16 @@ export default function SyncCard() {
   const [pasteErr, setPasteErr] = useState(false);
   const [confirmNew, setConfirmNew] = useState(false);
 
+  // Whether this build was given Google credentials at all. Null while unknown,
+  // false for anyone who cloned the repository — src-tauri/.env is not in it,
+  // and a button that cannot work is worse than one that is not there.
+  const [driveBuilt, setDriveBuilt] = useState<boolean | null>(null);
+  const [driveOn, setDriveOn] = useState(false);
+  const [driveBusy, setDriveBusy] = useState(false);
+  /** A cancel, said plainly. Not routed through the failure banner, because a
+   *  person who pressed cancel did not hit an error. */
+  const [driveNote, setDriveNote] = useState<string | null>(null);
+
   useEffect(() => {
     void (async () => {
       const db = await getDb();
@@ -95,6 +126,8 @@ export default function SyncCard() {
         setUser(c.backend.username);
         setPass(c.backend.password);
       }
+      setDriveBuilt((await googleClient()) !== null);
+      setDriveOn(await googleConnected(db));
       setPhase({ kind: "idle" });
     })();
   }, []);
@@ -117,8 +150,52 @@ export default function SyncCard() {
         // Turning it off keeps the pairing code. The code is the key, and the
         // switch on this card is not the place to destroy one.
         ? { backend: { kind: "off" }, pairing: cfg.pairing }
+        // Coming back on lands wherever the person already is rather than always
+        // on WebDAV: someone who signed into Google and then flicked the switch
+        // twice should not find themselves pointed at an empty address box.
+        : driveOn
+          ? { backend: { kind: "drive" }, pairing: cfg.pairing }
+          : { backend: { kind: "webdav", baseUrl: url, username: user, password: pass }, pairing: cfg.pairing },
+    );
+  };
+
+  const useBackend = (kind: "webdav" | "drive") => {
+    void persist(
+      kind === "drive"
+        ? { backend: { kind: "drive" }, pairing: cfg.pairing }
         : { backend: { kind: "webdav", baseUrl: url, username: user, password: pass }, pairing: cfg.pairing },
     );
+  };
+
+  const connectDrive = async () => {
+    setDriveBusy(true);
+    setDriveNote(null);
+    try {
+      const db = await getDb();
+      const r = await connectGoogleDrive(db, new TauriHttpTransport());
+      if (r.kind === "connected") {
+        setDriveOn(true);
+        // Signing in is the whole of choosing Drive, so the backend follows
+        // without a second click. Nobody connects an account and then means
+        // for the app to go on using something else.
+        await persist({ backend: { kind: "drive" }, pairing: cfg.pairing });
+      } else if (r.kind === "refused") {
+        setDriveNote(t("sync.driveCancel"));
+      } else {
+        setPhase({ kind: "failed", message: r.why });
+      }
+    } finally {
+      setDriveBusy(false);
+    }
+  };
+
+  const disconnectDrive = async () => {
+    const db = await getDb();
+    await disconnectGoogleDrive(db);
+    setDriveOn(false);
+    // Left on the Drive backend on purpose. Turning it off here would look like
+    // a second thing happening, and the sync button already says what is
+    // missing when nothing can sign in.
   };
 
   const saveServer = () =>
@@ -158,13 +235,17 @@ export default function SyncCard() {
     setPhase({ kind: "syncing" });
     try {
       const db = await getDb();
-      const report = await syncNow(db, new TauriHttpTransport());
+      const http = new TauriHttpTransport();
+      // Undefined for WebDAV, and undefined for Drive when nobody has signed in
+      // on this machine — which syncNow reads as "not set up", the same as an
+      // empty address box.
+      const report = await syncNow(db, http, await driveTokenSource(db, http));
       // Null means "not set up", which the button is already gated on, so
       // reaching it would be a bug rather than a state worth rendering.
       if (!report) { setPhase({ kind: "idle" }); return; }
       setPhase({ kind: "done", report, at: new Date() });
     } catch (e) {
-      setPhase({ kind: "failed", message: reasonOf(e) });
+      setPhase({ kind: "failed", message: reasonOf(e, cfg.backend.kind) });
     }
   };
 
@@ -186,7 +267,18 @@ export default function SyncCard() {
           {on ? <Server size={18} className="text-sky-400" /> : <CloudOff size={18} className="text-white/30" />}
           <div>
             <p className="text-white text-sm font-semibold">{t("sync.title")}</p>
-            <p className="text-white/40 text-xs">{on ? t("sync.subOn") : t("sync.subOff")}</p>
+            {/* Named per backend rather than once, because this line is the
+                only place the closed card says where anything goes — and a
+                subtitle that still says "your own server" while the blobs are
+                on Drive is the screen telling a small lie about the one thing
+                it exists to report. */}
+            <p className="text-white/40 text-xs">
+              {!on
+                ? t("sync.subOff")
+                : cfg.backend.kind === "drive"
+                  ? t("sync.subDrive")
+                  : t("sync.subOn")}
+            </p>
           </div>
         </div>
         <button
@@ -201,8 +293,33 @@ export default function SyncCard() {
         <>
           {/* ── where it goes ─────────────────────────────────────────────── */}
           <div className="border-t border-white/8 pt-3 space-y-2">
-            <p className="text-white/60 text-xs font-semibold">{t("sync.server")}</p>
+            <p className="text-white/60 text-xs font-semibold">{t("sync.where")}</p>
 
+            {/* Only drawn when there is a second thing to pick. A one-option
+                chooser is a control that teaches nothing and costs a row. */}
+            {driveBuilt && (
+              <div className="flex gap-2">
+                {(["webdav", "drive"] as const).map((k) => {
+                  const active = cfg.backend.kind === k;
+                  return (
+                    <button
+                      key={k}
+                      onClick={() => useBackend(k)}
+                      className={`flex-1 px-3 py-2 rounded-xl text-[11px] font-semibold transition-all border ${
+                        active
+                          ? "bg-sky-500/20 text-sky-300 border-sky-400/40"
+                          : "bg-black/20 text-white/40 border-white/10 hover:text-white/70"
+                      }`}
+                    >
+                      {k === "drive" ? t("sync.drive") : t("sync.webdav")}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {cfg.backend.kind !== "drive" && (
+              <>
             <input
               value={url}
               onChange={(e) => setUrl(e.target.value)}
@@ -252,13 +369,76 @@ export default function SyncCard() {
               </button>
               <p className="text-white/25 text-[10px] leading-snug">{t("sync.serverNote")}</p>
             </div>
+              </>
+            )}
 
-            {/* Written down rather than left out, because an option that is
-                missing reads as an option nobody thought of. */}
-            <div className="flex items-start gap-2 opacity-40">
-              <HardDrive size={12} className="text-white/40 mt-0.5 shrink-0" />
-              <p className="text-white/40 text-[10px] leading-snug">{t("sync.driveLater")}</p>
-            </div>
+            {/* Still written down when this build has no credentials, because an
+                option that is simply missing reads as one nobody thought of. */}
+            {driveBuilt === false && (
+              <div className="flex items-start gap-2 opacity-40">
+                <HardDrive size={12} className="text-white/40 mt-0.5 shrink-0" />
+                <p className="text-white/40 text-[10px] leading-snug">{t("sync.driveLater")}</p>
+              </div>
+            )}
+
+            {driveBuilt && cfg.backend.kind === "drive" && (
+              <div className="space-y-2">
+                <p className="text-white/25 text-[10px] leading-snug">{t("sync.driveWhat")}</p>
+                <p className="text-white/25 text-[10px] leading-snug">{t("sync.driveWhy")}</p>
+
+                {/* WHY THIS LINE EXISTS
+                    Being signed in to Google and syncing THROUGH Google are two
+                    different states, and this card was showing the first while
+                    running on the second. "Connected" then reads as an answer
+                    to a question nobody asked, and the sync that follows goes
+                    somewhere else entirely — which is the same shape as the bug
+                    on the phone, where the screen had a Drive button and the
+                    database said WebDAV. Two states that can disagree have to
+                    say so out loud. */}
+                {driveOn && cfg.backend.kind !== "drive" && (
+                  <p className="text-amber-300/80 text-[11px] leading-snug">
+                    {t("sync.mismatch")}
+                  </p>
+                )}
+
+                {driveOn ? (
+                  <div className="flex items-center gap-2">
+                    <Check size={13} className="text-emerald-400/80 shrink-0" />
+                    <p className="text-emerald-300/80 text-[11px] font-semibold flex-1">
+                      {t("sync.driveOn")}
+                    </p>
+                    <button
+                      onClick={() => void disconnectDrive()}
+                      className="px-3 py-1.5 rounded-lg text-[11px] font-semibold
+                                 bg-white/5 text-white/50 hover:bg-white/10 hover:text-white/80"
+                    >
+                      {t("sync.driveOff")}
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => void connectDrive()}
+                    disabled={driveBusy}
+                    className={`w-full px-3 py-2 rounded-xl text-[11px] font-semibold transition-all
+                                flex items-center justify-center gap-2 ${
+                      driveBusy
+                        ? "bg-white/5 text-white/30"
+                        : "bg-sky-500/20 text-sky-300 hover:bg-sky-500/30"
+                    }`}
+                  >
+                    {driveBusy && <Loader2 size={13} className="animate-spin" />}
+                    {driveBusy ? t("sync.driveOpening") : t("sync.driveConnect")}
+                  </button>
+                )}
+
+                {driveOn && (
+                  <p className="text-white/25 text-[10px] leading-snug">{t("sync.driveOffNote")}</p>
+                )}
+                {driveNote && (
+                  <p className="text-white/40 text-[10px] leading-snug">{driveNote}</p>
+                )}
+              </div>
+            )}
           </div>
 
           {/* ── the key ───────────────────────────────────────────────────── */}

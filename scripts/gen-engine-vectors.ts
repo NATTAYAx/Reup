@@ -38,12 +38,14 @@ import {
   advanceThroughPrefix,
   decodeBatch,
   emptyState,
-  nextWatermark,
   planApply,
+  planPrune,
   planPull,
   planPush,
   rowKey,
+  SNAPSHOT_AFTER_FILES,
   sync,
+  wantsSnapshot,
   type LocalStore,
   type SyncState,
 } from "../src/lib/sync/engine";
@@ -54,6 +56,10 @@ import type { SyncStorage } from "../src/lib/sync/storage";
 declare const require: (m: string) => {
   writeFileSync(p: string, d: string): void;
   mkdirSync(p: string, o: { recursive: boolean }): void;
+  copyFileSync(from: string, to: string): void;
+  existsSync(p: string): boolean;
+  dirname(p: string): string;
+  resolve(p: string): string;
 };
 declare const process: { argv: string[]; exit(code: number): void };
 
@@ -94,15 +100,39 @@ class MemoryStore implements LocalStore {
     this.state = emptyState(device);
   }
 
-  /** A local edit, as the app would make it. */
+  /** Standing in for sync_outbox: what has been written and not yet settled. */
+  private queued = new Set<string>();
+
+  /** A local edit, as the app would make it. The trigger queues it. */
   write(r: Omit<ChangeRecord, "origin">): void {
     this.rows.set(rowKey(r), { ...r, origin: this.state.device });
+    this.queued.add(rowKey(r) + "@" + r.updatedAt);
   }
 
-  async changedSince(since: string): Promise<ChangeRecord[]> {
+  /**
+   * Everything written here that has not been settled.
+   *
+   * A Set standing in for sync_outbox, which is the point: the real store's
+   * answer comes from a table rather than from a comparison with a timestamp,
+   * and a fake that still filtered by `since` would generate vectors for an
+   * engine that no longer exists.
+   */
+  async pending(): Promise<ChangeRecord[]> {
     return [...this.rows.values()]
-      .filter((r) => r.updatedAt > since)
+      .filter((r) => this.queued.has(rowKey(r) + "@" + r.updatedAt))
       .sort((a, b) => (a.updatedAt === b.updatedAt ? (a.uid < b.uid ? -1 : 1) : a.updatedAt < b.updatedAt ? -1 : 1));
+  }
+
+  async settle(records: ChangeRecord[]): Promise<void> {
+    for (const r of records) this.queued.delete(rowKey(r) + "@" + r.updatedAt);
+  }
+  /**
+   * Every row back in the queue, which is what `outboxReseed()` does to the
+   * real one. Tombstones included: a device that has been away needs to be told
+   * about a deletion as much as about a row.
+   */
+  async reseed(): Promise<void> {
+    for (const r of this.rows.values()) this.queued.add(rowKey(r) + "@" + r.updatedAt);
   }
   async lookup(keys: { table: string; uid: string }[]): Promise<ChangeRecord[]> {
     const out: ChangeRecord[] = [];
@@ -113,7 +143,16 @@ class MemoryStore implements LocalStore {
     return out;
   }
   async apply(records: ChangeRecord[]): Promise<void> {
-    for (const r of records) this.rows.set(rowKey(r), r);
+    // Queued like anything else written to the table, because that is what the
+    // triggers do and a fake that quietly knew better would generate vectors
+    // for a store nobody has. The push half is what sorts them out: rows the
+    // far side already holds are dropped there and settled, and rows that came
+    // out of a merge carrying this device's version are sent, which is the case
+    // that made unqueueing here look right and be wrong.
+    for (const r of records) {
+      this.rows.set(rowKey(r), r);
+      this.queued.add(rowKey(r) + "@" + r.updatedAt);
+    }
   }
   async loadState(): Promise<SyncState> {
     return this.state;
@@ -186,7 +225,8 @@ interface Vectors {
   advance: unknown[];
   planApply: unknown[];
   planPush: unknown[];
-  watermark: unknown[];
+  wantsSnapshot: unknown[];
+  planPrune: unknown[];
   decode: unknown[];
 }
 
@@ -197,7 +237,8 @@ const V: Vectors = {
   advance: [],
   planApply: [],
   planPush: [],
-  watermark: [],
+  wantsSnapshot: [],
+  planPrune: [],
   decode: [],
 };
 
@@ -223,7 +264,14 @@ function caseApply(id: string, remote: ChangeRecord[], local: ChangeRecord[]): v
   V.planApply.push({ id, remote, local, expected: planApply(r, l) });
 }
 
-function casePush(id: string, pending: ChangeRecord[], remoteView: ChangeRecord[], device: string, seq: number): void {
+function casePush(
+  id: string,
+  pending: ChangeRecord[],
+  remoteView: ChangeRecord[],
+  device: string,
+  seq: number,
+  full = false,
+): void {
   const state = { ...emptyState(device), seq };
   const view = new Map(remoteView.map((x) => [rowKey(x), x]));
   V.planPush.push({
@@ -232,13 +280,27 @@ function casePush(id: string, pending: ChangeRecord[], remoteView: ChangeRecord[
     remoteView,
     device,
     seq,
+    full,
     writtenAt: "2026-08-15T12:00:00.000Z",
-    expected: planPush(pending, view, state, "2026-08-15T12:00:00.000Z"),
+    expected: planPush(pending, view, state, "2026-08-15T12:00:00.000Z", full),
   });
 }
 
-function caseWatermark(id: string, current: string, records: ChangeRecord[]): void {
-  V.watermark.push({ id, current, records, expected: nextWatermark(current, records) });
+function caseSnapshot(id: string, names: string[], device: string, snapshotSeq: number): void {
+  const state = { ...emptyState(device), snapshotSeq };
+  V.wantsSnapshot.push({ id, names, device, snapshotSeq, expected: wantsSnapshot(names, state) });
+}
+
+function casePrune(id: string, names: string[], device: string, priorSnapshotSeq: number, limit: number): void {
+  const state = { ...emptyState(device), priorSnapshotSeq };
+  V.planPrune.push({
+    id,
+    names,
+    device,
+    priorSnapshotSeq,
+    limit,
+    expected: planPrune(names, state, limit),
+  });
 }
 
 function caseDecode(id: string, text: string, file: RemoteFile): void {
@@ -291,10 +353,38 @@ function buildVectors(): void {
   casePush("push-sends-a-newer-local-edit", [theirsNewer], [mine], "dev-aaa", 4);
   casePush("push-nothing-to-say", [], [], "dev-aaa", 4);
   casePush("push-stamps-our-origin", [{ ...mine, origin: "dev-zzz" }], [], "dev-aaa", 0);
+  // The one case the echo filter must not touch. A snapshot that leaves out a
+  // row because some other device also mentioned it is a snapshot that stops
+  // being a complete copy the moment that device prunes its own log.
+  casePush("push-full-keeps-what-remote-already-has", [mine], [{ ...mine, origin: "dev-bbb" }], "dev-aaa", 4, true);
+  casePush("push-full-of-nothing-is-still-nothing", [], [], "dev-aaa", 4, true);
 
-  caseWatermark("wm-empty", "", [mine, theirsNewer]);
-  caseWatermark("wm-never-goes-backwards", "2026-08-20T00:00:00.000Z", [mine]);
-  caseWatermark("wm-no-records", "2026-08-01T00:00:00.000Z", []);
+  const many = (device: string, from: number, to: number): string[] => {
+    const out: string[] = [];
+    for (let i = from; i <= to; i++) out.push(`${device}-${i}.reup`);
+    return out;
+  };
+
+  caseSnapshot("snap-an-empty-folder-needs-nothing", [], "dev-aaa", 0);
+  caseSnapshot("snap-a-device-that-never-snapshotted-still-waits", many("dev-aaa", 1, 3), "dev-aaa", 0);
+  caseSnapshot("snap-not-yet", many("dev-aaa", 1, 10), "dev-aaa", 5);
+  caseSnapshot("snap-one-below-the-line", many("dev-aaa", 1, 63), "dev-aaa", 5);
+  caseSnapshot("snap-exactly-at-the-line", many("dev-aaa", 1, 64), "dev-aaa", 5);
+  // A folder full of somebody else's files is somebody else's problem: they are
+  // the only device that can delete them, so counting them here would make this
+  // device snapshot for ever over a mess it cannot clean up.
+  caseSnapshot("snap-other-devices-do-not-count", [...many("dev-bbb", 1, 90), "dev-aaa-1.reup"], "dev-aaa", 5);
+  caseSnapshot("snap-strangers-do-not-count", ["notes.txt", "a.reup", "dev-aaa-.reup", "dev-aaa-1.reup"], "dev-aaa", 5);
+
+  casePrune("prune-nothing-before-a-second-snapshot", many("dev-aaa", 1, 20), "dev-aaa", 0, 32);
+  casePrune("prune-below-the-line-only", many("dev-aaa", 1, 20), "dev-aaa", 10, 32);
+  // The prior snapshot itself is the floor, not the first casualty. It is the
+  // file that makes every other deletion safe.
+  casePrune("prune-keeps-the-prior-snapshot-itself", many("dev-aaa", 8, 12), "dev-aaa", 10, 32);
+  casePrune("prune-never-touches-another-device", [...many("dev-bbb", 1, 9), ...many("dev-aaa", 1, 9)], "dev-aaa", 5, 32);
+  casePrune("prune-ignores-strangers", ["holiday.jpg", "dev-aaa-2.reup", "readme"], "dev-aaa", 9, 32);
+  casePrune("prune-takes-the-oldest-first-and-stops", many("dev-aaa", 1, 40), "dev-aaa", 40, 32);
+  casePrune("prune-with-nothing-to-do", many("dev-aaa", 5, 9), "dev-aaa", 5, 32);
 
   const file: RemoteFile = { name: "dev-bbb-3.reup", device: "dev-bbb", seq: 3 };
   const good = {
@@ -328,7 +418,12 @@ function buildVectors(): void {
 let tick = 0;
 function clock(): string {
   tick++;
-  return `2026-08-15T12:00:${String(tick).padStart(2, "0")}.000Z`;
+  // Rolls into minutes rather than printing a sixty-first second. Nothing reads
+  // this — `writtenAt` is debug only — but a scenario that runs a hundred syncs
+  // should not leave impossible timestamps in a file somebody will one day open.
+  const mm = String(Math.floor(tick / 60)).padStart(2, "0");
+  const ss = String(tick % 60).padStart(2, "0");
+  return `2026-08-15T12:${mm}:${ss}.000Z`;
 }
 
 async function runSync(cloud: MemoryStorage, store: MemoryStore) {
@@ -532,6 +627,109 @@ async function simulate(): Promise<void> {
     check("a file moved to another name no longer authenticates", renamed);
   }
 
+  // ── the folder is pruned under a device that was away ─────────────────────
+  //
+  // The failure this block exists to prevent, run rather than argued. The phone
+  // syncs once, sleeps through a hundred edits, and comes back to a folder whose
+  // early files no longer exist. Nothing errors either way — the question is
+  // only whether it ends up holding the same rows.
+  {
+    const cloud = new MemoryStorage();
+    const pc = new MemoryStore("dev-aaa");
+    const phone = new MemoryStore("dev-bbb");
+
+    pc.write({ table: "tasks", uid: "u0", updatedAt: "2026-08-14T09:00:00.000Z", deleted: false, fields: task("first") });
+    const first = await runSync(cloud, pc);
+    check("an ordinary first push is not a snapshot", !first.snapshot && first.wrote !== null);
+
+    const arriving = await runSync(cloud, phone);
+    check("a device that only pulled writes nothing", arriving.wrote === null);
+    check("the phone starts out in step", rowsMatch(pc, phone));
+    const asleepAt = (await phone.loadState()).cursor["dev-aaa"];
+
+    // A hundred edits on the desktop while the phone is in a drawer.
+    for (let i = 1; i <= 100; i++) {
+      pc.write({
+        table: "tasks",
+        uid: `u${i}`,
+        updatedAt: `2026-08-14T10:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}.000Z`,
+        deleted: false,
+        fields: task(`task ${i}`),
+      });
+      await runSync(cloud, pc);
+    }
+    // And a few idle runs, which is where a prune that ran out of its budget
+    // finishes the job.
+    for (let i = 0; i < 4; i++) await runSync(cloud, pc);
+
+    const left = [...cloud.files.keys()].filter((n) => n.startsWith("dev-aaa-"));
+    // 101 batches went in; what is left is the two snapshots and the deltas
+    // since. The number is not the point — the point is that it is bounded by
+    // the threshold rather than by how long the app has been installed.
+    check("the folder is bounded rather than cumulative", left.length < SNAPSHOT_AFTER_FILES);
+    const lowest = Math.min(...left.map((n) => Number(n.slice("dev-aaa-".length, -".reup".length))));
+    check("and the files the phone stopped at are gone", lowest > asleepAt);
+
+    // The cursor still points into the hole. Nothing detects that, and nothing
+    // needs to: what is left starts with a snapshot.
+    check("the phone has not noticed anything", (await phone.loadState()).cursor["dev-aaa"] === asleepAt);
+
+    await runSync(cloud, phone);
+    await runSync(cloud, pc);
+    await runSync(cloud, phone);
+    check("a device that slept through the deleted window still catches up", rowsMatch(pc, phone));
+    check("including every row announced only in a file that is gone", phone.rows.size === 101);
+  }
+
+  // ── a deletion made inside the pruned window ──────────────────────────────
+  //
+  // Worse than a missing row, because the phone holds a live copy of its own:
+  // if the snapshot does not carry tombstones, the row comes back from the dead
+  // and the desktop is the one that changes its mind.
+  {
+    const cloud = new MemoryStorage();
+    const pc = new MemoryStore("dev-aaa");
+    const phone = new MemoryStore("dev-bbb");
+
+    pc.write({ table: "expenses", uid: "e1", updatedAt: "2026-08-14T09:00:00.000Z", deleted: false, fields: { amount: 1200, category: "food" } });
+    await runSync(cloud, pc);
+    await runSync(cloud, phone);
+    check("the phone has the expense", phone.rows.get("expenses\u0000e1")?.deleted === false);
+
+    pc.write({ table: "expenses", uid: "e1", updatedAt: "2026-08-14T09:30:00.000Z", deleted: true, fields: { amount: 1200, category: "food" } });
+    for (let i = 1; i <= 100; i++) {
+      pc.write({
+        table: "tasks",
+        uid: `u${i}`,
+        updatedAt: `2026-08-14T11:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}.000Z`,
+        deleted: false,
+        fields: task(`task ${i}`),
+      });
+      await runSync(cloud, pc);
+    }
+    for (let i = 0; i < 4; i++) await runSync(cloud, pc);
+
+    await runSync(cloud, phone);
+    await runSync(cloud, pc);
+    check("a deletion announced only in a deleted file still lands", phone.rows.get("expenses\u0000e1")?.deleted === true);
+    check("and the desktop does not have it back", pc.rows.get("expenses\u0000e1")?.deleted === true);
+  }
+
+  // ── pruning does not make an idle sync noisy ──────────────────────────────
+  {
+    const cloud = new MemoryStorage();
+    const pc = new MemoryStore("dev-aaa");
+    pc.write({ table: "tasks", uid: "u1", updatedAt: "2026-08-14T09:00:00.000Z", deleted: false, fields: task("one") });
+    await runSync(cloud, pc);
+
+    const after = cloud.files.size;
+    for (let i = 0; i < 10; i++) {
+      const r = await runSync(cloud, pc);
+      check("an idle sync does not keep snapshotting", !r.snapshot);
+    }
+    check("and writes nothing at all", cloud.files.size === after);
+  }
+
   // ── three devices, arriving in every order ────────────────────────────────
   {
     const orders: string[][] = [
@@ -572,7 +770,8 @@ async function main(): Promise<void> {
     ["advance", V.advance.length],
     ["planApply", V.planApply.length],
     ["planPush", V.planPush.length],
-    ["watermark", V.watermark.length],
+    ["wantsSnapshot", V.wantsSnapshot.length],
+    ["planPrune", V.planPrune.length],
     ["decode", V.decode.length],
   ] as const;
   for (const [k, n] of counts) console.log(`${k.padEnd(12)} ${n}`);
@@ -584,12 +783,30 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const out = process.argv[2] ?? "../reup-shared/engine-vectors.json";
+  const DEFAULT_OUT = "../reup-shared/engine-vectors.json";
+  const out = process.argv[2] ?? DEFAULT_OUT;
   const fs = require("fs");
-  const path = require("path");
-  fs.mkdirSync((path as unknown as { dirname(p: string): string }).dirname(out), { recursive: true });
+  const path = require("path") as unknown as { dirname(p: string): string; resolve(p: string): string };
+  fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify(V, null, 2));
   console.log(`wrote ${out}`);
+
+  // The phone reads its copy from its own test resources, and until now that
+  // copy was kept in step by hand. A vector file the two sides disagree about is
+  // the worst possible one: the phone goes green against rules the desktop has
+  // stopped following. gen-store-vectors.ts already mirrors for this reason.
+  if (out === DEFAULT_OUT) {
+    const mirror = path.resolve(
+      "../reup-mobile/shared/src/jvmTest/resources/engine-vectors.json",
+    );
+    if (fs.existsSync(path.dirname(mirror))) {
+      fs.copyFileSync(path.resolve(out), mirror);
+      console.log(`mirrored ${mirror}`);
+    } else {
+      console.log("no phone checkout next door, nothing mirrored");
+    }
+  }
+
   console.log("clean");
 }
 

@@ -1,4 +1,13 @@
 import { isPaused } from "../types";
+import { TASK_COLUMNS, taskUpdate, taskValues, type TaskDraft } from "./taskDraft";
+import {
+  INCOME_COLUMNS,
+  SQL_DELETE_INCOME,
+  SQL_MONTH_RECEIVED,
+  incomeValues,
+} from "./moneyDraft";
+import { initSettings, type SettingsDb } from "./userSettings";
+import { dbNow } from "./sync/sqlLocalStore";
 import Database from "@tauri-apps/plugin-sql";
 import { applySyncMigrations, SYNC_TABLES } from "./syncMeta";
 import { sweepTrash, sweepTombstones, PURGE_TASK_SQL } from "./tombstones";
@@ -18,6 +27,12 @@ export async function getDb(): Promise<Database> {
     const d = await Database.load("sqlite:gamescheduler.db");
     await initializeSchema(d);
     db = d;
+    // After `db` is set, not before: initSettings reads user_settings through
+    // the handle it is given rather than through getDb(), but anything it calls
+    // one day might not, and a call into getDb() from inside the promise getDb
+    // is still building is a deadlock with no error and an empty screen. That
+    // has happened once in this file already.
+    await initSettings(d as unknown as SettingsDb);
     return d;
   })();
   return dbReadyPromise;
@@ -64,6 +79,22 @@ async function initializeSchema(db: Database): Promise<void> {
   try { await db.execute(`ALTER TABLE tasks ADD COLUMN is_priority INTEGER DEFAULT 0`); } catch (_) {}
   try { await db.execute(`ALTER TABLE tasks ADD COLUMN is_urgent INTEGER DEFAULT 0`); } catch (_) {}
   try { await db.execute(`ALTER TABLE tasks ADD COLUMN completed_until TEXT DEFAULT NULL`); } catch (_) {}
+  // Added here as well as in schema.sql because this list is what an already
+  // installed database is upgraded by; schema.sql only ever builds fresh ones.
+  // Two lists that have to agree is the shape of every bug this project has
+  // spent a month removing, and the day they are merged is the day this comment
+  // can go.
+  try { await db.execute(`ALTER TABLE tasks ADD COLUMN completed_at TEXT DEFAULT NULL`); } catch (_) {}
+
+  // Append-only history. Created here as well as in schema.sql, because this
+  // list is what an already installed database is upgraded by.
+  await db.execute(`CREATE TABLE IF NOT EXISTS task_events (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_uid  TEXT NOT NULL,
+    kind      TEXT NOT NULL,
+    at        TEXT NOT NULL,
+    for_cycle TEXT
+  )`);
   try { await db.execute(`ALTER TABLE tasks ADD COLUMN notes TEXT DEFAULT ''`); } catch (_) {}
   // Null = the time floats with the app's zone, which is what every row already
   // did before this column existed. Nothing needs backfilling.
@@ -187,6 +218,19 @@ async function initializeSchema(db: Database): Promise<void> {
     )
   `);
 
+  // The half of the above that describes a person rather than a machine, and
+  // therefore the half that syncs. app_settings holds the pairing key and the
+  // WebDAV password, so what may leave this machine is decided by which table a
+  // row is in rather than by a predicate over key names that four separate
+  // places would have to get right identically. See schema.sql.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS user_settings (
+      id     INTEGER PRIMARY KEY AUTOINCREMENT,
+      key    TEXT NOT NULL UNIQUE,
+      value  TEXT
+    )
+  `);
+
   // Categories are user data, not a constant in the source. See the header of
   // the category section in financeDatabase.ts for why. label is NULLABLE and
   // null means "built-in, translate it", which keeps the nine defaults
@@ -256,49 +300,17 @@ async function initializeSchema(db: Database): Promise<void> {
 }
 
 
-/** The only columns updateTask may write. Anything else is dropped in silence
- *  rather than reaching the SQL string. Keep in step with the type below. */
-const UPDATABLE_TASK_COLUMNS = new Set([
-  "name", "description", "category", "reset_type", "reset_time", "reset_day",
-  "reset_interval_days", "anchor_date", "event_start", "event_end",
-  "specific_date", "is_priority", "is_urgent", "min_step", "time_zone",
-  "intent", "notes",
-]);
-
-export async function updateTask(id: number, fields: Partial<{
-  name: string; description: string; notes: string; category: string;
-  reset_type: string; reset_time: string | null; reset_day: number | null;
-  reset_interval_days: number | null; anchor_date: string | null;
-  event_start: string | null; event_end: string | null;
-  specific_date: string | null; is_priority: number; is_urgent: number;
-  min_step: string | null; time_zone: string | null;
-  intent: "want" | "must" | null;
-}>): Promise<void> {
+export async function updateTask(id: number, fields: Record<string, unknown>): Promise<void> {
   return dbQueue(async () => {
     const db = await getDb();
-    // Column names go into the SQL text itself — they cannot be bound as
-    // parameters the way values can — so they have to come from a list written
-    // here, not from whatever keys the caller happened to pass. TypeScript's
-    // Partial<> above looks like it enforces that, but types are gone by the
-    // time this runs: an object parsed from an AI reply or arriving from a sync
-    // server satisfies no type at all at runtime. Today every caller is a form
-    // in this app; sync will change that, and this is the line that has to hold
-    // when it does.
-    const keys = Object.keys(fields).filter(k => UPDATABLE_TASK_COLUMNS.has(k));
-    if (!keys.length) return;
-    const sets = keys.map(k => `${k} = ?`).join(', ');
-    const INTEGER_COLS = new Set(["reset_day", "reset_interval_days", "is_priority", "is_urgent"]);
-    const TEXT_DATE_COLS = new Set(["reset_time", "anchor_date", "event_start", "event_end", "specific_date"]);
-    const rawVals = keys.map(k => {
-      const v = (fields as any)[k];
-      if (v === undefined) return null;
-      if (INTEGER_COLS.has(k)) return v === null ? null : Number(v);
-      if (TEXT_DATE_COLS.has(k)) return sanitizeText(v);
-      return v;
-    });
-    const vals = [...rawVals, Number(id)];
-    console.log("[updateTask] id=", id, "sets=", sets, "vals=", JSON.stringify(vals));
-    await db.execute(`UPDATE tasks SET ${sets} WHERE id = ?`, vals);
+    // Which columns may be written, and how each value is read, both come from
+    // lib/taskDraft. There used to be a third list of task columns here with
+    // its own integer and date sets beside it, two screens away from the other
+    // two and pointing at neither.
+    const { columns, values } = taskUpdate(fields);
+    if (!columns.length) return;
+    const sets = columns.map((c) => `${c} = ?`).join(", ");
+    await db.execute(`UPDATE tasks SET ${sets} WHERE id = ?`, [...values, Number(id)]);
   });
 }
 
@@ -319,8 +331,18 @@ export async function addIncome(data: {
   currency?: string;
 }): Promise<void> {
   const db = await getDb();
-  await db.execute('INSERT INTO income (amount, source, note, date, currency) VALUES (?, ?, ?, ?, ?)',
-    [data.amount, data.source, data.note, data.date, data.currency || getCurrency()]);
+  // The five coercions moved to lib/moneyDraft so the phone can reproduce them
+  // against a vector file. Nothing about what gets written changed.
+  //
+  // The currency is resolved here rather than in there, for the reason that
+  // file gives at length: "whatever the setting says right now" is a fact about
+  // this screen and this moment, and a shared function that reached for it
+  // would be filing money in whichever unit a machine happened to be set to.
+  const marks = INCOME_COLUMNS.map(() => "?").join(", ");
+  await db.execute(
+    `INSERT INTO income (${INCOME_COLUMNS.join(", ")}) VALUES (${marks})`,
+    incomeValues({ ...data, currency: data.currency || getCurrency() }),
+  );
 }
 
 export async function getIncomeByMonth(month: string): Promise<any[]> {
@@ -336,7 +358,7 @@ export async function getMonthIncome(month: string): Promise<number> {
   const rows = await db.select<{total:number}[]>(
     // One currency at a time. See the note above getMonthTotal in
     // financeDatabase: summing across units invents a number.
-    "SELECT COALESCE(SUM(amount),0) as total FROM income WHERE deleted = 0 AND currency = ? AND strftime('%Y-%m', date) = ?",
+    SQL_MONTH_RECEIVED,
     [getCurrency(), month]);
   return rows[0]?.total ?? 0;
 }
@@ -390,10 +412,14 @@ export async function deleteIncome(id: number): Promise<void> {
   const db = await getDb();
   // Tombstone, not a real delete: a row that simply vanishes tells the other
   // device nothing, so it would be re-uploaded on the next sync.
-  await db.execute(
-    "UPDATE income SET deleted = 1, source = '', note = '', amount = 0 WHERE id = ? AND deleted = 0",
+  // Shared with the phone, and keyed by uid for the same reason: `id` is an
+  // autoincrement and means a different row on each machine.
+  const found = await db.select<{ uid: string }[]>(
+    "SELECT uid FROM income WHERE id = ?",
     [id],
   );
+  if (found.length === 0 || !found[0].uid) return;
+  await db.execute(SQL_DELETE_INCOME, [found[0].uid]);
 }
 
 export async function getAllTasks(): Promise<any[]> {
@@ -584,64 +610,21 @@ export async function getPriorityTasksForMonth(year: number, month: number): Pro
   );
 }
 
-// Sanitize a value destined for a SQLite TEXT column.
-// Rules:
-//   1. UTC strings ("...Z" or "...+00:00") → keep as-is (strip ms only)
-//      new Date("2026-03-07T07:30:00Z") always parses correctly everywhere.
-//   2. Bangkok-local strings with "+07:00" → keep as-is (strip ms only)
-//      countdown.ts detects the bare "YYYY-MM-DDTHH:MM" pattern and appends +07:00.
-//   3. Legacy space-separator → convert space to T (no Z = Bangkok local, handled by countdown.ts)
-//   4. Bare date-only strings ("YYYY-MM-DD") and time-only ("HH:MM") → pass through unchanged.
-function sanitizeText(v: any): string | null {
-  if (v === undefined || v === null || v === '') return null;
-  const s = String(v);
-  // UTC with Z — strip milliseconds but keep Z
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$/.test(s)) {
-    return s.replace(/\.\d+Z$/, 'Z');
-  }
-  // UTC Z without ms — already clean
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(s)) return s;
-  // With timezone offset (e.g. +07:00) — strip ms
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+[+-]\d{2}:\d{2}$/.test(s)) {
-    return s.replace(/\.\d+([+-])/, '$1');
-  }
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/.test(s)) return s;
-  // Has T already, no Z, no offset — Bangkok local, strip ms
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(s)) {
-    return s.replace(/\.\d+$/, '').replace(/Z$/, '');
-  }
-  // Has space separator (old data) — convert to T form (Bangkok local)
-  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(s)) {
-    return s.replace(' ', 'T');
-  }
-  return s;
-}
+// The date sanitiser lives in lib/taskDraft now, next to the other fifteen
+// coercions it belongs with, and is imported above.
 
-export async function createTask(task: any): Promise<void> {
+export async function createTask(task: TaskDraft): Promise<void> {
   return dbQueue(async () => {
-  const db = await getDb();
-  console.log('[createTask]', task.name, task.reset_type, 'event_end=', task.event_end, 'specific_date=', task.specific_date);
-  await db.execute(
-    `INSERT INTO tasks (name, description, category, reset_type, reset_time, reset_day,
-     reset_interval_days, anchor_date, event_start, event_end, specific_date, is_priority, is_urgent,
-     min_step, time_zone, intent)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      task.name, task.description || '', task.category, task.reset_type,
-      sanitizeText(task.reset_time),
-      task.reset_day === undefined ? null : (task.reset_day === null ? null : Number(task.reset_day)),
-      task.reset_interval_days === undefined ? null : (task.reset_interval_days === null ? null : Number(task.reset_interval_days)),
-      sanitizeText(task.anchor_date),
-      sanitizeText(task.event_start),
-      sanitizeText(task.event_end),
-      sanitizeText(task.specific_date),
-      task.is_priority ? 1 : 0,
-      task.is_urgent ? 1 : 0,
-      sanitizeText(task.min_step),
-      sanitizeText(task.time_zone),
-      task.intent === "want" || task.intent === "must" ? task.intent : null,
-    ]
-  );
+    const db = await getDb();
+    // The sixteen coercions moved to lib/taskDraft so that the phone can
+    // reproduce them against a vector file rather than from reading this.
+    // Nothing about what gets written changed; the vectors were generated from
+    // the values this function used to build.
+    const marks = TASK_COLUMNS.map(() => "?").join(", ");
+    await db.execute(
+      `INSERT INTO tasks (${TASK_COLUMNS.join(", ")}) VALUES (${marks})`,
+      taskValues(task),
+    );
   }); // end dbQueue
 }
 
@@ -670,6 +653,40 @@ export async function toggleUrgent(id: number, is_urgent: boolean): Promise<void
 }
 
 /**
+ * One line in the history, written beside the change that caused it.
+ *
+ * Looked up by uid rather than taking the row id, because the id means nothing
+ * on the other device and this row is going to travel.
+ *
+ * A failure here must not undo the tick. Losing a line of history is a day that
+ * reads slightly wrong in a calendar six months from now; refusing to mark a
+ * task done because a log write failed is the app breaking in the hand of
+ * somebody who just finished something.
+ */
+async function recordTaskEvent(
+  db: Database,
+  id: number,
+  kind: "done" | "undone",
+  at: string,
+  forCycle: string | null,
+): Promise<void> {
+  try {
+    const rows = await db.select<{ uid: string | null }[]>(
+      "SELECT uid FROM tasks WHERE id = ?",
+      [id],
+    );
+    const uid = rows[0]?.uid;
+    if (!uid) return;
+    await db.execute(
+      "INSERT INTO task_events (task_uid, kind, at, for_cycle) VALUES (?, ?, ?, ?)",
+      [uid, kind, at, forCycle],
+    );
+  } catch (err) {
+    console.error("[history] could not record", kind, err);
+  }
+}
+
+/**
  * Mark a task done until a specific ISO datetime.
  * For recurring tasks: untilIso = next reset time → auto-unmarks when cycle resets.
  * For one-time tasks: we archive them instead (see archiveTask).
@@ -678,10 +695,15 @@ export async function markTaskCompleted(id: number, untilIso: string): Promise<v
   const db = await getDb();
   // Doing it once clears the easing straight away. It was never a penalty to be
   // worked off, so there is nothing to earn back.
+  // completed_at is stamped from the same clock the sync trigger uses, not from
+  // Date.now(), for the reason syncMeta gives about updated_at: a column that is
+  // only ever compared as a string has to come from one place.
+  const now = await dbNow(db);
   await db.execute(
-    "UPDATE tasks SET completed_until = ?, missed_streak = 0 WHERE id = ?",
-    [untilIso, id]
+    "UPDATE tasks SET completed_until = ?, completed_at = ?, missed_streak = 0 WHERE id = ?",
+    [untilIso, now, id]
   );
+  await recordTaskEvent(db, id, "done", now, untilIso);
 }
 
 /**
@@ -716,10 +738,16 @@ export async function recordCycleRollover(
  */
 export async function unmarkTaskCompleted(id: number): Promise<void> {
   const db = await getDb();
+  // The tick is cleared and the moment it was cleared is recorded. Without the
+  // second half this write cannot travel: sync compares completed_at, and a row
+  // that clears the tick without saying when loses to the copy on the other
+  // device for ever.
+  const now = await dbNow(db);
   await db.execute(
-    "UPDATE tasks SET completed_until = NULL WHERE id = ?",
-    [id]
+    "UPDATE tasks SET completed_until = NULL, completed_at = ? WHERE id = ?",
+    [now, id]
   );
+  await recordTaskEvent(db, id, "undone", now, null);
 }
 
 // ─── AI assistant functions ───────────────────────────────────

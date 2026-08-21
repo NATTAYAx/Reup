@@ -155,10 +155,43 @@ export function upsert(shape: TableShape, r: ChangeRecord): Statement {
   };
 }
 
-export function changedSince(shape: TableShape): Statement {
+/**
+ * Everything this device has not sent yet, from one table.
+ *
+ * The join is the whole change. The old version of this asked which rows have a
+ * timestamp above a watermark, which is a question about this device answered
+ * with a number that other devices also write into: rows pulled from a phone
+ * carry the phone's clock, the watermark is set to the newest timestamp the run
+ * looked at, and a phone an hour ahead therefore pushes this device's watermark
+ * an hour into the future. Every local edit made in that hour is stamped by
+ * this device's own clock, lands below the watermark, and is never sent. No
+ * error, no retry, and the two databases quietly stop agreeing.
+ *
+ * A row in a table cannot be contaminated by anyone else's clock.
+ */
+export function pending(shape: TableShape): Statement {
   return {
-    sql: `SELECT * FROM ${shape.name} WHERE updated_at > ? ORDER BY updated_at ASC, uid ASC`,
+    sql:
+      `SELECT r.* FROM ${shape.name} r ` +
+      `JOIN sync_outbox o ON o.tbl = '${shape.name}' AND o.uid = r.uid ` +
+      `ORDER BY r.updated_at ASC, r.uid ASC`,
     params: [],
+  };
+}
+
+/**
+ * One row is no longer pending — but only at the version that was dealt with.
+ *
+ * updated_at is in the WHERE for the reason the whole table exists. A row edited
+ * while the upload was in flight has already had its outbox entry replaced by
+ * the trigger, so this delete does not match it and it stays queued. Clearing by
+ * name alone would drop that edit on the floor, silently, and only ever on a
+ * slow connection.
+ */
+export function settle(table: string, uid: string, updatedAt: string): Statement {
+  return {
+    sql: `DELETE FROM sync_outbox WHERE tbl = ? AND uid = ? AND updated_at = ?`,
+    params: [table, uid, updatedAt],
   };
 }
 
@@ -195,6 +228,29 @@ export function byUids(shape: TableShape, uids: string[]): Statement {
  * without talking about it — the same property the merge rules are built on.
  * Smaller rather than newer because timestamps can tie and uids cannot.
  */
+/**
+ * A key nobody is holding.
+ *
+ * SQLite does not constrain rows that carry a NULL in a unique index: two
+ * expenses with no slip both satisfy `UNIQUE(slip_ref)` and always have. So a
+ * record with a NULL anywhere in a key cannot collide with anything, and asking
+ * whether it does is not a cheap extra check — it is a question with the wrong
+ * answer built in.
+ *
+ * Getting this wrong cost a real row. `findClash` asked `slip_ref IS ?` with a
+ * null bound, which is `IS NULL`, which matches every expense that has no slip
+ * — so the store decided that every slip-less expense was the same expense,
+ * kept the one whose uuid sorted first and filed the rest as tombstones. The
+ * tombstones then synced, and the other device deleted its copies too. Nothing
+ * errored anywhere; the rows were simply gone, and which ones survived was
+ * decided by random uuids.
+ *
+ * The rule is the database's own rule, written where the store can see it.
+ */
+export function keyIsHeld(key: string[], fields: Record<string, unknown>): boolean {
+  return key.every((c) => (fields[c] ?? null) !== null);
+}
+
 export function naturalKeyClash(
   shape: TableShape,
   incoming: ChangeRecord,
@@ -207,8 +263,13 @@ export function naturalKeyClash(
   // there is nothing for a loose comparison to rescue — and printing is exactly
   // where the two languages disagree, because one writes 1200 and the other
   // writes 1200.0.
-  return shape.naturalKeys.some((key) =>
-    key.every((c) => (incoming.fields[c] ?? null) === (existing[c] ?? null)),
+  return shape.naturalKeys.some(
+    (key) =>
+      // Both sides, not just the incoming one: a live row with a NULL in the
+      // key is not occupying it either, so there is nothing to take from it.
+      keyIsHeld(key, incoming.fields) &&
+      keyIsHeld(key, existing) &&
+      key.every((c) => (incoming.fields[c] ?? null) === (existing[c] ?? null)),
   );
 }
 
@@ -264,6 +325,10 @@ export function freeNaturalKeys(shape: TableShape, r: ChangeRecord): ChangeRecor
   if (!r.deleted || shape.naturalKeys.length === 0) return r;
   const fields = { ...r.fields };
   for (const key of shape.naturalKeys) {
+    // A key with a NULL in it was never held, so there is nothing to release.
+    // Stamping a value in would be worse than pointless: it would move the row
+    // into the unique index that the live row was never in.
+    if (!keyIsHeld(key, r.fields)) continue;
     for (const c of key) {
       const type = (shape.types[c] ?? "").toUpperCase();
       if (!type.includes("CHAR") && !type.includes("TEXT") && !type.includes("CLOB")) continue;
@@ -273,18 +338,61 @@ export function freeNaturalKeys(shape: TableShape, r: ChangeRecord): ChangeRecor
   return { ...r, fields };
 }
 
-// ─── the gap this file leaves, on purpose ────────────────────────────────────
+// ─── the columns this schema has never heard of ──────────────────────────────
 //
-// A column the local table does not have is dropped. That is right for keeping
-// sync alive across a version gap, and it costs something real: if the older
-// device later edits that row and pushes it back, the base field group it sends
-// no longer carries the column, so the newer device loses the value too.
+// A field the local table has no column for used to be dropped, and the loss
+// was named out loud but not prevented. That was defensible while only one
+// device could originate a row: the older device never pushed, so it could
+// never push a row with the column missing.
 //
-// The fix is to keep the unrecognised fields in a side table keyed by table and
-// uid and put them back when the row is read for pushing, so a device can carry
-// a column it does not understand without ever looking at it. Perhaps thirty
-// lines. It is not here because there is no second device running a different
-// schema yet, and because it is easier to reason about once the phone has a
-// database at all.
+// This round removed that. The phone writes now, which means the older of two
+// devices can take a row in, drop a column it does not understand, tick it
+// done, and send the row back without it. The newer device then loses a value
+// neither person ever touched, and nothing anywhere says so.
 //
-// Until then: update both devices at the same time, and know why.
+// So the fields are kept, in a table beside the row rather than in it, and put
+// back when the row is read for sending. A device can now carry a column it
+// cannot read, cannot display and will never edit.
+//
+// WHY IT IS OVERWRITTEN ON EVERY APPLY AND NOT MERGED
+//
+// The spill belongs to the version it arrived with. If the far side sends a
+// newer row, its spill replaces this one wholesale, which is the same rule the
+// row itself follows. Merging the two would mean inventing a row that existed
+// on neither device.
+
+export function spillRead(pairs: { table: string; uid: string }[]): Statement {
+  const holes = pairs.map(() => "(?, ?)").join(", ");
+  const params: unknown[] = [];
+  for (const p of pairs) params.push(p.table, p.uid);
+  return { sql: `SELECT tbl, uid, cols FROM sync_spill WHERE (tbl, uid) IN (${holes})`, params };
+}
+
+export function spillWrite(table: string, uid: string, cols: string): Statement {
+  return {
+    sql:
+      `INSERT INTO sync_spill (tbl, uid, cols) VALUES (?, ?, ?) ` +
+      `ON CONFLICT(tbl, uid) DO UPDATE SET cols = excluded.cols`,
+    params: [table, uid, cols],
+  };
+}
+
+/**
+ * No spill for this row any more.
+ *
+ * Run when a row arrives carrying nothing this schema cannot read, and when it
+ * arrives as a tombstone. A tombstone has no payload, so keeping a set of
+ * columns beside it would mean re-attaching values to a deleted row on the way
+ * out — which is how a deleted row grows a body again.
+ */
+export function spillDrop(table: string, uid: string): Statement {
+  return { sql: `DELETE FROM sync_spill WHERE tbl = ? AND uid = ?`, params: [table, uid] };
+}
+
+/** The fields a record carries that this database has no column for. */
+export function unknownFields(shape: TableShape, r: ChangeRecord): Record<string, unknown> {
+  const known = new Set(shape.columns);
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(r.fields).sort()) if (!known.has(k)) out[k] = r.fields[k];
+  return out;
+}

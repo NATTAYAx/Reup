@@ -29,6 +29,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { parseQuiet, putSetting, QUIET_KEY } from "./userSettings";
 import { CountdownResult } from "../types";
 import { wallClock } from "./tz";
 
@@ -96,26 +97,35 @@ export interface QuietHours {
   end: string;
 }
 
-const QUIET_KEY = "gamesched_quiet_hours_v1";
 const QUIET_DEFAULT: QuietHours = { enabled: false, start: "23:00", end: "08:00" };
 
+/**
+ * Reads the cache, parses with the one parser.
+ *
+ * The parsing moved to userSettings.ts because the phone has to reach the same
+ * answer from the same string, and a second reading of it here is the second
+ * implementation that would drift. What stays here is this app's own shape for
+ * it, which has an `enabled` flag where the shared type has a third case.
+ */
 export function getQuietHours(): QuietHours {
+  let raw: string | null = null;
   try {
-    const raw = localStorage.getItem(QUIET_KEY);
-    if (!raw) return QUIET_DEFAULT;
-    const p = JSON.parse(raw) as Partial<QuietHours>;
-    return {
-      enabled: Boolean(p.enabled),
-      start: typeof p.start === "string" && /^\d{2}:\d{2}$/.test(p.start) ? p.start : QUIET_DEFAULT.start,
-      end: typeof p.end === "string" && /^\d{2}:\d{2}$/.test(p.end) ? p.end : QUIET_DEFAULT.end,
-    };
+    raw = localStorage.getItem(QUIET_KEY);
   } catch {
     return QUIET_DEFAULT;
   }
+  const q = parseQuiet(raw);
+  // `unknown` and `off` are the same answer to this caller: do not be quiet.
+  // They are only told apart on a device that has never been told anything,
+  // which is the phone before its first sync. See userSettings.ts.
+  if (q.kind !== "window") return QUIET_DEFAULT;
+  return { enabled: true, start: q.start, end: q.end };
 }
 
 export function setQuietHours(q: QuietHours) {
-  try { localStorage.setItem(QUIET_KEY, JSON.stringify(q)); } catch { /* full */ }
+  // Through the mirror rather than straight to localStorage, so the phone stops
+  // having to guess what night means here. See userSettings.ts.
+  putSetting(QUIET_KEY, JSON.stringify(q));
 }
 
 const toMinutes = (hhmm: string): number => {

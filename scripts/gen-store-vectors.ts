@@ -29,16 +29,39 @@
  * learn to ignore. What has to match is the statement.
  */
 
-import { syncMigrations } from "../src/lib/syncMeta";
+import { outboxReseed, syncMigrations } from "../src/lib/syncMeta";
+import { parseQuiet } from "../src/lib/userSettings";
+import { SQL_BUMP, SQL_CLOCK_READ, SQL_SEEN } from "../src/lib/sync/sqlLocalStore";
+import { TASK_COLUMNS, TASK_EDITABLE, sanitizeText, taskProblems, taskUpdate, taskValues } from "../src/lib/taskDraft";
+import {
+  EXPENSE_COLUMNS,
+  INCOME_COLUMNS,
+  SQL_MONTH_OTHER_COUNT,
+  SQL_MONTH_RECEIVED,
+  SQL_MONTH_SPENT,
+  SQL_RECENT_MONEY,
+  SQL_DELETE_EXPENSE,
+  SQL_DELETE_INCOME,
+  CATEGORY_FALLBACK,
+  CURRENCY_FALLBACK,
+  expenseProblems,
+  expenseValues,
+  incomeProblems,
+  incomeValues,
+} from "../src/lib/moneyDraft";
 import {
   byUids,
-  changedSince,
   deletionsFirst,
   freeNaturalKeys,
   incomingLosesClash,
   naturalKeyClash,
   payloadColumns,
+  pending,
+  spillDrop,
+  spillRead,
+  spillWrite,
   recordFromRow,
+  settle,
   upsert,
   type Row,
   type TableShape,
@@ -162,6 +185,215 @@ async function main(): Promise<void> {
     ignoreErrors: m.ignoreErrors === true,
   }));
 
+  // What refilling the queue runs, which is what a snapshot is made of.
+  //
+  // Kept as its own section rather than folded into the migrations, because it
+  // is the one list that is run outside startup: on changing folders, and now
+  // before every snapshot push. Two implementations of it that agree on the
+  // seven tables but not on the flag statement around them would produce two
+  // devices that disagree about what a snapshot contains, which is the failure
+  // the whole retention rule rests on not happening.
+  // The three statements that make up the clock.
+  //
+  // Never vectored before, and they are the one thing in this project that both
+  // languages retype by hand: every timestamp either device writes comes out of
+  // these, and two copies that drift would put the two clocks on different
+  // scales without a single error anywhere.
+  V.clock = [SQL_BUMP, SQL_CLOCK_READ, SQL_SEEN];
+
+  V.reseed = outboxReseed().map((m) => ({
+    sql: flat(m.sql),
+    ignoreErrors: m.ignoreErrors === true,
+  }));
+
+  // How a stored quiet-hours value reads, which two languages have to agree on.
+  //
+  // The value is the localStorage string verbatim, so the parser is the only
+  // thing standing between one format and two readings of it. The cases below
+  // are the ones where a reasonable second implementation would differ: a
+  // missing flag, a flag that is a string, bounds that are equal, bounds that
+  // are unreadable while the switch is on.
+  V.quiet = [
+    null,
+    "",
+    "not json",
+    "[]",
+    "{}",
+    '{"start":"23:00","end":"08:00"}',
+    '{"enabled":false}',
+    '{"enabled":false,"start":"23:00","end":"08:00"}',
+    '{"enabled":"true","start":"23:00","end":"08:00"}',
+    '{"enabled":1,"start":"23:00","end":"08:00"}',
+    '{"enabled":null,"start":"23:00","end":"08:00"}',
+    '{"enabled":true,"start":"23:00","end":"08:00"}',
+    '{"enabled":true,"start":"08:00","end":"08:00"}',
+    '{"enabled":true,"start":"7:00","end":"08:00"}',
+    '{"enabled":true,"start":"23:00"}',
+    '{"enabled":true,"start":"00:00","end":"23:59"}',
+  ].map((raw) => ({ raw, expected: parseQuiet(raw) }));
+
+  // What a draft becomes on the way into the tasks table.
+  //
+  // Generated from the values `createTask` was already building, so the vectors
+  // describe what the desktop has always written rather than what would be
+  // tidier. The phone is about to be the second thing that can make a task, and
+  // sixteen coercions reproduced from reading the other side is the shape this
+  // project keeps removing.
+  V.sanitizeText = [
+    null,
+    "",
+    "2026-08-19",
+    "07:30",
+    "2026-08-19T07:30:00.123Z",
+    "2026-08-19T07:30:00Z",
+    "2026-08-19T07:30:00.123+07:00",
+    "2026-08-19T07:30:00+07:00",
+    "2026-08-19T07:30:00.123",
+    "2026-08-19T07:30:00",
+    "2026-08-19 07:30:00",
+    "whatever",
+  ].map((raw) => ({ raw, expected: sanitizeText(raw) }));
+
+  const drafts: Record<string, unknown>[] = [
+    { name: "ยาความดัน", reset_type: "daily", reset_time: "09:00" },
+    { name: "", reset_type: "daily" },
+    { name: "   ", reset_type: "daily" },
+    { name: "raid", reset_type: "weekly", reset_day: 1, reset_time: "05:00", is_priority: true },
+    // Sunday is zero, which is falsy. A guard written with a truthiness test
+    // makes Sunday the one day a weekly task cannot be set to.
+    { name: "raid", reset_type: "weekly", reset_day: 0 },
+    { name: "raid", reset_type: "weekly" },
+    { name: "raid", reset_type: "weekly", reset_day: 9 },
+    { name: "raid", reset_type: "biweekly", reset_day: "3" },
+    { name: "bins", reset_type: "custom_days", reset_interval_days: 14, anchor_date: "2026-08-01" },
+    { name: "bins", reset_type: "custom_days" },
+    { name: "bins", reset_type: "custom_days", reset_interval_days: 0 },
+    { name: "event", reset_type: "event_window", event_start: "2026-08-01T00:00:00+07:00", event_end: "2026-08-09T23:59:00+07:00" },
+    { name: "event", reset_type: "event_window", event_start: "2026-08-01" },
+    { name: "dentist", reset_type: "specific_date", specific_date: "2026-09-02" },
+    { name: "dentist", reset_type: "specific_date" },
+    { name: "x", reset_type: "sometimes" },
+    { name: "x", reset_type: "daily", reset_time: "9:00" },
+    { name: "x", reset_type: "daily", intent: "want" },
+    { name: "x", reset_type: "daily", intent: "maybe" },
+    { name: "x", reset_type: "daily", is_urgent: 1, description: "", category: "personal" },
+    { name: "x", reset_type: "daily", min_step: "", time_zone: "Asia/Bangkok" },
+  ];
+  V.taskColumns = [...TASK_COLUMNS];
+  V.taskEditable = Object.keys(TASK_EDITABLE);
+
+  // Editing an existing row. Separate from the draft cases because the question
+  // is different: not what sixteen values a new row gets, but which of them an
+  // edit is allowed to touch and in what order they come out.
+  V.taskUpdate = ([
+    {},
+    { name: "x" },
+    { nope: 1, name: "x" },
+    { is_priority: true, is_urgent: false },
+    { is_priority: 1, is_urgent: 0 },
+    { reset_day: "0" },
+    { reset_day: null },
+    { min_step: "" },
+    { min_step: "\u0e25\u0e49\u0e32\u0e07\u0e08\u0e32\u0e19 1 \u0e43\u0e1a" },
+    { time_zone: null, intent: "want" },
+    { intent: "maybe" },
+    { notes: "hello" },
+    { specific_date: "2026-09-02", reset_time: "07:30" },
+    { event_end: "2026-08-19T07:30:00.123Z" },
+    // Order comes from the allowlist, not from the object, so two devices
+    // produce the same statement for the same edit.
+    { intent: "must", name: "z", reset_time: "01:00" },
+  ] as Record<string, unknown>[]).map((fields) => ({ fields, ...taskUpdate(fields) }));
+  V.taskDraft = drafts.map((draft) => ({
+    draft,
+    values: taskValues(draft),
+    problems: taskProblems(draft),
+  }));
+
+  // What a draft becomes on the way into the expenses table.
+  //
+  // A task written slightly wrong rings at the wrong time and somebody notices.
+  // An amount written slightly wrong is a number inside a total, and a total is
+  // the kind of thing nobody audits until the month it matters.
+  const KNOWN = ["food", "transport", "other"];
+  V.expenseCategories = KNOWN;
+  V.expenseColumns = [...EXPENSE_COLUMNS];
+  V.expenseDraft = ([
+    { amount: 60, currency: "THB", category: "food", note: "กาแฟ", date: "2026-08-19" },
+    { amount: "1200", currency: "THB", category: "food", note: "", date: "2026-08-19" },
+    { amount: " 45.50 ", currency: "THB", category: "transport", note: "", date: "2026-08-19" },
+    { amount: "", currency: "THB", category: "food", date: "2026-08-19" },
+    { amount: "abc", currency: "THB", category: "food", date: "2026-08-19" },
+    { amount: 0, currency: "THB", category: "food", date: "2026-08-19" },
+    { amount: -5, currency: "THB", category: "food", date: "2026-08-19" },
+    // Filed under other rather than refused. The money is the part that
+    // matters; the label can be fixed afterwards.
+    { amount: 20, currency: "THB", category: "gadgets", date: "2026-08-19" },
+    { amount: 20, currency: "THB", date: "2026-08-19" },
+    { amount: 20, currency: "THB", category: "", date: "2026-08-19" },
+    { amount: 20, category: "food", date: "2026-08-19" },
+    { amount: 20, currency: "THB", category: "food" },
+    { amount: 20, currency: "THB", category: "food", date: "19/08/2026" },
+    // Empty rather than a string, because the unique index tolerates any
+    // number of nulls and exactly one of each string.
+    { amount: 20, currency: "THB", category: "food", date: "2026-08-19", slip_ref: "" },
+    { amount: 20, currency: "THB", category: "food", date: "2026-08-19", slip_ref: "REF123" },
+    { amount: 20, currency: "USD", category: "food", date: "2026-08-19", nope: 1 },
+  ] as Record<string, unknown>[]).map((draft) => ({
+    draft,
+    values: expenseValues(draft, KNOWN),
+    problems: expenseProblems(draft, KNOWN),
+  }));
+
+  // And the other direction. The same three questions, so the same codes, which
+  // is the property worth pinning: a validator that refuses a negative expense
+  // and accepts a negative payment is the shape this file exists to prevent.
+  V.incomeColumns = [...INCOME_COLUMNS];
+  V.incomeDraft = ([
+    { amount: 6516, source: "TELUS", note: "", date: "2026-08-19", currency: "THB" },
+    { amount: "180", source: "3Play", note: "test 2", date: "2026-08-19", currency: "USD" },
+    // Blank stays blank rather than becoming "other", because that is what the
+    // desktop has always written.
+    { amount: 100, source: "", date: "2026-08-19", currency: "THB" },
+    { amount: 100, date: "2026-08-19", currency: "THB" },
+    { amount: "", source: "x", date: "2026-08-19", currency: "THB" },
+    { amount: "abc", source: "x", date: "2026-08-19", currency: "THB" },
+    { amount: 0, source: "x", date: "2026-08-19", currency: "THB" },
+    { amount: -5, source: "x", date: "2026-08-19", currency: "THB" },
+    { amount: 100, source: "x", date: "2026-08-19" },
+    { amount: 100, source: "x", currency: "THB" },
+    { amount: 100, source: "x", date: "19/08/2026", currency: "THB" },
+    { amount: 100, source: "x", date: "2026-08-19", currency: "THB", nope: 1 },
+  ] as Record<string, unknown>[]).map((draft) => ({
+    draft,
+    values: incomeValues(draft),
+    problems: incomeProblems(draft),
+  }));
+
+  // The statements a screen needs to answer "how am I doing this month", and
+  // the one that answers "what have I actually written down lately".
+  //
+  // Two of them the desktop already ran and now shares; the other two exist
+  // because filtering by currency silently is how a screen shows a confident,
+  // wrong-looking zero, and because a total cannot tell you the same coffee
+  // went in twice.
+  //
+  // The fourth pins a number as well as a shape: the twenty is inside the
+  // string, so the two sides cannot come to mean different things by "lately".
+  V.moneyQueries = [
+    SQL_MONTH_SPENT,
+    SQL_MONTH_RECEIVED,
+    SQL_MONTH_OTHER_COUNT,
+    SQL_RECENT_MONEY,
+    SQL_DELETE_EXPENSE,
+    SQL_DELETE_INCOME,
+  ];
+
+  // The two strings that decide what happens when nobody said. Neither can fail
+  // loudly if the two sides disagree — one device just files a month in a unit
+  // the other one filters out.
+  V.moneyFallbacks = [CURRENCY_FALLBACK, CATEGORY_FALLBACK];
+
   // The shapes as SQLite actually reports them, which is also the fixture the
   // rest of the cases are built on.
   V.shapes = [...SYNCED_TABLES].map((name) => {
@@ -242,11 +474,60 @@ async function main(): Promise<void> {
     return { ...c, expected: { sql: flat(s.sql), params: s.params } };
   });
 
-  V.changedSince = [...SYNCED_TABLES].map((name) => ({
-    id: `changed-${name}`,
+  // The outbox pair, which replaced "everything above a watermark". Both halves
+  // are here because they are only correct together: pending joins the queue and
+  // settle empties it, and a port that got one of the two spellings wrong would
+  // either send the same rows for ever or drop an edit made mid-upload.
+  V.pending = [...SYNCED_TABLES].map((name) => ({
+    id: `pending-${name}`,
     table: name,
-    expected: flat(changedSince(shapeOf(name)).sql),
+    expected: flat(pending(shapeOf(name)).sql),
   }));
+
+  // The spill, which is how a column this schema cannot hold survives a round
+  // trip through this device. Both spellings are here because the pair is only
+  // correct together: read has to find exactly what write stored, and a device
+  // that got the key order wrong would quietly carry nothing.
+  V.spill = [
+    {
+      id: "spill-read-one",
+      kind: "read",
+      pairs: [{ table: "tasks", uid: "u-1" }],
+    },
+    {
+      id: "spill-read-many",
+      kind: "read",
+      pairs: [
+        { table: "tasks", uid: "u-1" },
+        { table: "expenses", uid: "u-2" },
+      ],
+    },
+    { id: "spill-write", kind: "write", table: "tasks", uid: "u-1", cols: '{"mood_after":3}' },
+    { id: "spill-drop", kind: "drop", table: "budgets", uid: "u-'2" },
+  ].map((c) => {
+    const q =
+      c.kind === "read"
+        ? spillRead(c.pairs as { table: string; uid: string }[])
+        : c.kind === "write"
+          ? spillWrite(c.table as string, c.uid as string, c.cols as string)
+          : spillDrop(c.table as string, c.uid as string);
+    return { ...c, expected: { sql: flat(q.sql), params: q.params } };
+  });
+
+  // updated_at is in the WHERE, and that is the whole point of these cases: a
+  // settle by name alone would clear an entry the trigger had already replaced
+  // with a newer version, which loses an edit silently and only on a slow link.
+  V.settle = [
+    { id: "settle-task", table: "tasks", uid: "u-1", updatedAt: "2026-08-16T03:00:00.000Z" },
+    { id: "settle-budget", table: "budgets", uid: "u-2", updatedAt: "2026-08-16T03:00:00.001Z" },
+    // A uid with a quote in it would break a query built by concatenation. It
+    // cannot happen — uids are generated — but the binding is what makes that
+    // true rather than the generator, and this is where that is stated.
+    { id: "settle-awkward-uid", table: "expenses", uid: "u-'3", updatedAt: "1970-01-01T00:00:00.000Z" },
+  ].map((c) => {
+    const q = settle(c.table, c.uid, c.updatedAt);
+    return { ...c, expected: { sql: flat(q.sql), params: q.params } };
+  });
 
   V.byUids = [
     { id: "by-uids-one", table: "tasks", uids: ["a"] },
@@ -272,7 +553,69 @@ async function main(): Promise<void> {
         fields: { key: "food", label: null, emoji: "🍜", color: null, sort_order: 0, is_hidden: 0 },
       },
     },
+    {
+      id: "free-expense-tombstone-with-no-slip-keeps-it-null",
+      table: "expenses",
+      record: {
+        table: "expenses",
+        uid: "55555555-5555-4555-8555-555555555555",
+        updatedAt: "2026-08-16T21:00:00.000Z",
+        deleted: true,
+        origin: DEVICE,
+        fields: {
+          amount: 1200, category: "food", note: "", date: "2026-08-16",
+          created_at: "2026-08-16 21:00:00", currency: "THB", slip_ref: null,
+        },
+      },
+    },
+    {
+      id: "free-expense-tombstone-with-a-slip-releases-it",
+      table: "expenses",
+      record: {
+        table: "expenses",
+        uid: "55555555-5555-4555-8555-555555555555",
+        updatedAt: "2026-08-16T21:00:00.000Z",
+        deleted: true,
+        origin: DEVICE,
+        fields: {
+          amount: 1200, category: "food", note: "", date: "2026-08-16",
+          created_at: "2026-08-16 21:00:00", currency: "THB", slip_ref: "slip-abc",
+        },
+      },
+    },
   ].map((c) => ({ ...c, expected: freeNaturalKeys(shapeOf(c.table), c.record) }));
+
+  const expenseFields: Record<string, unknown> = {
+    amount: 1200,
+    category: "food",
+    note: "",
+    date: "2026-08-16",
+    created_at: "2026-08-16 21:00:00",
+    currency: "THB",
+    slip_ref: null,
+  };
+  const expenseRecord = (over: Partial<ChangeRecord> = {}): ChangeRecord => ({
+    table: "expenses",
+    uid: "55555555-5555-4555-8555-555555555555",
+    updatedAt: "2026-08-16T21:00:00.000Z",
+    deleted: false,
+    origin: DEVICE,
+    fields: expenseFields,
+    ...over,
+  });
+  const existingExpense: Row = {
+    id: 9,
+    uid: "22222222-2222-4222-8222-222222222222",
+    updated_at: "2026-08-16T20:00:00.000Z",
+    deleted: 0,
+    amount: 60.5,
+    category: "food",
+    note: "",
+    date: "2026-08-16",
+    created_at: "2026-08-16 20:00:00",
+    currency: "THB",
+    slip_ref: null,
+  };
 
   const existingBudget: Row = {
     id: 3,
@@ -314,6 +657,22 @@ async function main(): Promise<void> {
       incoming: taskRecord(),
       existing: { ...liveRow, uid: "99999999-9999-4999-8999-999999999999" },
     },
+    // A unique index on a nullable column constrains nothing when the value is
+    // null, which is the state of nearly every expense. Treating two of them as
+    // one another's duplicate deleted a real row; these two cases are the rule
+    // the database has always had, written down where both languages read it.
+    {
+      id: "clash-two-null-slips-are-not-the-same-expense",
+      table: "expenses",
+      incoming: expenseRecord(),
+      existing: existingExpense,
+    },
+    {
+      id: "clash-the-same-real-slip-still-clashes",
+      table: "expenses",
+      incoming: expenseRecord({ fields: { ...expenseFields, slip_ref: "slip-abc" } }),
+      existing: { ...existingExpense, slip_ref: "slip-abc" },
+    },
   ].map((c) => ({
     ...c,
     expected: {
@@ -347,10 +706,22 @@ async function main(): Promise<void> {
 
   const counts: [string, number][] = [
     ["migrations", (V.migrations as unknown[]).length],
+    ["clock", (V.clock as unknown[]).length],
+    ["reseed", (V.reseed as unknown[]).length],
+    ["quiet", (V.quiet as unknown[]).length],
+    ["sanitizeText", (V.sanitizeText as unknown[]).length],
+    ["taskDraft", (V.taskDraft as unknown[]).length],
+    ["taskUpdate", (V.taskUpdate as unknown[]).length],
+    ["expenseDraft", (V.expenseDraft as unknown[]).length],
+    ["incomeDraft", (V.incomeDraft as unknown[]).length],
+    ["moneyQueries", (V.moneyQueries as unknown[]).length],
+    ["moneyFallbacks", (V.moneyFallbacks as unknown[]).length],
     ["shapes", (V.shapes as unknown[]).length],
     ["recordFromRow", (V.recordFromRow as unknown[]).length],
     ["upsert", (V.upsert as unknown[]).length],
-    ["changedSince", (V.changedSince as unknown[]).length],
+    ["pending", (V.pending as unknown[]).length],
+    ["settle", (V.settle as unknown[]).length],
+    ["spill", (V.spill as unknown[]).length],
     ["byUids", (V.byUids as unknown[]).length],
     ["freeNaturalKeys", (V.freeNaturalKeys as unknown[]).length],
     ["clash", (V.clash as unknown[]).length],
@@ -422,7 +793,7 @@ async function main(): Promise<void> {
             return ch;
           })
           .join("");
-      const body = lines.map((l) => `    "${esc(l)}\\n"`).join(" +\n");
+      const body = lines.map((l: string) => `    "${esc(l)}\\n"`).join(" +\n");
       const kt =
         "package app.reup.sync\n\n" +
         "// GENERATED by reup/scripts/gen-store-vectors.ts from reup-shared/schema.sql.\n" +

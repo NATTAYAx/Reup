@@ -1,6 +1,8 @@
 import { getDb } from "./database";
 import { keepInBackup, MACHINE_ONLY_SETTINGS } from "./sync/config";
 import { PREFIX, isSecretKey, sanitizeForBackup } from "./storageKeys";
+import { SYNC_TABLES } from "./syncMeta";
+import { hydrateSettings, type SettingsDb } from "./userSettings";
 
 // ─── backup.ts — the one thing missing that could actually lose everything ────
 //
@@ -41,17 +43,27 @@ const FORMAT = "game-scheduler-backup";
  */
 const VERSION = 2;
 
-/** Every table, in an order that does not matter now but would if these ever
- *  gained foreign keys. */
-const TABLES = [
-  "tasks",
-  "income",
-  "expenses",
-  "budgets",
-  "saving_goals",
-  "expense_categories",
-  "app_settings",
-] as const;
+/**
+ * Every table worth saving, derived rather than listed.
+ *
+ * This was a hand-written list of seven names, and by the time anyone looked it
+ * was missing three: `expected_income`, `task_events` and `user_settings` had
+ * each been added to the database in a later round and nobody came back here.
+ * Nothing complained. A table absent from this list is not exported, is not
+ * mentioned in the restore report, and is not counted as skipped — the file
+ * simply does not contain it, and the word "backup" on the button goes on
+ * meaning less than it did the month before.
+ *
+ * So the list is now the one the sync layer keeps, plus app_settings, which is
+ * the only table that is deliberately not synced and still worth keeping. That
+ * makes adding a table to sync enough on its own, which is the only version of
+ * this that stays true.
+ *
+ * Everything else in the database is sync bookkeeping — the outbox, the spill,
+ * the clock — and restoring any of it onto a different machine would be
+ * actively wrong.
+ */
+const TABLES: readonly string[] = [...SYNC_TABLES.map((t) => t.name), "app_settings"];
 
 // What may leave the machine, and in what state, is decided in lib/storageKeys —
 // next to the names of the keys themselves. It used to be decided here, from
@@ -256,6 +268,19 @@ export async function restoreBackup(file: BackupFile): Promise<RestoreReport> {
     }
   } catch (err) {
     console.error("[backup] restore failed on local settings:", err);
+  }
+
+  // The settings that live in a table are now read through a cache, and the two
+  // halves of this restore write to both of them: the table from `tables`, the
+  // cache from `local`. A file whose two halves disagree — an old one, or one
+  // edited by hand — would otherwise leave the screen showing one currency and
+  // the sync sending another, until the next launch quietly picked a side.
+  //
+  // The table wins, because it is the half that travels.
+  try {
+    await hydrateSettings(db as unknown as SettingsDb);
+  } catch (err) {
+    console.error("[backup] restore could not refresh settings:", err);
   }
 
   return report;

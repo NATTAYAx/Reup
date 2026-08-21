@@ -25,7 +25,11 @@
 import { decodePairing, encodePairing, randomBucketId, randomKey, type Pairing } from "./crypto";
 import { sync, type SyncReport } from "./engine";
 import { SqlLocalStore, SYNC_STATE_KEY, type Db } from "./sqlLocalStore";
+import { dataChanged } from "../dataChanged";
 import { WebDavStorage, type HttpTransport, type SyncStorage } from "./storage";
+import { GoogleDriveStorage, type AccessTokenSource } from "./drive";
+import { outboxReseed } from "../syncMeta";
+import { hydrateSettings, type SettingsDb } from "../userSettings";
 
 /** The one row in `app_settings` that holds all of this. */
 export const SYNC_CONFIG_KEY = "sync_config_v1";
@@ -40,7 +44,16 @@ export const SYNC_CONFIG_KEY = "sync_config_v1";
  */
 export type SyncBackend =
   | { kind: "off" }
-  | { kind: "webdav"; baseUrl: string; username: string; password: string };
+  | { kind: "webdav"; baseUrl: string; username: string; password: string }
+  /**
+   * Google Drive's appDataFolder.
+   *
+   * Nothing to store here: the folder is fixed and the tokens live in their own
+   * key, written by the sign-in rather than typed into a box. A backend with no
+   * fields is still a backend — it is the answer to "where does this device
+   * put its blobs", which is the question this union exists for.
+   */
+  | { kind: "drive" };
 
 export interface SyncConfig {
   backend: SyncBackend;
@@ -99,6 +112,14 @@ export function parseSyncConfig(raw: string | null): SyncConfig {
     };
   }
 
+  // Drive carries no fields of its own — the folder is fixed and the tokens
+  // live under their own key. So there is nothing to validate, only a name to
+  // recognise, and forgetting to recognise it is exactly what happened: the
+  // config was written as drive and read back as off, so the settings screen
+  // showed Drive selected from React state while every sync loaded `off` from
+  // the database and returned null. Nothing errored and nothing appeared.
+  if (b.kind === "drive") return { backend: { kind: "drive" }, pairing };
+
   return { backend: { kind: "off" }, pairing };
 }
 
@@ -130,7 +151,21 @@ export function isReady(c: SyncConfig): boolean {
  * Throws for a URL that cannot be used, because that is a setting to fix rather
  * than a condition to survive. Returns null only for "the person turned it off".
  */
-export function storageFor(c: SyncConfig, http: HttpTransport): SyncStorage | null {
+export function storageFor(
+  c: SyncConfig,
+  http: HttpTransport,
+  /**
+   * Only Drive needs this, and only to find its refresh token. Optional so that
+   * every existing caller and every test that only ever meant WebDAV keeps
+   * working unchanged, and so that "Drive with nobody signed in" is a missing
+   * argument rather than a runtime surprise.
+   */
+  tokens?: AccessTokenSource,
+): SyncStorage | null {
+  if (c.backend.kind === "drive") {
+    if (!tokens) return null;
+    return new GoogleDriveStorage(http, tokens);
+  }
   if (c.backend.kind === "webdav") {
     return new WebDavStorage(http, {
       baseUrl: c.backend.baseUrl,
@@ -149,12 +184,109 @@ export async function loadSyncConfig(db: Db): Promise<SyncConfig> {
   return parseSyncConfig(rows.length > 0 ? rows[0].value : null);
 }
 
+/**
+ * Whether two configs describe the same conversation.
+ *
+ * Not the same settings — the same *folder and key*. Sync state is a record of
+ * what has been said to one particular pile of files, locked with one
+ * particular key. Point the app at a different folder, or at the same folder
+ * with a different key, and every sentence in that record is about something
+ * that is no longer there.
+ */
+function sameTarget(a: SyncConfig, b: SyncConfig): boolean {
+  if (a.pairing !== b.pairing) return false;
+  if (a.backend.kind !== b.backend.kind) return false;
+  if (a.backend.kind === "webdav" && b.backend.kind === "webdav") {
+    // Only the address. A password that changed is the same folder behind a new
+    // door, and re-uploading everything for a typo corrected would be silly.
+    return a.backend.baseUrl === b.backend.baseUrl;
+  }
+  return true;
+}
+
+/**
+ * Forget what was said to the old folder, without forgetting who is saying it.
+ *
+ * WHAT IS KEPT, AND WHY IT IS THE ONE THING
+ *
+ * `device` is this installation's name and must never change: it is half of
+ * every file name this device has ever written, and a device that renames
+ * itself becomes a second device that the first one will happily read its own
+ * writes back from.
+ *
+ * `seq` is kept for a sharper reason. It is not "how far through this folder"
+ * — it is "the highest number I have ever put on a file". Resetting it to zero
+ * would mean writing `d-me-1` again, and if the old folder is ever pointed at
+ * again there would be two different files with one name, which is exactly the
+ * hazard `an interrupted upload never reuses its sequence number` exists to
+ * prevent. Numbers only ever go up, in every folder, for the life of the
+ * install.
+ *
+ * `cursor` is the one that is about the folder, and it is the one that goes —
+ * along with the outbox, which is the thing that actually decides what gets
+ * sent. Lowering a watermark used to be what put the whole database back in the
+ * outgoing pile; with a queue instead of a comparison that has to be said
+ * rather than implied, so the queue is refilled here. The seeding is syncMeta's,
+ * not a second copy of it.
+ *
+ * WHAT THIS FIXES
+ *
+ * Connecting Drive and pressing sync reported `sent 0 out` against an empty
+ * folder, because the watermark this used to keep still said everything had
+ * been uploaded — to WebDAV, hours earlier. The desktop would then have gone on uploading only
+ * future changes, and a phone switched to Drive would have pulled an empty
+ * folder and shown no tasks, with both devices reporting success.
+ */
+async function forgetRemoteProgress(db: Db): Promise<void> {
+  const rows = await db.select<{ value: string }[]>(
+    "SELECT value FROM app_settings WHERE key = ?",
+    [SYNC_STATE_KEY],
+  );
+  if (rows.length === 0) return;
+
+  let state: Record<string, unknown>;
+  try {
+    state = JSON.parse(rows[0].value) as Record<string, unknown>;
+  } catch {
+    // Unreadable state is already going to be replaced wholesale by the next
+    // run. Nothing to preserve, and nothing to complain about.
+    return;
+  }
+
+  await db.execute(
+    `INSERT INTO app_settings (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    [
+      SYNC_STATE_KEY,
+      JSON.stringify({
+        device: state.device,
+        seq: typeof state.seq === "number" ? state.seq : 0,
+        cursor: {},
+      }),
+    ],
+  );
+
+  for (const m of outboxReseed()) {
+    await db.execute(m.sql);
+  }
+}
+
 export async function saveSyncConfig(db: Db, c: SyncConfig): Promise<void> {
+  // Read before write, so that "did the target change" is answered here rather
+  // than remembered by every screen that can change a setting. There is one
+  // such screen today; the second one is where this would have been forgotten.
+  const previous = await loadSyncConfig(db);
+
   await db.execute(
     `INSERT INTO app_settings (key, value) VALUES (?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     [SYNC_CONFIG_KEY, serialiseSyncConfig(c)],
   );
+
+  // Off is not a different folder, it is no folder. Coming back to the same one
+  // should not mean re-uploading the database.
+  if (c.backend.kind === "off" || previous.backend.kind === "off") return;
+  if (!sameTarget(previous, c)) await forgetRemoteProgress(db);
 }
 
 /**
@@ -187,16 +319,56 @@ export function syncWith(
  * app for anyone who has not asked for sync, and a caller on a timer should not
  * have to tell that apart from a failure.
  */
-export async function syncNow(db: Db, http: HttpTransport): Promise<SyncReport | null> {
+export async function syncNow(
+  db: Db,
+  http: HttpTransport,
+  /**
+   * Supplied by the caller for the Drive backend, because building one means
+   * asking Tauri for the client credentials.
+   *
+   * This file is imported by check-sync.ts, which runs under plain node with no
+   * Tauri anywhere. An import of the sign-in code from here — even one only
+   * reached on the Drive path — makes the whole sync suite unloadable, and the
+   * failure is the entire harness rather than one check. Keeping the arrow
+   * pointing this way is what keeps the engine runnable outside the app, which
+   * is the property those 104 checks are made of.
+   */
+  tokens?: AccessTokenSource,
+): Promise<SyncReport | null> {
   const cfg = await loadSyncConfig(db);
   const pairing = pairingOf(cfg);
   if (!pairing) return null;
 
-  const storage = storageFor(cfg, http);
+  // Not signed in yet reads as "not set up", the same as no address typed into
+  // the WebDAV boxes: a state to fix on the settings screen, not a failure for
+  // a caller on a timer to report.
+  if (cfg.backend.kind === "drive" && !tokens) return null;
+
+  const storage = storageFor(cfg, http, tokens);
   if (!storage) return null;
 
   const store = await SqlLocalStore.open(db);
-  return syncWith(store, storage, pairing);
+  const report = await syncWith(store, storage, pairing);
+
+  // A setting that arrived is a row like any other, and every reader of one is
+  // synchronous and reads a cache. Nothing would have noticed until the next
+  // launch: the currency would still be the old one on screen and the quiet
+  // window the scheduler used would still be the old one too.
+  if (store.appliedTables.has("user_settings")) {
+    try {
+      await hydrateSettings(db as unknown as SettingsDb);
+    } catch {
+      // Same reasoning as at startup: a settings row that will not read is not
+      // a reason to report the sync itself as having failed.
+    }
+  }
+
+  // The rows are in the database; the screen showing them does not know yet.
+  // Announced from here rather than from the button, because a timer will call
+  // this too one day and the news is the same either way. See dataChanged.
+  dataChanged(store.appliedTables);
+
+  return report;
 }
 
 // ─── what a backup is not allowed to carry ───────────────────────────────────

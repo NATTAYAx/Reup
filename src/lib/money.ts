@@ -39,9 +39,15 @@
 // underneath.
 
 import { getLang } from "./i18n";
+import { putSetting } from "./userSettings";
+import { CURRENCY_FALLBACK } from "./moneyDraft";
+import { onDataChanged } from "./dataChanged";
 
 const CURRENCY_KEY = "gamesched_currency";
-const FALLBACK = "THB";
+// Shared with the phone rather than declared here, because "what to count in
+// when nothing has said otherwise" is a question both devices answer and two
+// copies of the answer could disagree without anything failing. See moneyDraft.
+const FALLBACK = CURRENCY_FALLBACK;
 
 /**
  * The ones worth putting in a list. Any valid ISO 4217 code works — this is the
@@ -195,6 +201,16 @@ export function systemCurrencyGuess(): string {
 
 let _currency: string | null = null;
 
+// The one memo in this file, and therefore the one thing a setting arriving
+// from another device would not have reached. getQuietHours and getLang both
+// read the cache on every call, so they need nothing; this one would have kept
+// showing the currency this machine guessed from its locale on first run, for
+// as long as the window stayed open, while every number under it was already
+// being filtered by the one that arrived.
+onDataChanged((tables) => {
+  if (tables.has("user_settings")) _currency = null;
+});
+
 export function getCurrency(): string {
   if (_currency) return _currency;
   try {
@@ -213,7 +229,9 @@ export function getCurrency(): string {
 export function setCurrency(code: string): void {
   if (!isValidCurrency(code)) return;
   _currency = code;
-  try { localStorage.setItem(CURRENCY_KEY, code); } catch { /* ignore */ }
+  // Through the mirror rather than straight to localStorage, so the other
+  // device hears about it. See userSettings.ts.
+  putSetting(CURRENCY_KEY, code);
 }
 
 function localeTag(): string {

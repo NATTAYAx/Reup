@@ -35,7 +35,8 @@ backup-*.json
 *.key
 *.p12
 *.pfx
-
+src-tauri/.env
+!src-tauri/.env.example
 
 # ── signing / release ────────────────────────────────────────────────────────
 # The updater private key signs releases. If it leaks, anyone can push an
