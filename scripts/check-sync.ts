@@ -30,6 +30,7 @@
  */
 
 import { applySyncMigrations } from "../src/lib/syncMeta";
+import { HISTORY_SQL, doneDates, hasHistory, type TaskEvent } from "../src/lib/history";
 import { sync, type SyncState } from "../src/lib/sync/engine";
 import { SqlLocalStore, SYNCED_TABLES, dbNow, type Db } from "../src/lib/sync/sqlLocalStore";
 import {
@@ -1321,6 +1322,32 @@ async function main(): Promise<void> {
       ["2026-08-18T00:00:00.000Z", "2026-08-19T00:00:00.000Z"],
     );
     check("a single day can be read back out", thatDay.length === 2);
+
+    // ── the one question this table is allowed to answer ────────────────────
+    //
+    // Run against the real table, because the risk here is the same one that
+    // took the phone's task list down: a column name inside a string literal
+    // that nothing checks. `deleted` in particular only exists on this table
+    // because of the tombstone migration.
+    const events = rows(a.db, HISTORY_SQL, [uid]) as unknown as TaskEvent[];
+    check("the history query runs and comes back newest first",
+      events.length === 3 && events[0].at > events[2].at);
+
+    // The undo above carries no for_cycle, which is what an older row looks
+    // like, so both ticks stand. Nothing here counts anything.
+    const dates = doneDates(events);
+    check("it answers with days rather than a number of them",
+      dates.length === 2 && dates[0] === "2026-08-19" && dates[1] === "2026-08-18");
+
+    // Now an undo that names the occurrence it undid. That tick did not happen.
+    a.db.raw.prepare("INSERT INTO task_events (task_uid, kind, at, for_cycle) VALUES (?,?,?,?)")
+      .run(uid, "undone", "2026-08-19T06:00:00.000Z", "2026-08-20T04:00:00.000Z");
+    const after = doneDates(rows(a.db, HISTORY_SQL, [uid]) as unknown as TaskEvent[]);
+    check("a tick that was taken back is not a day it was done",
+      after.length === 1 && after[0] === "2026-08-18");
+
+    check("and a daily is not offered an answer at all, because that is a streak",
+      !hasHistory("daily") && !hasHistory("specific_date") && hasHistory("weekly"));
   }
 
   // ── the folder cleans itself up under a device that was away ──────────────

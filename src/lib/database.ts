@@ -11,6 +11,7 @@ import { dbNow } from "./sync/sqlLocalStore";
 import Database from "@tauri-apps/plugin-sql";
 import { applySyncMigrations, SYNC_TABLES } from "./syncMeta";
 import { sweepTrash, sweepTombstones, PURGE_TASK_SQL } from "./tombstones";
+import { HISTORY_SQL, doneDates, type TaskEvent } from "./history";
 import { getCurrency } from "./money";
 
 let db: Database | null = null;
@@ -663,6 +664,26 @@ export async function toggleUrgent(id: number, is_urgent: boolean): Promise<void
  * task done because a log write failed is the app breaking in the hand of
  * somebody who just finished something.
  */
+/**
+ * The last few times a task was done and stayed done, newest first.
+ *
+ * Lives here rather than in lib/history because that file is rules only and has
+ * to load without a browser — check-sync exercises the query and the filter
+ * against a real database, and it cannot import anything that reaches the
+ * language files.
+ */
+export async function recentDone(taskUid: string, limit = 3): Promise<string[]> {
+  try {
+    const db = await getDb();
+    const rows = await db.select<TaskEvent[]>(HISTORY_SQL, [taskUid]);
+    return doneDates(rows, limit);
+  } catch (err) {
+    // A history that will not read is not a reason to fail opening a task.
+    console.warn("[history] could not read:", err);
+    return [];
+  }
+}
+
 async function recordTaskEvent(
   db: Database,
   id: number,

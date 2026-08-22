@@ -509,6 +509,7 @@ const translations = {
   "lead.leaveAt":      { en: "leave", th: "ออก" },
   "lead.forAppt":      { en: "for", th: "นัด" },
   "backup.autoLast":   { en: "Last automatic copy", th: "สำรองอัตโนมัติล่าสุด" },
+  "history.lastDone":  { en: "Done on", th: "ทำล่าสุด" },
   "lead.none":         { en: "None", th: "ไม่มี" },
   "lead.field":        { en: "Has to start this many minutes early", th: "ต้องเริ่มก่อนกี่นาที" },
   "lead.hint":         { en: "Travel, getting ready, anything before the thing itself.", th: "เดินทาง เตรียมตัว อะไรก็ตามที่มาก่อนตัวงานจริง" },

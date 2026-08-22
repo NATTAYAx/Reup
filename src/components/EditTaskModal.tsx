@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { X, Save, AlertCircle } from "lucide-react";
-import { updateTask, getTaskById } from "../lib/database";
+import { updateTask, getTaskById, recentDone } from "../lib/database";
 import TimePicker from "./TimePicker";
 import DatePicker from "./DatePicker";
 import TaskImagePicker from "./TaskImagePicker";
@@ -10,6 +10,7 @@ import CycleFields from "./CycleFields";
 import TimeZonePin from "./TimeZonePin";
 import IntentPicker from "./IntentPicker";
 import { getAppTimeZone } from "../lib/tz";
+import { hasHistory } from "../lib/history";
 import { TYPE_OPTIONS } from "../lib/taskOptions";
 import { t } from "../lib/i18n";
 
@@ -25,8 +26,18 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [done, setDone] = useState<string[]>([]);
   // savingRef prevents double-fire even if React batches wrong
   const savingRef = useRef(false);
+
+  // Read once, when a task is opened, and only for the kinds that have an
+  // answer worth giving. A task with no uid has never synced and has no events
+  // keyed to it either, so there is nothing to look up rather than nothing to
+  // find.
+  const loadHistory = async (task: any) => {
+    if (!task?.uid || !hasHistory(String(task.reset_type))) { setDone([]); return; }
+    setDone(await recentDone(String(task.uid)));
+  };
 
   // Reset everything when taskId changes
   useEffect(() => {
@@ -42,10 +53,12 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
     setSaving(false);
     savingRef.current = false;
     setLoadError(null);
+    setDone([]);
 
     // Use pre-loaded task if available and matching
     if (initialTask && Number(initialTask.id) === Number(taskId)) {
       setForm({ ...initialTask });
+      void loadHistory(initialTask);
       return;
     }
 
@@ -59,7 +72,7 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
       .then(t => {
         clearTimeout(timeoutId);
         if (cancelled) return;
-        if (t) setForm({ ...t });
+        if (t) { setForm({ ...t }); void loadHistory(t); }
         else setLoadError(t("edit.notFound", { id: String(taskId) }));
       })
       .catch(err => {
@@ -192,6 +205,17 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
                   leaving early exists. Usually filled in here rather than
                   there: how long the getting-ready actually takes is something
                   learned by being late once. */}
+              {/* An answer, on a screen somebody opened on purpose, about a
+                  task they are deciding something about. Dates rather than a
+                  count of days, three rather than all of them, and nothing at
+                  all for a daily — the reasoning is in lib/history, and it is
+                  the same standard that turned down the weekly summary. */}
+              {hasHistory(String(form.reset_type)) && done.length > 0 && (
+                <p className="text-white/30 text-[11px] px-1 pt-2">
+                  {t("history.lastDone")} {done.map(d => d.slice(8) + "/" + d.slice(5, 7)).join(" · ")}
+                </p>
+              )}
+
               {["specific_date", "one_time", "event_window"].includes(String(form.reset_type)) && (
                 <div className="flex flex-col gap-1 pt-2">
                   <label className="text-white/40 text-xs px-1">{t("lead.field")}</label>
