@@ -42,6 +42,7 @@ export const TASK_COLUMNS = [
   "is_priority",
   "is_urgent",
   "min_step",
+  "notify_before_min",
   "time_zone",
   "intent",
 ] as const;
@@ -74,6 +75,7 @@ export interface TaskDraft {
   is_priority?: unknown;
   is_urgent?: unknown;
   min_step?: unknown;
+  notify_before_min?: unknown;
   time_zone?: unknown;
   intent?: unknown;
   /**
@@ -158,6 +160,7 @@ export function taskValues(d: TaskDraft): SqlValue[] {
     d.is_priority ? 1 : 0,
     d.is_urgent ? 1 : 0,
     sanitizeText(d.min_step),
+    num(d.notify_before_min),
     sanitizeText(d.time_zone),
     d.intent === "want" || d.intent === "must" ? d.intent : null,
   ];
@@ -200,6 +203,7 @@ export const TASK_EDITABLE: Record<string, "raw" | "clean" | "int" | "flag" | "i
   is_priority: "flag",
   is_urgent: "flag",
   min_step: "clean",
+  notify_before_min: "int",
   time_zone: "clean",
   intent: "intent",
 };

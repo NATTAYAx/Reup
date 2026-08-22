@@ -5,6 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { useCountdowns } from "./hooks/useCountdowns";
 import { onDataChanged } from "./lib/dataChanged";
+import { runAutoBackupIfDue } from "./lib/autoBackup";
 import { startAutoSync } from "./lib/autoSync";
 import { loadTheme, applyTheme } from "./lib/theme";
 import { deleteTask, togglePriority, toggleUrgent, getSetting, pauseTask } from "./lib/database";
@@ -20,7 +21,7 @@ import EditTaskModal from "./components/EditTaskModal";
 import UnifiedAIChat from "./components/UnifiedAIChat";
 import TaskShelf from "./components/TaskShelf";
 // import DebugOverlay from "./components/DebugOverlay"; // debug tool, re-enable if needed
-import { localHour, todayLocal } from "./lib/dateUtil";
+import { localHour, personalToday } from "./lib/dateUtil";
 import { getAppTimeZone } from "./lib/tz";
 import { shouldShowWeekNote, markWeekNoteShown } from "./lib/weekNote";
 import { listen } from "@tauri-apps/api/event";
@@ -125,14 +126,14 @@ export default function App() {
   }, [loading, countdowns.length]);
 
   const [lowPower, setLowPower] = useState(
-    () => localStorage.getItem("gamesched_low_power_date") === todayLocal(),
+    () => localStorage.getItem("gamesched_low_power_date") === personalToday(),
   );
   const toggleLowPower = () => {
     setLowPower(v => {
       // Stored as a DATE, so it clears itself overnight. Nobody should have to
       // remember to turn it off, and it should never quietly persist for weeks.
       if (v) localStorage.removeItem("gamesched_low_power_date");
-      else localStorage.setItem("gamesched_low_power_date", todayLocal());
+      else localStorage.setItem("gamesched_low_power_date", personalToday());
       return !v;
     });
   };
@@ -155,6 +156,14 @@ export default function App() {
   // comes back: it announces what it wrote through dataChanged like any other
   // sync, so the effect below is what makes the screen follow.
   useEffect(() => startAutoSync(), []);
+
+  // A backup nobody has to remember, once a week, into the app's own folder.
+  //
+  // Started here rather than in the settings card, because the card is a place
+  // somebody has to go and this is a thing that has to happen whether or not
+  // they ever go there. It reads and writes nothing the screen shows, reports
+  // nothing, and skips itself on every run but one in seven — see lib/autoBackup.
+  useEffect(() => { void runAutoBackupIfDue(); }, []);
 
   // ── rows that arrived without anyone pressing anything ────────────────────
   //

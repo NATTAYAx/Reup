@@ -18,7 +18,12 @@ import {
   newState, newVerifier, parseRedirect,
 } from "./oauth";
 
-const TOKENS_KEY = "sync_google_tokens";
+/**
+ * Where the Google tokens live, exported so that the one list of things a
+ * backup may not carry can be built from it rather than from a string typed out
+ * a second time.
+ */
+export const GOOGLE_TOKENS_KEY = "sync_google_tokens";
 
 /** How long the browser has. Long enough to find a password, short enough that
  *  a tab closed without deciding does not leave a thread waiting for ever. */
@@ -66,7 +71,7 @@ export class SettingsTokenStore implements TokenStore {
   async load(): Promise<OAuthTokens | null> {
     const rows = await this.db.select<{ value: string }[]>(
       "SELECT value FROM app_settings WHERE key = ?",
-      [TOKENS_KEY],
+      [GOOGLE_TOKENS_KEY],
     );
     if (rows.length === 0) return null;
     try {
@@ -89,12 +94,12 @@ export class SettingsTokenStore implements TokenStore {
     await this.db.execute(
       "INSERT INTO app_settings (key, value) VALUES (?, ?) " +
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-      [TOKENS_KEY, JSON.stringify(t)],
+      [GOOGLE_TOKENS_KEY, JSON.stringify(t)],
     );
   }
 
   async clear(): Promise<void> {
-    await this.db.execute("DELETE FROM app_settings WHERE key = ?", [TOKENS_KEY]);
+    await this.db.execute("DELETE FROM app_settings WHERE key = ?", [GOOGLE_TOKENS_KEY]);
   }
 }
 

@@ -34,6 +34,22 @@ export interface Task {
   /** The smallest version of this task that still counts. Behavioural
    *  activation's graded task assignment, in one field. */
   min_step: string | null;
+  /**
+   * Minutes before the moment itself that this actually has to start.
+   *
+   * For an appointment at 14:00 that needs half an hour of travel and half an
+   * hour of getting ready, this is 60, and the number the app counts down to
+   * becomes 13:00 rather than 14:00.
+   *
+   * The distinction is the whole point rather than a convenience. The problem
+   * was never not knowing when the appointment was; it was that the appointment
+   * time is the one printed largest and the leaving time is the one that has to
+   * be acted on, and a countdown to the wrong one is a countdown that reads as
+   * calm right up until it is too late.
+   *
+   * Deadline kinds only — a game reset has nothing to leave for.
+   */
+  notify_before_min: number | null;
   time_zone: string | null;
   /** Why this is on the list. "want" = done because you want to, "must" =
    *  because it has to be. Null on every existing row and on anything nobody
@@ -93,6 +109,15 @@ export interface CountdownResult {
   hours_remaining: number;
   minutes_remaining: number;
   seconds_remaining: number;
+  /**
+   * The appointment itself, when it is not the same as what is counted down to.
+   *
+   * Null when there is no lead time, which is every task that has ever existed
+   * until now. next_reset stays the appointment in both cases, so the calendar
+   * and everything else that asks when a thing is are unaffected — this is only
+   * for the card, which needs to be able to say "leave at 13:00, for 14:00".
+   */
+  leave_by: Date | null;
   urgency: "safe" | "warning" | "critical" | "expired";
   is_completed_this_cycle: boolean;  // true if done for current cycle
 }

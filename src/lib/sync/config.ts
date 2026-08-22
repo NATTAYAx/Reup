@@ -28,6 +28,7 @@ import { SqlLocalStore, SYNC_STATE_KEY, type Db } from "./sqlLocalStore";
 import { dataChanged } from "../dataChanged";
 import { WebDavStorage, type HttpTransport, type SyncStorage } from "./storage";
 import { GoogleDriveStorage, type AccessTokenSource } from "./drive";
+import { GOOGLE_TOKENS_KEY } from "./googleAuth";
 import { outboxReseed } from "../syncMeta";
 import { hydrateSettings, type SettingsDb } from "../userSettings";
 
@@ -380,7 +381,11 @@ export async function syncNow(
  * of keys that has to agree with the code that writes them, by somebody
  * remembering, is the disease this project keeps curing.
  */
-export const MACHINE_ONLY_SETTINGS = new Set<string>([SYNC_STATE_KEY, SYNC_CONFIG_KEY]);
+export const MACHINE_ONLY_SETTINGS = new Set<string>([
+  SYNC_STATE_KEY,
+  SYNC_CONFIG_KEY,
+  GOOGLE_TOKENS_KEY,
+]);
 
 /**
  * One rule, asked in both directions.
@@ -396,9 +401,25 @@ export const MACHINE_ONLY_SETTINGS = new Set<string>([SYNC_STATE_KEY, SYNC_CONFI
  * most people is the same cloud drive holding the encrypted data. Both halves in
  * one place is the same as neither half being protected.
  *
+ * `sync_google_tokens` holds a Google refresh token, and that one is worse than
+ * either. The pairing code protects data that is already the person's own; a
+ * refresh token is a live credential to somebody's Google account, good until
+ * it is explicitly revoked and unaffected by changing the password. A backup
+ * file is written to be copied — onto a second machine, into a cloud folder,
+ * attached to a message asking for help with a bug — and every copy of it would
+ * have carried one.
+ *
+ * It was missed for the reason this comment already gives about the API keys: a
+ * list of names that has to agree with the code that writes them, by somebody
+ * remembering. The key now comes from the file that writes it rather than from
+ * a second copy of the string, so the next round of this has one less way to go
+ * wrong.
+ *
  * The cost is real and worth saying out loud on the screen that restores a
  * backup: sync does not come back with it. The pairing code has to be entered
- * again, from wherever the person wrote it down.
+ * again, from wherever the person wrote it down, and Google has to be connected
+ * again — which is one button and a browser, and is the correct amount of
+ * trouble for what it buys.
  *
  * It lives here rather than in backup.ts because backup.ts cannot be loaded
  * outside the app — it reaches the database and the language files — and a rule

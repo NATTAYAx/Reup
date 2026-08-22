@@ -29,7 +29,7 @@
 //   an actual person. So the job here is to make the distance to a real person
 //   as short as possible, not to stand in the way of it.
 
-import { todayLocal } from "./dateUtil";
+import { personalDaysBetween, personalToday } from "./dateUtil";
 
 const K_CONTACTS = "gamesched_important_v1";
 const K_SHOWN    = "gamesched_important_shown";
@@ -67,7 +67,7 @@ export function saveImportant(card: ImportantCard) {
     localStorage.setItem(K_CONTACTS, JSON.stringify(card));
     // Editing it is a review. Saving resets the clock so the prompt below never
     // arrives days after the person has just been through the whole card.
-    localStorage.setItem(K_REVIEWED, todayLocal());
+    localStorage.setItem(K_REVIEWED, personalToday());
   } catch { /* full */ }
 }
 
@@ -97,8 +97,8 @@ export function shouldReviewImportant(): boolean {
   if (card.contacts.length === 0 && !card.note.trim()) return false;
   try {
     const last = localStorage.getItem(K_REVIEWED);
-    if (!last) { localStorage.setItem(K_REVIEWED, todayLocal()); return false; }
-    const days = (Date.parse(todayLocal()) - Date.parse(last)) / 86_400_000;
+    if (!last) { localStorage.setItem(K_REVIEWED, personalToday()); return false; }
+    const days = personalDaysBetween(last, personalToday());
     return days >= REVIEW_EVERY_DAYS;
   } catch {
     return false;
@@ -108,7 +108,7 @@ export function shouldReviewImportant(): boolean {
 /** Dismissing counts the same as reviewing. Asking twice is how it stops being
  *  read at all. */
 export function markImportantReviewed() {
-  try { localStorage.setItem(K_REVIEWED, todayLocal()); } catch { /* full */ }
+  try { localStorage.setItem(K_REVIEWED, personalToday()); } catch { /* full */ }
 }
 
 // ─── Distress matching ────────────────────────────────────────────────────────

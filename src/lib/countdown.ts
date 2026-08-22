@@ -172,9 +172,37 @@ function getNextCycle(nowMs: number, anchorDate: string, intervalDays: number, {
   return new Date(ms);
 }
 
+/**
+ * The kinds where leaving early is a thing that exists.
+ *
+ * A daily reset at four in the morning is not somewhere anybody travels to, and
+ * shifting a recurring countdown would make every game task read as urgent an
+ * hour before it is.
+ */
+const HAS_LEAD = new Set(["one_time", "specific_date", "event_window"]);
+
+/** Minutes to subtract, or zero. Anything unusable is zero rather than an error. */
+function leadMinutes(task: Task): number {
+  if (!HAS_LEAD.has(task.reset_type)) return 0;
+  const n = task.notify_before_min;
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return 0;
+  // A day of lead time on an appointment is somebody typing into the wrong box,
+  // and the result would be a card that is already expired when it is created.
+  return Math.min(n, 24 * 60);
+}
+
 export function calculateCountdown(task: Task): CountdownResult | null {
   try {
-    const nextReset = getNextReset(task);
+    const appointment = getNextReset(task);
+    // What is counted down to is when this has to start, not when it happens.
+    // Everything downstream follows from that on purpose: the colour turns red
+    // an hour before leaving rather than an hour before arriving, and the
+    // notifier fires against the same number, because a warning about a thing
+    // you are already late to leave for is not a warning.
+    const lead = leadMinutes(task);
+    const nextReset = appointment && lead > 0
+      ? new Date(appointment.getTime() - lead * 60_000)
+      : appointment;
     // For completed one-shot tasks that are still active, show them as completed
     const completedThisCycle = isCompletedThisCycle(task);
 
@@ -214,7 +242,10 @@ export function calculateCountdown(task: Task): CountdownResult | null {
 
     return {
       task,
-      next_reset: nextReset ?? new Date(),
+      // The appointment, so that anything asking when this happens still gets
+      // the right answer. Only the counting moved.
+      next_reset: appointment ?? new Date(),
+      leave_by: lead > 0 ? nextReset : null,
       time_remaining_ms: Math.max(diffMs, 0),
       hours_remaining: hours,
       minutes_remaining: minutes,

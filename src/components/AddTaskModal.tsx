@@ -39,6 +39,7 @@ const EMPTY_FORM = {
   is_priority: 0,
   is_urgent: 0,
   cover_image: null as string | null,
+  notify_before_min: "",
   min_step: "",
   time_zone: null as string | null,
   intent: null as "want" | "must" | null,
@@ -110,6 +111,7 @@ export default function AddTaskModal({ open, onClose, onTaskAdded }: Props) {
         event_end: form.event_end || null,
         cover_image: form.cover_image || null,
         min_step: form.min_step.trim() || null,
+        notify_before_min: Number(form.notify_before_min) > 0 ? Number(form.notify_before_min) : null,
         time_zone: form.time_zone,
         intent: form.intent,
       });
@@ -340,6 +342,42 @@ export default function AddTaskModal({ open, onClose, onTaskAdded }: Props) {
                         />
                         <p className="text-white/25 text-[11px] px-0.5">{t("task.minStepHint")}</p>
                       </div>
+
+                      {/* Only where leaving early is a thing that exists. A game
+                          reset is not somewhere anybody travels to, and the
+                          countdown is only shifted for these kinds — see
+                          HAS_LEAD in lib/countdown. */}
+                      {["specific_date", "one_time", "event_window"].includes(form.reset_type) && (
+                        <div className="flex flex-col gap-1.5">
+                          <label className="text-white/40 text-[11px] font-semibold tracking-wide uppercase px-0.5">
+                            {t("lead.field")}
+                          </label>
+                          <div className="flex gap-1.5 flex-wrap">
+                            {["", "15", "30", "60", "90"].map(m => (
+                              <button
+                                key={m || "none"}
+                                type="button"
+                                onClick={() => set("notify_before_min", m)}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                                  form.notify_before_min === m
+                                    ? "bg-sky-500/30 text-sky-100"
+                                    : "bg-white/5 text-white/50 hover:bg-white/10"
+                                }`}
+                              >
+                                {m === "" ? t("lead.none") : `${m}`}
+                              </button>
+                            ))}
+                            <input
+                              value={form.notify_before_min}
+                              onChange={e => set("notify_before_min", e.target.value.replace(/[^0-9]/g, ""))}
+                              inputMode="numeric"
+                              placeholder="0"
+                              className="w-16 bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-white text-xs text-center placeholder-white/25 focus:outline-none focus:border-sky-500"
+                            />
+                          </div>
+                          <p className="text-white/25 text-[11px] px-0.5">{t("lead.hint")}</p>
+                        </div>
+                      )}
 
                       <IntentPicker value={form.intent} onChange={v => set("intent", v)} />
 

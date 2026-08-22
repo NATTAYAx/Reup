@@ -62,6 +62,8 @@ import {
   SQL_RECENT_MONEY,
   SQL_DELETE_EXPENSE,
   SQL_DELETE_INCOME,
+  moneyUpdate,
+  moneyUpdateSql,
   expenseProblems,
   expenseValues,
 } from "../src/lib/moneyDraft";
@@ -960,6 +962,19 @@ async function main(): Promise<void> {
     for (const k of MACHINE_ONLY_SETTINGS) {
       check(`${k} never reaches the file`, !keepInBackup("app_settings", { key: k, value: "..." }));
     }
+
+    // Named one by one as well as walked as a set. The set is what the code
+    // uses; these are the three the reasoning in config.ts is actually about,
+    // and a rename that quietly drops one of them from the set would otherwise
+    // leave this loop passing over a shorter list.
+    check("the device identity stays on the machine that owns it",
+      !keepInBackup("app_settings", { key: "sync_state_v1", value: "{}" }));
+    check("the pairing code, which is the encryption key, never leaves with the data",
+      !keepInBackup("app_settings", { key: "sync_config_v1", value: "{}" }));
+    check("and neither does a live Google refresh token",
+      !keepInBackup("app_settings", { key: "sync_google_tokens", value: "{}" }));
+    check("all three are in the set, so the loop above is walking the whole list",
+      MACHINE_ONLY_SETTINGS.size === 3);
     check(
       "a row with no key at all is not mistaken for one of them",
       keepInBackup("app_settings", { value: "orphan" }),
@@ -1795,6 +1810,38 @@ async function main(): Promise<void> {
     // And it leaves the totals, which is the point of the flag.
     check("the month stops counting it",
       (row(b.db, SQL_MONTH_SPENT, ["THB", "2026-08"]).total as number) === before - 60);
+
+    // ─── editing one ─────────────────────────────────────────────────────────
+    //
+    // Built rather than written, so that the desktop's edit form, the AI path
+    // and the phone all produce the same statement for the same edit. Run here
+    // because a statement built from an allowlist can still name a column the
+    // table does not have, and that is not a wrong answer, it is one that will
+    // not run.
+    const live = row(b.db, "SELECT uid FROM expenses WHERE note = ?", ["\u0e19\u0e49\u0e33"]);
+    const one = moneyUpdate("expenses", { amount: "45", note: "\u0e19\u0e49\u0e33\u0e40\u0e1b\u0e25\u0e48\u0e32" });
+    b.db.raw.prepare(moneyUpdateSql("expenses", one.columns)).run(...one.values, live.uid);
+    const edited = row(b.db, "SELECT * FROM expenses WHERE uid = ?", [live.uid]);
+    check("an edit lands on the columns it named and no others",
+      edited.amount === 45 && edited.note === "\u0e19\u0e49\u0e33\u0e40\u0e1b\u0e25\u0e48\u0e32"
+      && edited.currency === "THB" && edited.category === "food");
+    check("and it counts as a new version, so the other device hears about it",
+      edited.updated_at !== null && edited.deleted === 0);
+
+    // A row already gone stays gone. Editing it would put a version of it back
+    // on the other device with the flag still up but the payload restored.
+    const two = moneyUpdate("expenses", { amount: "999" });
+    b.db.raw.prepare(moneyUpdateSql("expenses", two.columns)).run(...two.values, target.uid);
+    check("editing a tombstone writes nothing",
+      row(b.db, "SELECT amount FROM expenses WHERE uid = ?", [target.uid]).amount === 0);
+
+    const inc = moneyUpdate("income", { source: "3Play", amount: 900 });
+    b.db.raw.prepare(moneyUpdateSql("income", inc.columns)).run(...inc.values, incomeUid);
+    check("a payment edit runs too, even on one already tombstoned it changes nothing",
+      row(b.db, "SELECT source FROM income WHERE uid = ?", [incomeUid]).source === "");
+
+    check("nothing to change is not a statement",
+      moneyUpdateSql("expenses", moneyUpdate("expenses", {}).columns) === "");
   }
 
   console.log("");

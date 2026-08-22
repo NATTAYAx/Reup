@@ -1,5 +1,5 @@
 import { Task } from "../types";
-import { todayLocal } from "./dateUtil";
+import { personalToday } from "./dateUtil";
 
 // ─── weekNote.ts — the only thing that reads the intent bit ───────────────────
 //
@@ -50,7 +50,7 @@ export function shouldShowWeekNote(tasks: Task[]): boolean {
   if (answered.some(t => t.intent === "want")) return false;
 
   try {
-    return localStorage.getItem(K_LAST_SHOWN) !== weekKey(todayLocal());
+    return localStorage.getItem(K_LAST_SHOWN) !== weekKey(personalToday());
   } catch {
     return false;
   }
@@ -60,5 +60,5 @@ export function shouldShowWeekNote(tasks: Task[]): boolean {
  *  week. Dismissing is not treated differently from reading; nagging a second
  *  time is exactly how a sentence like this stops being read at all. */
 export function markWeekNoteShown() {
-  try { localStorage.setItem(K_LAST_SHOWN, weekKey(todayLocal())); } catch { /* full */ }
+  try { localStorage.setItem(K_LAST_SHOWN, weekKey(personalToday())); } catch { /* full */ }
 }

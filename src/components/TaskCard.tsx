@@ -1,12 +1,13 @@
+import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Trash2, Star, Flame, CheckCircle2, RotateCcw, Edit3, Pin, PauseCircle } from "lucide-react";
 import { CountdownResult, isRecurring, isOneShot } from "../types";
 import { formatCountdown, getCategoryColor, getUrgencyColor } from "../lib/countdown";
 import { getNextReset } from "../lib/countdown";
-import { markTaskCompleted, unmarkTaskCompleted } from "../lib/database";
+import { markTaskCompleted, unmarkTaskCompleted, updateTask } from "../lib/database";
 import { t } from "../lib/i18n";
 import { getAppTimeZone } from "../lib/tz";
-import { isEased } from "../lib/cycles";
+import { declineEase, isEased, needsMinStep } from "../lib/cycles";
 
 interface Props {
   result: CountdownResult;
@@ -22,6 +23,16 @@ interface Props {
   lowPower?: boolean;
 }
 
+/** HH:MM in whatever zone the app is set to, which is what the countdown uses. */
+function fmtClock(d: Date): string {
+  return d.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: getAppTimeZone(),
+  });
+}
+
 export default function TaskCard({ result, onDelete, onTogglePriority, onToggleUrgent, onRefresh, onEdit, onPause, lowPower = false }: Props) {
   // No interactive delay needed — the sort stability fix in useCountdowns ensures
   // TaskCards don't continuously remount each second, so phantom clicks cannot occur.
@@ -34,6 +45,32 @@ export default function TaskCard({ result, onDelete, onTogglePriority, onToggleU
   // down. Nothing about this is announced; the ask just gets smaller.
   const eased = isEased(task);
   const oneShot = isOneShot(task);
+
+  // When leaving early is part of the plan, the card says both times and puts
+  // the one that has to be acted on first. The countdown above is already
+  // counting to that one — see calculateCountdown — and this line is what keeps
+  // the appointment from disappearing behind it.
+  const leaveBy = result.leave_by;
+
+  // The offer to make the ask smaller. `asked` is local so that pressing either
+  // button takes it off the screen now rather than after the next refresh — the
+  // one moment where a card lingering half a second reads as the app arguing.
+  const [asked, setAsked] = useState(false);
+  const [step, setStep] = useState("");
+  const offerEase = !lowPower && !asked && needsMinStep(task);
+
+  const saveStep = async () => {
+    const value = step.trim();
+    if (!value) return;
+    setAsked(true);
+    await updateTask(task.id, { min_step: value });
+    onRefresh();
+  };
+
+  const dismissStep = () => {
+    setAsked(true);
+    declineEase(task);
+  };
 
   // Card border: completed > urgent > priority > time-based urgency
   const cardBorder = is_completed_this_cycle
@@ -145,6 +182,45 @@ export default function TaskCard({ result, onDelete, onTogglePriority, onToggleU
                 ) : null}
               </>
             )}
+
+            {/* The ask, made smaller. Written as a question about the task and
+                never about the person's record with it: nothing here counts
+                anything, and the word "missed" does not appear. Declining is a
+                real answer and is remembered — see lib/cycles. */}
+            {leaveBy ? (
+              <p className="text-sky-200/70 text-xs mt-0.5">
+                {t("lead.leaveAt")} {fmtClock(leaveBy)}
+                <span className="text-white/25"> · {t("lead.forAppt")} {fmtClock(result.next_reset)}</span>
+              </p>
+            ) : null}
+
+            {offerEase ? (
+              <div className="mt-2 rounded-lg border border-amber-300/20 bg-amber-300/5 p-2">
+                <p className="text-amber-200/70 text-[11px] leading-relaxed">{t("ease.ask")}</p>
+                <div className="flex gap-1.5 mt-1.5">
+                  <input
+                    value={step}
+                    onChange={e => setStep(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Enter") saveStep(); }}
+                    placeholder={t("ease.placeholder")}
+                    className="flex-1 min-w-0 bg-black/20 border border-white/10 rounded-md px-2 py-1 text-xs text-white/80 placeholder:text-white/25 outline-none focus:border-amber-300/40"
+                  />
+                  <button
+                    onClick={saveStep}
+                    disabled={!step.trim()}
+                    className="px-2 py-1 rounded-md text-[11px] font-semibold bg-amber-400/20 text-amber-100 disabled:opacity-40"
+                  >
+                    {t("ease.save")}
+                  </button>
+                </div>
+                <button
+                  onClick={dismissStep}
+                  className="text-white/25 text-[10px] mt-1.5 hover:text-white/40"
+                >
+                  {t("ease.never")}
+                </button>
+              </div>
+            ) : null}
           </div>
 
           {/* action buttons — show on hover */}

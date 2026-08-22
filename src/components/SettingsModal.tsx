@@ -28,6 +28,7 @@ import {
 import { loadImportant, saveImportant, shouldReviewImportant, markImportantReviewed, type ImportantCard } from "../lib/importantCard";
 import { Toast } from "./ToastCard";
 import { paletteFromVideo } from "../lib/videoPalette";
+import { DAY_START_DEFAULT, DAY_START_KEY, parseDayStart } from "../lib/userSettings";
 
 interface Props {
   open: boolean;
@@ -212,6 +213,9 @@ export default function SettingsModal({ open, onClose }: Props) {
   const [saved, setSaved]               = useState(false);
   const [notifMuted, setNotifMuted]     = useState(false);
   const [quiet, setQuiet]               = useState<QuietHours>(getQuietHours);
+  const [dayStart, setDayStart]         = useState<number>(
+    () => { try { return parseDayStart(localStorage.getItem(DAY_START_KEY)); } catch { return DAY_START_DEFAULT; } },
+  );
   const [toastDuration, setToastDuration] = useState(8);
   const [lang, setLangState] = useState<Lang>(getLang);
   const [pendingLang, setPendingLang] = useState<Lang | null>(null);
@@ -532,6 +536,13 @@ export default function SettingsModal({ open, onClose }: Props) {
   const saveQuiet = (next: QuietHours) => {
     setQuiet(next);
     setQuietHours(next);
+  };
+
+  const saveDayStart = (minutes: number) => {
+    setDayStart(minutes);
+    try {
+      localStorage.setItem(DAY_START_KEY, String(minutes));
+    } catch { /* full */ }
   };
 
   const toggleNotifMute = () => {
@@ -1080,6 +1091,44 @@ Rules:
                               <p className="text-white/25 text-[10px] leading-relaxed mt-2">{t("quiet.note")}</p>
                             </>
                           )}
+                        </div>
+
+                        {/* ── when the day starts ────────────────────────────
+                            Not a clock setting. Midnight is a fact about
+                            clocks; this is about which stretch of hours reads
+                            as "today", and for anyone whose night runs past it,
+                            midnight lands in the middle rather than at an end.
+                            It touches the app's own state only — the switch
+                            below, the weekly note, the card's cooldown. Money
+                            keeps the bank's day and game resets keep the
+                            server's, because those are not ours to move. */}
+                        <div className="border-t border-white/8 pt-3">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Clock size={13} className="text-white/40" />
+                            <span className="text-white/60 text-xs font-semibold">{t("dayStart.title")}</span>
+                            <span className="ml-auto text-purple-400 text-xs font-bold">
+                              {String(Math.floor(dayStart / 60)).padStart(2, "0")}:
+                              {String(dayStart % 60).padStart(2, "0")}
+                            </span>
+                          </div>
+                          <div className="flex gap-1.5 flex-wrap">
+                            {[0, 120, 180, 240, 300, 360].map(m => (
+                              <button
+                                key={m}
+                                onClick={() => saveDayStart(m)}
+                                className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all ${
+                                  dayStart === m
+                                    ? "bg-purple-500 text-white"
+                                    : "bg-white/5 text-white/50 hover:bg-white/10"
+                                }`}
+                              >
+                                {m === 0
+                                  ? t("dayStart.midnight")
+                                  : `${String(Math.floor(m / 60)).padStart(2, "0")}:00`}
+                              </button>
+                            ))}
+                          </div>
+                          <p className="text-white/25 text-[10px] leading-relaxed mt-2">{t("dayStart.note")}</p>
                         </div>
 
                         {/* Duration */}

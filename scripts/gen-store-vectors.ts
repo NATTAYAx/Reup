@@ -42,6 +42,8 @@ import {
   SQL_RECENT_MONEY,
   SQL_DELETE_EXPENSE,
   SQL_DELETE_INCOME,
+  moneyUpdate,
+  moneyUpdateSql,
   CATEGORY_FALLBACK,
   CURRENCY_FALLBACK,
   expenseProblems,
@@ -389,6 +391,26 @@ async function main(): Promise<void> {
     SQL_DELETE_INCOME,
   ];
 
+  // Editing one row. Same shape as taskUpdate and for the same reason: the
+  // columns an UPDATE touches are a property of moneyDraft rather than of the
+  // object a caller happened to build, and the statement is compared byte for
+  // byte against the phone's. Two devices building the same edit in a different
+  // order build two different strings.
+  V.moneyUpdate = ([
+    ["expenses", { amount: "60" }],
+    ["expenses", { note: "  \u0e01\u0e32\u0e41\u0e1f  ", amount: 60 }],
+    ["expenses", { date: "2026-08-19", category: "food", currency: "THB", note: "", amount: "12.5" }],
+    ["expenses", { note: "x", date: "2026-08-01", amount: "1" }],
+    ["expenses", { amount: "5", slip_ref: "abc", id: 3, uid: "u", deleted: 1 }],
+    ["expenses", {}],
+    ["income", { amount: "6516", source: "TELUS" }],
+    ["income", { source: "", note: "", currency: "USD", date: "2026-08-19", amount: 0 }],
+    ["income", { amount: "abc" }],
+  ] as [("expenses" | "income"), Record<string, unknown>][]).map(([table, fields]) => {
+    const { columns, values } = moneyUpdate(table, fields);
+    return { table, fields, columns, values, sql: moneyUpdateSql(table, columns) };
+  });
+
   // The two strings that decide what happens when nobody said. Neither can fail
   // loudly if the two sides disagree — one device just files a month in a unit
   // the other one filters out.
@@ -715,6 +737,7 @@ async function main(): Promise<void> {
     ["expenseDraft", (V.expenseDraft as unknown[]).length],
     ["incomeDraft", (V.incomeDraft as unknown[]).length],
     ["moneyQueries", (V.moneyQueries as unknown[]).length],
+    ["moneyUpdate", (V.moneyUpdate as unknown[]).length],
     ["moneyFallbacks", (V.moneyFallbacks as unknown[]).length],
     ["shapes", (V.shapes as unknown[]).length],
     ["recordFromRow", (V.recordFromRow as unknown[]).length],

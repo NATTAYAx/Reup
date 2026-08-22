@@ -329,3 +329,88 @@ export const SQL_DELETE_EXPENSE =
 export const SQL_DELETE_INCOME =
   "UPDATE income SET deleted = 1, source = '', note = '', amount = 0 " +
   "WHERE uid = ? AND deleted = 0";
+
+// ─── editing one ─────────────────────────────────────────────────────────────
+//
+// The same shape as taskUpdate, and for the same reason: the columns an UPDATE
+// touches are a property of this file rather than of whatever object a caller
+// happened to build. The desktop's edit form sends five fields and the AI path
+// sends two, and both have to produce the statement the phone would produce for
+// the same edit — otherwise there are two answers to "what does editing a row
+// mean" and they drift the first time a column is added.
+//
+// Walking the allowlist rather than the caller's keys also settles the order,
+// which matters here more than it looks: the statement string is compared
+// against the phone's byte for byte in the vectors, and two devices that build
+// the same edit in a different order build two different strings.
+//
+// The coercions are the ones expenseValues uses, not new ones. An amount edited
+// to "60 " and an amount typed as "60 " have to land as the same number.
+//
+// No slip_ref. A slip is evidence of what happened, and pointing an existing row
+// at a different one is not an edit of the row, it is a different claim about
+// where it came from. Nothing on either screen offers it either.
+
+/** Which columns an expense edit may touch, and how each value is coerced. */
+export const EXPENSE_EDITABLE: Record<string, "amount" | "text"> = {
+  amount: "amount",
+  currency: "text",
+  category: "text",
+  note: "text",
+  date: "text",
+};
+
+/** The same for a payment. `source` sits where `category` does. */
+export const INCOME_EDITABLE: Record<string, "amount" | "text"> = {
+  amount: "amount",
+  currency: "text",
+  source: "text",
+  note: "text",
+  date: "text",
+};
+
+function coerceMoney(how: string, v: unknown): SqlValue {
+  if (how === "amount") return num(v) ?? 0;
+  return typeof v === "string" ? v : "";
+}
+
+/**
+ * The columns and values of an edit, in allowlist order.
+ *
+ * A field the allowlist does not name is dropped rather than refused, because
+ * the thing on the other end of this is a form and a model, and neither is a
+ * reason to lose an edit somebody meant. A field it does name but the caller
+ * left out is not touched at all, which is what makes a two-field edit possible.
+ */
+export function moneyUpdate(
+  table: "expenses" | "income",
+  fields: Record<string, unknown>,
+): { columns: string[]; values: SqlValue[] } {
+  const allow = table === "income" ? INCOME_EDITABLE : EXPENSE_EDITABLE;
+  const columns: string[] = [];
+  const values: SqlValue[] = [];
+  for (const column of Object.keys(allow)) {
+    if (!(column in fields)) continue;
+    columns.push(column);
+    values.push(coerceMoney(allow[column], fields[column]));
+  }
+  return { columns, values };
+}
+
+/**
+ * The statement for those columns. The uid is bound last, after the values.
+ *
+ * `AND deleted = 0` for the same reason the tombstones have it: editing a row
+ * that is already gone should write nothing rather than quietly bring a version
+ * of it back to life on the other device.
+ *
+ * An empty column list returns an empty string, which is not a statement and is
+ * meant to be checked for. A caller with nothing to change should write nothing,
+ * and "UPDATE expenses SET WHERE uid = ?" is a syntax error that would surface
+ * at the driver rather than here.
+ */
+export function moneyUpdateSql(table: "expenses" | "income", columns: readonly string[]): string {
+  if (columns.length === 0) return "";
+  return `UPDATE ${table} SET ${columns.map((c) => `${c} = ?`).join(", ")} ` +
+    "WHERE uid = ? AND deleted = 0";
+}

@@ -60,18 +60,77 @@ export const QUIET_KEY = "gamesched_quiet_hours_v1";
 export const CURRENCY_KEY = "gamesched_currency";
 /** "th" or "en". */
 export const LANG_KEY = "gamesched_lang_v1";
+/** Minutes after midnight where this person's day starts. "0" is midnight. */
+export const DAY_START_KEY = "gamesched_day_start_v1";
 
 /**
  * Everything that travels, and nothing else.
  *
- * Three, and each one earns its place by being about the person rather than the
+ * Four, and each one earns its place by being about the person rather than the
  * hardware in front of them. Theme, sound file, toast style, tray hints and the
  * wallpaper path are all about a screen; the API keys and the pairing code are
  * secrets; the "important" card is deliberately never sent anywhere. None of
  * them is here, and adding a fourth means adding it to this list and nowhere
  * else.
  */
-export const SYNCED_SETTING_KEYS: readonly string[] = [QUIET_KEY, CURRENCY_KEY, LANG_KEY];
+export const SYNCED_SETTING_KEYS: readonly string[] = [
+  QUIET_KEY,
+  CURRENCY_KEY,
+  LANG_KEY,
+  DAY_START_KEY,
+];
+
+// ─── when this person's day starts ───────────────────────────────────────────
+//
+// Midnight is a fact about clocks. It is not always a fact about days.
+//
+// Two different boundaries have been sharing one number in here. One is
+// external and cannot be argued with: a game server resets at four, a bank
+// posts a transaction on the date it posts it, a month ends when the calendar
+// says. The other is personal and means "the stretch I think of as today" —
+// and for somebody awake at three in the morning, midnight falls in the middle
+// of it rather than at either end.
+//
+// The visible cost of collapsing them is small and specific. The low-power
+// switch is stored as a date string and compared against today's, so turning it
+// on at eleven at night switches it off again an hour later, on the same night,
+// while nothing about the night has changed. The weekly note and the card's
+// cooldown count days the same way.
+//
+// So: one number, stored in minutes after midnight, applied to the question
+// "which day am I in" and to nothing else. Zero means midnight and is the
+// default, which makes every existing install behave exactly as it does now.
+//
+// WHY MINUTES AND NOT "04:00"
+//
+// Because it is arithmetic everywhere it is used, and a string would be parsed
+// at each of those places. Quiet hours are stored as HH:MM for the opposite
+// reason: they are compared against a wall clock and never added to anything.
+//
+// WHY MONEY IS NOT ON THE LIST
+//
+// A purchase at two in the morning belongs to the day the bank says it does.
+// Filing it under yesterday would read correctly in the app and disagree with
+// every statement it is ever checked against, which is the one place a personal
+// day must give way. Same for a game whose server resets at four. External
+// boundaries stay external; this only moves the app's own idea of itself.
+
+/** The default: days start at midnight, as they always have. */
+export const DAY_START_DEFAULT = 0;
+
+/**
+ * Minutes after midnight, or the default for anything unreadable.
+ *
+ * Bounded to a real time of day. A stored 1500 would put the start of the day
+ * inside tomorrow, and every comparison after that would be off by one for ever
+ * — the kind of number that is easier to refuse than to explain later.
+ */
+export function parseDayStart(raw: string | null | undefined): number {
+  if (raw === null || raw === undefined || raw === "") return DAY_START_DEFAULT;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0 || n > 23 * 60 + 59) return DAY_START_DEFAULT;
+  return n;
+}
 
 // ─── quiet hours, parsed in one place ────────────────────────────────────────
 

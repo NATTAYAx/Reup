@@ -3,6 +3,8 @@ import {
   EXPENSE_COLUMNS,
   SQL_DELETE_EXPENSE,
   SQL_MONTH_SPENT,
+  moneyUpdate,
+  moneyUpdateSql,
   expenseValues,
   resolveCategory,
 } from "./moneyDraft";
@@ -381,19 +383,25 @@ export async function updateExpense(id: number, fields: {
   currency?: string;
 }): Promise<void> {
   const d = await getDb();
-  const sets: string[] = [];
-  const vals: any[] = [];
-  if (fields.amount !== undefined) { sets.push("amount = ?"); vals.push(fields.amount); }
-  if (fields.category !== undefined) { sets.push("category = ?"); vals.push(knownCategoryKey(fields.category)); }
-  if (fields.note !== undefined) { sets.push("note = ?"); vals.push(fields.note); }
-  if (fields.date !== undefined) { sets.push("date = ?"); vals.push(fields.date); }
-  // The unit is editable for the same reason the amount is: the usual way a row
-  // ends up in the wrong one is a scan that read the symbol off a receipt from
-  // a trip, and the only alternative was to delete the row and retype it.
-  if (fields.currency !== undefined) { sets.push("currency = ?"); vals.push(fields.currency); }
-  if (sets.length === 0) return;
-  vals.push(id);
-  await d.execute(`UPDATE expenses SET ${sets.join(", ")} WHERE id = ?`, vals);
+  // The columns and the statement come from moneyDraft, because the phone edits
+  // rows too now and "what does editing a row mean" is not a question that can
+  // have two answers. The unit is on the list for the same reason the amount is:
+  // the usual way a row ends up in the wrong one is a scan that read the symbol
+  // off a receipt from a trip, and the only alternative was to delete and retype.
+  const clean = fields.category === undefined
+    ? fields
+    : { ...fields, category: knownCategoryKey(fields.category) };
+  const { columns, values } = moneyUpdate("expenses", clean as Record<string, unknown>);
+  const sql = moneyUpdateSql("expenses", columns);
+  if (sql === "") return;
+  // Keyed by uid, like the tombstone, because `id` means a different row on
+  // each machine. This screen holds ids, so one is turned into the other first.
+  const found = await d.select<{ uid: string }[]>(
+    "SELECT uid FROM expenses WHERE id = ?",
+    [id],
+  );
+  if (found.length === 0 || !found[0].uid) return;
+  await d.execute(sql, [...values, found[0].uid]);
 }
 
 /** AI: delete the most recent expense matching a keyword in note/category */

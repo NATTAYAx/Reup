@@ -6,6 +6,7 @@ import {
   buildBackupJson, backupFileName, parseBackup, restoreBackup, type RestoreReport,
 } from "../lib/backup";
 import { t } from "../lib/i18n";
+import { readRecord, slotName } from "../lib/autoBackup";
 
 // ─── BackupCard ───────────────────────────────────────────────────────────────
 // Two buttons. Everything interesting about this is in what happens around the
@@ -29,6 +30,9 @@ type State =
 
 export default function BackupCard() {
   const [state, setState] = useState<State>({ kind: "idle" });
+  // Read once on open. It only changes on the first render of the day it runs,
+  // and this card is not on screen at that moment.
+  const [auto] = useState(readRecord);
 
   const handleExport = async () => {
     setState({ kind: "working" });
@@ -172,6 +176,16 @@ export default function BackupCard() {
             {t("backup.reload")}
           </button>
         </div>
+      )}
+
+      {/* One line, and only for somebody who came here anyway.
+          The weekly copy is meant to be invisible; what it should not be is
+          undiscoverable, because a backup nobody can find is one more thing to
+          go looking for on the day everything else has already gone wrong. */}
+      {auto && (
+        <p className="text-white/25 text-[11px]">
+          {t("backup.autoLast")} {auto.last} · {slotName(auto.slot)}
+        </p>
       )}
 
       {state.kind === "error" && (

@@ -44,6 +44,87 @@ export function isEased(task: Task): boolean {
   return (task.missed_streak ?? 0) >= EASE_AFTER && !!task.min_step?.trim();
 }
 
+// ─── asking for the smallest version, once, at the moment it is relevant ─────
+//
+// isEased has always been an AND of two things, and only one of them was ever
+// filled in by anybody. Every task that has been missed twice and has no
+// smallest version written down falls through it silently and gets the full ask
+// on the worst day for it.
+//
+// That is not a gap in the rule, it is a gap in when the question was asked.
+// Nothing has ever asked for min_step except the create and edit forms, which
+// means it gets filled in only by somebody who, while making a task, thinks
+// ahead to a day when they will not manage it. That is a specific state to be
+// in and not a common one. The task typed at three in the morning on half a
+// tank is the one with no smallest version, and it is the same task that will
+// be missed twice first.
+//
+// So the question moves to where it is relevant: after two, on the card itself,
+// once.
+//
+// WHY IT MUST NOT MENTION THE MISSES
+//
+// The point of the ask is to lower a demand, not to report a record. A card
+// that says "you have missed this twice, want to make it smaller?" has said the
+// first half out loud, and the first half is the part that costs something to
+// read. Nothing in this app counts misses on screen and this does not start.
+//
+// WHY DECLINING IS REMEMBERED, AND WHERE
+//
+// Asked twice is nagging, and a prompt that reappears every time the card is
+// drawn is a prompt that gets scrolled past on purpose — at which point it is
+// furniture rather than an offer.
+//
+// Kept in localStorage rather than a column because it is not a fact about the
+// task, it is a fact about a conversation that happened on a screen. It does
+// not sync for the same reason: the phone has no version of this ask, so there
+// is nothing there for it to be consistent with. A machine that forgets and
+// asks once more some day is an acceptable cost; a schema change is not.
+
+const K_DECLINED = "gamesched_ease_declined_v1";
+
+/** Whichever id is stable. uid crosses devices; the row id does not. */
+function keyOf(task: Task): string {
+  const uid = (task as unknown as { uid?: string }).uid;
+  return uid && uid.trim() ? uid : `id:${task.id}`;
+}
+
+function declinedSet(): Set<string> {
+  try {
+    const raw = localStorage.getItem(K_DECLINED);
+    const v: unknown = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(v) ? v.filter(x => typeof x === "string") : []);
+  } catch {
+    // Unreadable is the same as empty here. The worst that costs is one more
+    // offer, which is a far better failure than a card that throws while
+    // drawing itself.
+    return new Set();
+  }
+}
+
+/** Never offer this one again on this machine. */
+export function declineEase(task: Task): void {
+  try {
+    const set = declinedSet();
+    set.add(keyOf(task));
+    localStorage.setItem(K_DECLINED, JSON.stringify([...set]));
+  } catch { /* full */ }
+}
+
+/**
+ * Whether this card should offer to make the ask smaller.
+ *
+ * Repeating kinds only, for the reason REPEATING already gives: a one-off that
+ * has gone past is late, and shrinking a deadline because it passed is a lie
+ * about the world rather than a kindness.
+ */
+export function needsMinStep(task: Task): boolean {
+  if (!REPEATING.has(task.reset_type)) return false;
+  if ((task.missed_streak ?? 0) < EASE_AFTER) return false;
+  if (task.min_step?.trim()) return false;
+  return !declinedSet().has(keyOf(task));
+}
+
 /**
  * Walk each task's boundary forward and record whether the cycle that just
  * ended was completed. Runs when tasks load, not on the render tick — a
