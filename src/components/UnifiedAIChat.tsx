@@ -35,7 +35,7 @@ import { PROVIDERS, getProviderId, getApiKey, setApiKey } from "../lib/aiProvide
 import { getUsageToday, type DailyUsage } from "../lib/aiProviders";
 import { learnPreset } from "../lib/aiMemory";
 import {
-  looksHeavy, alreadyOfferedThisSession, markOffered,
+  looksHeavy, redactHeavy, alreadyOfferedThisSession, markOffered,
   loadImportant, TH_HELPLINE,
 } from "../lib/importantCard";
 import { t } from "../lib/i18n";
@@ -55,6 +55,19 @@ interface ChatMessage {
   text: string;
   domain?: Domain;
   source?: "gemini" | "local" | "cache"; // shows which backend answered
+  /**
+   * What this turn looks like in a request, when that is not what it says.
+   *
+   * Set only where a phrase was cut out of an outgoing message. The screen
+   * renders `text`, which is what was typed; anything leaving the machine reads
+   * this instead.
+   *
+   * It exists because redacting the request alone would have been a fix that
+   * lasted one turn: the message stays in `messages` afterwards and the next
+   * request carries the last four turns with it. That is the same bug the
+   * `local` flag above was added for, arriving by a different door.
+   */
+  sendText?: string;
   /** Stays on this machine. Rendered like any other turn, but never included in
    *  the history sent with a later request — see where `history` is built.
    *
@@ -169,7 +182,16 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
     if (!msg || loading) return;
     setInput("");
     if (showHints) retireHints();
-    addMsg({ role: "user", text: msg });
+    // What is shown is what was typed. What is sent is that with any of the
+    // ambiguous phrases cut out — see redactHeavy. They are equal for almost
+    // every message ever typed here, and the turn carries both only when they
+    // differ, so a reader of this file is not left wondering which one is real.
+    const outgoing = redactHeavy(msg);
+    addMsg({
+      role: "user",
+      text: msg,
+      ...(outgoing !== msg ? { sendText: outgoing } : {}),
+    });
     setLoading(true);
     lastActivity.current = Date.now();
 
@@ -319,7 +341,10 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
       // turn eat one of the four slots and silently shorten the context.
       const history = messages.filter(m => !m.local).slice(-4).map(m => ({
         role: m.role === "user" ? ("user" as const) : ("ai" as const),
-        text: m.text,
+        // sendText where a phrase was cut out, text everywhere else. Reading
+        // m.text here would put the words back the moment a fifth message was
+        // typed, which is exactly how far the previous version of this got.
+        text: m.sendText ?? m.text,
       }));
 
       // ── Call AI (Gemini or local) ────────────────────────────
@@ -333,7 +358,7 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
       const needsConversation =
         isCorrectionMessage(msg) || pendingTask !== null || pendingFinance !== null;
 
-      const { source, response, usage } = await processMessage(msg, {
+      const { source, response, usage } = await processMessage(outgoing, {
         buildContext, history, forceRemote: needsConversation,
       });
       setLastUsage(usage ?? null);
@@ -498,11 +523,13 @@ export default function UnifiedAIChat({ open, onClose, onTaskAdded, onFinanceCha
           setPendingTask({ type: "edit_priority", targetName: tr.targetTaskName, newPriority: tr.newPriority });
         } else if (tr.intent === "add" && tr.tasks?.length > 0) {
           setPendingTask({ type: "add", tasks: tr.tasks });
-          saveHabit(msg, tr.tasks[0]);
+          // The redacted copy here too. Habits are local, and local ends up in
+          // a backup file, and a backup file is written to be carried around.
+          saveHabit(outgoing, tr.tasks[0]);
           setHabits(getTopHabits(3));
           // Also push to conversation history for context
-          const localResult = smartParse(msg);
-          pushHistory({ userText: msg, result: localResult, timestamp: Date.now() });
+          const localResult = smartParse(outgoing);
+          pushHistory({ userText: outgoing, result: localResult, timestamp: Date.now() });
         } else if (!reply) {
           // "I did not follow that" is the wrong sentence when the offline
           // parser DID follow it and simply has no verb for it. Those messages

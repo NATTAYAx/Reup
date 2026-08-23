@@ -214,6 +214,59 @@ export function looksHeavy(text: string): boolean {
   return false;
 }
 
+// ─── the half that is not held back ──────────────────────────────────────────
+//
+// looksHeavy keeps a message on the machine when it reads as meant. When it
+// reads as an expression — "เหนื่อยอยากตาย", "อร่อยอยากตาย" — the message goes
+// out to whichever model is configured, because it is usually carrying a real
+// request along with the exaggeration, and refusing the whole sentence would
+// lose the task somebody was in the middle of adding.
+//
+// Which leaves the words themselves on somebody's server, in a request tied to
+// an API key with a billing address on it. That is a smaller thing than the
+// serious case and it is not nothing, and it is avoidable, because the words
+// are not what the model needs: nothing about parsing "เพิ่มงานซักผ้า" depends
+// on the two words in front of it.
+//
+// So the phrase is cut out and the rest is sent. The screen still shows what
+// was typed — this changes what is transmitted, not what was said.
+//
+// The invariant this buys is one that can be stated without a condition on it:
+// none of these phrases ever appears in an outgoing request, in any branch.
+// Before, it held only for the branch that was judged serious, which is the
+// branch that depends on a regex being right about a joke.
+
+/**
+ * The message with any ambiguous phrase removed, for sending only.
+ *
+ * Only ever called on messages looksHeavy has already let through, so the
+ * SPECIFIC list is not consulted: a message matching one of those is not sent
+ * at all and there is nothing to redact it for.
+ *
+ * Collapses the whitespace it leaves behind, so a sentence does not arrive with
+ * a gap where the cut was — which would be a different way of saying the same
+ * thing to anyone reading the logs at the other end.
+ */
+export function redactHeavy(text: string): string {
+  let out = text;
+  for (const p of AMBIGUOUS) {
+    out = out.replace(new RegExp(p.source, p.flags.includes("g") ? p.flags : p.flags + "g"), " ");
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Whether any of the phrases survives in this string.
+ *
+ * Written for the checks rather than for the app: it is how a test can say
+ * "nothing on this list left the machine" about a whole corpus at once, instead
+ * of asserting about one sentence at a time and missing the one that was added
+ * last week.
+ */
+export function containsHeavyPhrase(text: string): boolean {
+  return SPECIFIC.some(p => p.test(text)) || AMBIGUOUS.some(p => p.test(text));
+}
+
 /** Once per session is enough. Saying it again on every message would turn a
  *  quiet offer into nagging, and nagging about this is worse than silence. */
 export function alreadyOfferedThisSession(): boolean {
