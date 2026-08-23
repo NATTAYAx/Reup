@@ -71,12 +71,99 @@ export function isTransientKey(key: string): boolean {
 
 export const AI_LOG = `${PREFIX}_ai_log_v1`;
 
+// ─── Belongs to this machine, and to nobody's copy of it ─────────────────────
+//
+// The card of names and numbers was designed from the start to stay on the
+// machine: it does not sync, and it was meant not to be backed up either. The
+// second half of that was never written down anywhere the code could read, so
+// until now it was true only because the card was empty.
+//
+// The day it is filled in, it is a short list of the people somebody would
+// contact on their worst day, with phone numbers — going into the one file this
+// project describes as meant to be copied to a USB stick and left in folders.
+//
+// The trade is real and worth stating rather than hiding: a machine that dies
+// takes the card with it, and it has to be typed again. Three contacts take a
+// minute to re-enter. A file that has been copied cannot be un-copied.
+//
+// If that trade ever looks wrong, it is one line — move IMPORTANT_CARD out of
+// this function. It is deliberately not spread across three files this time.
+
+export const IMPORTANT_CARD = `${PREFIX}_important_v1`;
+
+/** Cadence and once-per-session flags for the same card. Meaningless elsewhere. */
+export const IMPORTANT_FLAGS = [`${PREFIX}_important_shown`, `${PREFIX}_important_reviewed`];
+
+export function isMachineOnlyKey(key: string): boolean {
+  return key === IMPORTANT_CARD || IMPORTANT_FLAGS.includes(key);
+}
+
+// ─── Every key this app writes ───────────────────────────────────────────────
+//
+// The list exists so that a key nobody classified cannot quietly take the
+// default, and the default here is "copy it into the backup". Both leaks this
+// file was written after went the same way: the API keys, because backup.ts
+// knew a name aiProviders had stopped using; and a Google refresh token in
+// app_settings, because the table side had a list of exclusions rather than a
+// list of everything.
+//
+// A check in check-sync reads the source, finds every gamesched_ literal in it,
+// and compares the two directions. A key added without a line here fails it. A
+// line here for a key no longer written by anything fails it too — that is the
+// orphan case in the note at the top of this file, the one that rides along in
+// every backup forever after the feature is gone.
+//
+// Entries ending in an underscore are prefixes, for the keys built at runtime.
+
+export const KNOWN_KEYS: readonly string[] = [
+  `${PREFIX}_ai_baseurl`,
+  `${PREFIX}_ai_budget_v1`,
+  `${PREFIX}_ai_cache_v1`,
+  `${PREFIX}_ai_habits_v3`,
+  `${PREFIX}_ai_hints_done`,
+  `${PREFIX}_ai_key_`,
+  `${PREFIX}_ai_log_v1`,
+  `${PREFIX}_ai_max_requests`,
+  `${PREFIX}_ai_merchants_v1`,
+  `${PREFIX}_ai_model`,
+  `${PREFIX}_ai_presets_v1`,
+  `${PREFIX}_ai_provider`,
+  `${PREFIX}_auto_backup_v1`,
+  `${PREFIX}_cal_show_daily`,
+  `${PREFIX}_currency`,
+  `${PREFIX}_day_start_v1`,
+  `${PREFIX}_ease_declined_v1`,
+  `${PREFIX}_gemini_key`,
+  `${PREFIX}_icon_v1`,
+  `${PREFIX}_important_reviewed`,
+  `${PREFIX}_important_shown`,
+  `${PREFIX}_important_v1`,
+  `${PREFIX}_lang_v1`,
+  `${PREFIX}_low_power_date`,
+  `${PREFIX}_notif_sound_name`,
+  `${PREFIX}_notif_sound_v1`,
+  `${PREFIX}_notifications_muted`,
+  `${PREFIX}_quiet_hours_v1`,
+  `${PREFIX}_theme_v1`,
+  `${PREFIX}_timezone`,
+  `${PREFIX}_toast_duration_sec`,
+  `${PREFIX}_toast_style_v1`,
+  `${PREFIX}_tray_hint_seen`,
+  `${PREFIX}_tz_source`,
+  `${PREFIX}_weeknote_shown`,
+];
+
+/** Whether this key has a line in the list above, prefixes included. */
+export function isKnownKey(key: string): boolean {
+  return KNOWN_KEYS.some(k => (k.endsWith("_") ? key.startsWith(k) : key === k));
+}
+
 /**
  * Returns what should be written to a backup for this key, or null to leave it
  * out entirely. Input and output are both the raw stored string.
  */
 export function sanitizeForBackup(key: string, value: string): string | null {
-  if (isSecretKey(key) || isTransientKey(key)) return null;
+  if (isSecretKey(key) || isTransientKey(key) || isMachineOnlyKey(key)) return null;
 
   if (key === AI_LOG) {
     try {

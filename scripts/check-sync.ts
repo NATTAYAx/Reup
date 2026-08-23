@@ -31,6 +31,7 @@
 
 import { applySyncMigrations } from "../src/lib/syncMeta";
 import { HISTORY_SQL, doneDates, hasHistory, type TaskEvent } from "../src/lib/history";
+import { KNOWN_KEYS, isKnownKey, sanitizeForBackup } from "../src/lib/storageKeys";
 import { sync, type SyncState } from "../src/lib/sync/engine";
 import { SqlLocalStore, SYNCED_TABLES, dbNow, type Db } from "../src/lib/sync/sqlLocalStore";
 import {
@@ -976,6 +977,74 @@ async function main(): Promise<void> {
       !keepInBackup("app_settings", { key: "sync_google_tokens", value: "{}" }));
     check("all three are in the set, so the loop above is walking the whole list",
       MACHINE_ONLY_SETTINGS.size === 3);
+
+    // ── every key the app writes, matched against the list that classifies it ──
+    //
+    // Both leaks this project has had went the same way. The API keys, because
+    // backup.ts knew a name aiProviders had stopped using. The Google refresh
+    // token, because the table side listed what to exclude rather than what
+    // exists. In each case the default was "copy it", and the thing that made
+    // the default dangerous was that nothing enumerated the alternatives.
+    //
+    // So this reads the source rather than a list somebody keeps up. A key with
+    // no line in storageKeys fails here, and a line for a key the source no
+    // longer contains fails too — that second one is the orphan case: a feature
+    // removed, its key left behind on every machine that ran the old build, and
+    // copied into every backup from then on.
+    {
+      // Relative to where this is run from, the same way schemaPath is: the
+      // compiled copy lives under node_modules/.cache, so __dirname points at
+      // somewhere with no source in it.
+      const dir = path.resolve("src");
+      const found = new Set<string>();
+      const walk = (p: string) => {
+        for (const entry of fs.readdirSync(p, { withFileTypes: true })) {
+          const full = path.join(p, entry.name);
+          if (entry.isDirectory()) { walk(full); continue; }
+          if (!/\.tsx?$/.test(entry.name)) continue;
+          // Not the list itself. Reading it would make every entry find
+          // itself, and the orphan half of this check would pass for ever
+          // while never having looked at anything.
+          if (entry.name === "storageKeys.ts") continue;
+          const text: string = fs.readFileSync(full, "utf8");
+          for (const m of text.matchAll(/gamesched_[a-z0-9_]*/g)) found.add(m[0]);
+          // The runtime-built ones, written as `${PREFIX}_thing` rather than as
+          // a literal. Without this half, every key in storageKeys itself reads
+          // as an orphan.
+          for (const m of text.matchAll(/\$\{PREFIX\}(_[a-z0-9_]*)/g)) found.add("gamesched" + m[1]);
+        }
+      };
+      walk(dir);
+      // `gamesched_` on its own is the prefix constant, not a key.
+      found.delete("gamesched_");
+
+      const unclassified = [...found].filter(k => !isKnownKey(k)).sort();
+      check(`every key in the source has a line in storageKeys${unclassified.length ? " — missing: " + unclassified.join(", ") : ""}`,
+        unclassified.length === 0);
+
+      // Prefix entries are exempt from the orphan half: the whole reason they
+      // are prefixes is that the rest is built at runtime, so there is no
+      // literal anywhere for a scanner to find.
+      const orphans = KNOWN_KEYS
+        .filter(k => !k.endsWith("_"))
+        .filter(k => !found.has(k))
+        .sort();
+      check(`every line in storageKeys is a key something still writes${orphans.length ? " — orphaned: " + orphans.join(", ") : ""}`,
+        orphans.length === 0);
+
+      // And the two that must never reach the file, asked by name rather than
+      // only through the predicate that decides it.
+      check("an API key is not written into a backup",
+        sanitizeForBackup("gamesched_ai_key_gemini", "AIza-live") === null
+        && sanitizeForBackup("gamesched_gemini_key", "AIza-live") === null);
+      check("neither is the card of names and numbers",
+        sanitizeForBackup("gamesched_important_v1", '{"contacts":[{"label":"a","value":"08x"}]}') === null);
+      check("the parse log travels without the sentences",
+        sanitizeForBackup("gamesched_ai_log_v1", '[{"text":"coffee 60","intent":"log"}]')
+          === '[{"text":"","intent":"log"}]');
+      check("and an ordinary setting is copied unchanged",
+        sanitizeForBackup("gamesched_lang_v1", "th") === "th");
+    }
     check(
       "a row with no key at all is not mistaken for one of them",
       keepInBackup("app_settings", { value: "orphan" }),
