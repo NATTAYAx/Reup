@@ -29,6 +29,7 @@ import { loadImportant, saveImportant, shouldReviewImportant, markImportantRevie
 import { Toast } from "./ToastCard";
 import { paletteFromVideo } from "../lib/videoPalette";
 import { DAY_START_DEFAULT, DAY_START_KEY, parseDayStart } from "../lib/userSettings";
+import { read as readNotifyLog } from "../lib/notifyLog";
 
 interface Props {
   open: boolean;
@@ -213,6 +214,9 @@ export default function SettingsModal({ open, onClose }: Props) {
   const [saved, setSaved]               = useState(false);
   const [notifMuted, setNotifMuted]     = useState(false);
   const [quiet, setQuiet]               = useState<QuietHours>(getQuietHours);
+  // Read when the panel opens. It only grows while a reminder is firing, and
+  // nobody is reading this list at that moment.
+  const [fired] = useState(readNotifyLog);
   const [dayStart, setDayStart]         = useState<number>(
     () => { try { return parseDayStart(localStorage.getItem(DAY_START_KEY)); } catch { return DAY_START_DEFAULT; } },
   );
@@ -1092,6 +1096,40 @@ Rules:
                             </>
                           )}
                         </div>
+
+                        {/* ── what actually rang ─────────────────────────────
+                            The toast plays a chime and takes itself away after
+                            eight seconds, so a reminder nobody was in the room
+                            for leaves nothing behind at all. The rules that
+                            produce it are not simple — quiet hours delay a
+                            reminder unless the deadline is inside the window,
+                            and the ten-minute warning fires by its own rule —
+                            so the honest answer to "why did it ring then" is a
+                            chain of three conditions, which cannot be checked
+                            against a memory of a noise.
+
+                            Twenty lines, no badge, nothing on the main screen.
+                            This is where somebody comes to ask what that was. */}
+                        {fired.length > 0 && (
+                          <div className="border-t border-white/8 pt-3">
+                            <div className="flex items-center gap-2 mb-2">
+                              <Bell size={13} className="text-white/40" />
+                              <span className="text-white/60 text-xs font-semibold">{t("notifyLog.title")}</span>
+                            </div>
+                            <div className="space-y-1">
+                              {fired.slice(0, 6).map((e, i) => (
+                                <p key={i} className="text-white/30 text-[11px] truncate">
+                                  {new Date(e.at).toLocaleString(undefined, {
+                                    day: "2-digit", month: "2-digit",
+                                    hour: "2-digit", minute: "2-digit", hour12: false,
+                                  })}
+                                  {"  "}{e.name}
+                                  {e.final ? ` ${t("notifyLog.final")}` : ""}
+                                </p>
+                              ))}
+                            </div>
+                          </div>
+                        )}
 
                         {/* ── when the day starts ────────────────────────────
                             Not a clock setting. Midnight is a fact about

@@ -517,6 +517,8 @@ const translations = {
   "ease.placeholder":  { en: "the smallest version", th: "เวอร์ชันเล็กสุด" },
   "ease.save":         { en: "Save", th: "บันทึก" },
   "ease.never":        { en: "Not for this one", th: "อันนี้ไม่ต้องถาม" },
+  "notifyLog.title":   { en: "Recently rang", th: "ดังล่าสุด" },
+  "notifyLog.final":   { en: "(10 min warning)", th: "(เตือนก่อน 10 นาที)" },
   "dayStart.title":    { en: "Day starts at", th: "วันใหม่เริ่ม" },
   "dayStart.midnight": { en: "Midnight", th: "เที่ยงคืน" },
   "dayStart.note":     { en: "Only the app's own idea of today. Money keeps the calendar day and game resets keep the server's.", th: "มีผลกับคำว่าวันนี้ของแอปเท่านั้น รายการเงินยังใช้วันตามปฏิทิน รอบรีเซ็ตเกมยังใช้ของเซิร์ฟเวอร์" },

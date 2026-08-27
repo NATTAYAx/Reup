@@ -997,6 +997,7 @@ async function main(): Promise<void> {
       // somewhere with no source in it.
       const dir = path.resolve("src");
       const found = new Set<string>();
+      const usedNames = new Set<string>();
       const walk = (p: string) => {
         for (const entry of fs.readdirSync(p, { withFileTypes: true })) {
           const full = path.join(p, entry.name);
@@ -1012,6 +1013,9 @@ async function main(): Promise<void> {
           // a literal. Without this half, every key in storageKeys itself reads
           // as an orphan.
           for (const m of text.matchAll(/\$\{PREFIX\}(_[a-z0-9_]*)/g)) found.add("gamesched" + m[1]);
+          // And the identifiers, for keys used the tidy way: imported by name
+          // rather than retyped as a string.
+          for (const m of text.matchAll(/\b([A-Z][A-Z0-9_]{2,})\b/g)) usedNames.add(m[1]);
         }
       };
       walk(dir);
@@ -1022,12 +1026,31 @@ async function main(): Promise<void> {
       check(`every key in the source has a line in storageKeys${unclassified.length ? " — missing: " + unclassified.join(", ") : ""}`,
         unclassified.length === 0);
 
+      // A key is in use if its text appears somewhere, OR if the constant that
+      // declares it is referenced somewhere. The second half was missing and
+      // the check said so immediately: the first key added after it went in was
+      // used properly, through its exported constant, and read as orphaned.
+      //
+      // Which is the better way to write it. A scanner that only understands
+      // copied string literals rewards copying string literals.
+      const declared = fs.readFileSync(path.join(dir, "lib", "storageKeys.ts"), "utf8");
+      const named = new Map<string, string>();
+      for (const m of declared.matchAll(
+        /export const (\w+)\s*=\s*`\$\{PREFIX\}(_[a-z0-9_]*)`/g,
+      )) {
+        named.set("gamesched" + m[2], m[1]);
+      }
+
       // Prefix entries are exempt from the orphan half: the whole reason they
       // are prefixes is that the rest is built at runtime, so there is no
       // literal anywhere for a scanner to find.
       const orphans = KNOWN_KEYS
         .filter(k => !k.endsWith("_"))
         .filter(k => !found.has(k))
+        .filter(k => {
+          const constant = named.get(k);
+          return !constant || !usedNames.has(constant);
+        })
         .sort();
       check(`every line in storageKeys is a key something still writes${orphans.length ? " — orphaned: " + orphans.join(", ") : ""}`,
         orphans.length === 0);

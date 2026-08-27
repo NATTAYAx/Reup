@@ -29,6 +29,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { recordNotify } from "./notifyLog";
 import { parseQuiet, putSetting, QUIET_KEY } from "./userSettings";
 import { CountdownResult } from "../types";
 import { wallClock } from "./tz";
@@ -312,6 +313,10 @@ export function checkAndNotify(results: CountdownResult[]) {
       const label: "critical" | "warning" =
         Boolean(task.is_urgent) || time_remaining_ms < 3_600_000 ? "critical" : "warning";
       console.log(`[notifier] 🔔 MAIN  "${task.name}" remaining=${Math.round(time_remaining_ms/1000)}s`);
+      // Written down as well as shown. The card takes itself away after eight
+      // seconds and the console is gone at the next restart, so without this
+      // the only record of a reminder is having been in the room for it.
+      recordNotify({ name: task.name, at: Date.now(), label });
       fireNotification(task.name, label, timeLeft, task.category);
     }
 
@@ -321,6 +326,9 @@ export function checkAndNotify(results: CountdownResult[]) {
       if (notifyWindowMs > FINAL_WARN_MS) {
         const timeLeft = formatTimeLeft(time_remaining_ms, task.reset_type);
         console.log(`[notifier] 🔔 FINAL "${task.name}" remaining=${Math.round(time_remaining_ms/1000)}s`);
+        // Marked as the ten-minute warning, because that one fires by a
+        // different rule and "it rang twice" is otherwise unexplainable.
+        recordNotify({ name: task.name, at: Date.now(), label: "critical", final: true });
         fireNotification(task.name, "critical", timeLeft, task.category);
       }
     }

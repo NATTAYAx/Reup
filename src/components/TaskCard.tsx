@@ -194,31 +194,45 @@ export default function TaskCard({ result, onDelete, onTogglePriority, onToggleU
               </p>
             ) : null}
 
+            {/* Asked in place, not in a box.
+
+                The first version was a bordered amber panel with its own
+                background, an input, a button and a dismiss link — five things
+                inside a card that already holds five things. It made one card
+                twice the height of the ones beside it and read as something
+                that had been pushed in rather than something the card was
+                saying.
+
+                It is one question. So: one quiet line, one field that grows
+                out of the line under it, and the refusal as a word rather than
+                a control. Same three actions, none of them announcing itself. */}
             {offerEase ? (
-              <div className="mt-2 rounded-lg border border-amber-300/20 bg-amber-300/5 p-2">
-                <p className="text-amber-200/70 text-[11px] leading-relaxed">{t("ease.ask")}</p>
-                <div className="flex gap-1.5 mt-1.5">
+              <div className="mt-2 pl-2 border-l border-amber-300/25">
+                <p className="text-amber-200/60 text-[11px] leading-snug">{t("ease.ask")}</p>
+                <div className="flex items-center gap-2 mt-1">
                   <input
                     value={step}
                     onChange={e => setStep(e.target.value)}
                     onKeyDown={e => { if (e.key === "Enter") saveStep(); }}
                     placeholder={t("ease.placeholder")}
-                    className="flex-1 min-w-0 bg-black/20 border border-white/10 rounded-md px-2 py-1 text-xs text-white/80 placeholder:text-white/25 outline-none focus:border-amber-300/40"
+                    className="flex-1 min-w-0 bg-transparent border-b border-white/10 pb-0.5 text-xs text-white/80 placeholder:text-white/20 outline-none focus:border-amber-300/40"
                   />
-                  <button
-                    onClick={saveStep}
-                    disabled={!step.trim()}
-                    className="px-2 py-1 rounded-md text-[11px] font-semibold bg-amber-400/20 text-amber-100 disabled:opacity-40"
-                  >
-                    {t("ease.save")}
-                  </button>
+                  {step.trim() ? (
+                    <button
+                      onClick={saveStep}
+                      className="text-amber-200/80 text-[11px] font-semibold shrink-0 hover:text-amber-100"
+                    >
+                      {t("ease.save")}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={dismissStep}
+                      className="text-white/20 text-[10px] shrink-0 hover:text-white/40"
+                    >
+                      {t("ease.never")}
+                    </button>
+                  )}
                 </div>
-                <button
-                  onClick={dismissStep}
-                  className="text-white/25 text-[10px] mt-1.5 hover:text-white/40"
-                >
-                  {t("ease.never")}
-                </button>
               </div>
             ) : null}
           </div>

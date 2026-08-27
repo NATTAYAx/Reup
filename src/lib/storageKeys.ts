@@ -53,8 +53,18 @@ export function isSecretKey(key: string): boolean {
 
 export const AI_CACHE = `${PREFIX}_ai_cache_v1`;
 
+/**
+ * A short record of which reminders actually rang.
+ *
+ * Transient with the cache rather than kept: twenty rolling lines about this
+ * machine in the last few days, which answers "what was that noise" and nothing
+ * else. Restoring somebody's Tuesday onto a new machine would be carrying a
+ * diagnostic around for years for no reason.
+ */
+export const NOTIFY_LOG = `${PREFIX}_notif_log_v1`;
+
 export function isTransientKey(key: string): boolean {
-  return key === AI_CACHE;
+  return key === AI_CACHE || key === NOTIFY_LOG;
 }
 
 // ─── Needs scrubbing before it leaves the machine ─────────────────────────────
@@ -140,6 +150,7 @@ export const KNOWN_KEYS: readonly string[] = [
   `${PREFIX}_important_v1`,
   `${PREFIX}_lang_v1`,
   `${PREFIX}_low_power_date`,
+  `${PREFIX}_notif_log_v1`,
   `${PREFIX}_notif_sound_name`,
   `${PREFIX}_notif_sound_v1`,
   `${PREFIX}_notifications_muted`,
