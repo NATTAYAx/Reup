@@ -143,11 +143,15 @@ function check(what: string, ok: boolean): void {
  * would otherwise be measuring its distance from a folder that moves.
  */
 function schemaPath(): string {
-  const p = path.resolve(process.argv[2] ?? "../reup-shared/schema.sql");
+  // In this repo now, not in the folder next door. It used to live in
+  // reup-shared, which is not a git repository — so the one file that says what
+  // the tables are had no history, no diff and no backup, and the day a line
+  // went missing from it there was nothing to ask when it had happened.
+  const p = path.resolve(process.argv[2] ?? "schema.sql");
   if (!fs.existsSync(p)) {
     throw new Error(
       `schema.sql not found at ${p}. Pass the path as an argument, or run this ` +
-        `from the reup folder with reup-shared beside it.`,
+        `from the reup folder.`,
     );
   }
   return p;
@@ -1604,6 +1608,140 @@ async function main(): Promise<void> {
     const quiet = await runSync(cloud, a);
     check("and settings stop churning once they have settled",
       quiet.pushed === 0 && quiet.wrote === null);
+  }
+
+  // ── the two schemas agree, column for column ────────────────────────────
+  //
+  // There are two definitions of these tables and there always have been.
+  // database.ts builds the database this app actually runs on, as a sequence of
+  // db.execute() calls. schema.sql builds the phone's, and the throwaway ones
+  // above. The file's own header says one place knows what the tables are; that
+  // has never been true, and nothing until now compared them.
+  //
+  // What it found the first time it ran: tasks.notify_before_min was added to
+  // schema.sql when the column was invented and never added to database.ts, so
+  // every database on this machine has been missing it — while TASK_COLUMNS
+  // names it in the INSERT that writes a task. The checks above could not see
+  // it, because they build from schema.sql, which has the column.
+  //
+  // HOW IT READS database.ts
+  //
+  // As text, pulling out every string literal that begins with CREATE or ALTER.
+  // That is a strange thing for a test to do and it is deliberate: the
+  // alternative is restructuring database.ts so its statements are data, which
+  // is a change to the code that builds a database holding months of real rows,
+  // and this check is the thing that would make that change provably safe. So
+  // the check comes first.
+  //
+  // The day database.ts loads schema.sql instead of carrying its own copy, this
+  // whole block deletes itself, because there will be one definition and
+  // nothing left to compare.
+  {
+    const source = fs.readFileSync("src/lib/database.ts", "utf8");
+    const literals: string[] = [];
+    for (const m of source.matchAll(/`([^`]*)`|\'((?:[^\'\\\n]|\\.)*)\'|"((?:[^"\\\n]|\\.)*)"/g)) {
+      const t = (m[1] ?? m[2] ?? m[3] ?? "").trim();
+      if (/^(CREATE|ALTER)\b/i.test(t)) literals.push(t);
+    }
+    check("database.ts still declares its schema in string literals", literals.length > 20);
+
+    const run = async (db: NodeDb, statements: string[]) => {
+      for (const t of statements) {
+        try {
+          await db.execute(t);
+        } catch (e) {
+          // Re-running an ALTER on a database that already has the column is
+          // the normal path here, exactly as it is at startup.
+          if (!String(e).includes("duplicate column")) throw e;
+        }
+      }
+      // Both sides get the sync columns the same way the app does, so uid,
+      // updated_at and deleted are not a difference between the two lists.
+      await applySyncMigrations(db as never);
+    };
+
+    const fromCode = new NodeDb();
+    await run(fromCode, literals);
+
+    const fromFile = new NodeDb();
+    const text = fs.readFileSync(schemaPath(), "utf8");
+    await run(
+      fromFile,
+      text
+        .split(/^[ \t]*--[ \t]*@@[ \t]*$/m)
+        .map((c) => c.split("\n").filter((l) => !l.trimStart().startsWith("--")).join("\n").trim())
+        .filter((c) => c.length > 0),
+    );
+
+    const shape = (db: NodeDb): Record<string, string[]> => {
+      const out: Record<string, string[]> = {};
+      const names = rows(
+        db,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+      ).map((r: any) => r.name as string);
+      for (const t of names) {
+        out[t] = rows(db, `PRAGMA table_info(${t})`).map((c: any) => c.name as string).sort();
+      }
+      return out;
+    };
+
+    const code = shape(fromCode);
+    const file = shape(fromFile);
+    const all = [...new Set([...Object.keys(code), ...Object.keys(file)])].sort();
+    for (const t of all) {
+      check(`${t} exists in both database.ts and schema.sql`,
+        code[t] !== undefined && file[t] !== undefined);
+      if (!code[t] || !file[t]) continue;
+      const missingHere = file[t].filter((c) => !code[t].includes(c));
+      const missingThere = code[t].filter((c) => !file[t].includes(c));
+      check(`${t} has the same columns in both`,
+        missingHere.length === 0 && missingThere.length === 0);
+    }
+  }
+
+  // ── every table the schema names actually gets built ────────────────────
+  //
+  // The check that was missing, and the reason it was missing is worth keeping
+  // written down: nothing on this machine builds its real database from
+  // schema.sql. The desktop builds its own in database.ts and the phone builds
+  // from a constant generated out of this file, so a table that never gets
+  // created here is invisible to everybody until somebody installs the phone
+  // app fresh.
+  //
+  // That is what happened to app_settings. Statements in schema.sql are
+  // separated by a line containing only `-- @@`, because trigger bodies have
+  // semicolons in them, and the line between task_events and app_settings had
+  // gone missing. The two CREATE TABLE statements arrived as one string, SQLite
+  // ran the first and stopped, and the second table was never made. No build
+  // broke, no vector moved, nothing was thrown. It sat there for months.
+  //
+  // Two checks, both about the shape of the file rather than its contents, so
+  // they keep working as tables are added.
+  {
+    const text = fs.readFileSync(schemaPath(), "utf8");
+    const named = [...text.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)/g)].map((m) => m[1]);
+    check("schema.sql names some tables at all", named.length > 0);
+
+    const d = await makeDevice();
+    for (const t of named) {
+      const cols = rows(d.db, `PRAGMA table_info(${t})`).map((c: any) => c.name as string);
+      check(`${t} is named in schema.sql and exists once it has been run`, cols.length > 0);
+    }
+
+    // The direct form of the same thing, which also covers indexes and
+    // triggers. Those three words never appear inside a trigger body, so
+    // counting them is safe in a way counting semicolons would not be.
+    const chunks = text
+      .split(/^[ \t]*--[ \t]*@@[ \t]*$/m)
+      .map((c) => c.split("\n").filter((l) => !l.trimStart().startsWith("--")).join("\n").trim())
+      .filter((c) => c.length > 0);
+    for (const c of chunks) {
+      const creates = c.match(/CREATE (?:TABLE|INDEX|TRIGGER)[^(\n]*/g) ?? [];
+      check(
+        `one statement per chunk: ${creates[0]?.trim() ?? "(none)"}`,
+        creates.length <= 1,
+      );
+    }
   }
 
   // ── the backup covers what the database holds ───────────────────────────

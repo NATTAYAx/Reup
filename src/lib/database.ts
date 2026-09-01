@@ -108,6 +108,17 @@ async function initializeSchema(db: Database): Promise<void> {
   try { await db.execute(`ALTER TABLE tasks ADD COLUMN cycle_checked_until TEXT DEFAULT NULL`); } catch (_) {}
   try { await db.execute(`ALTER TABLE tasks ADD COLUMN missed_streak INTEGER DEFAULT 0`); } catch (_) {}
 
+  // How many minutes before the deadline to say something. Added to schema.sql
+  // when the column was invented and never added here, so every database on
+  // this machine has been missing it ever since — while TASK_COLUMNS in
+  // taskDraft.ts has been naming it in the INSERT that writes a task.
+  //
+  // Nothing caught it because the only thing that checks this schema builds its
+  // databases from schema.sql, which has the column. The check added below in
+  // check-sync compares the two definitions directly, and this line is what it
+  // found.
+  try { await db.execute(`ALTER TABLE tasks ADD COLUMN notify_before_min INTEGER`); } catch (_) {}
+
   // ── Income table ───────────────────────────────────────────
   await db.execute(`CREATE TABLE IF NOT EXISTS income (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
