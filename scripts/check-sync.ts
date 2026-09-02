@@ -29,6 +29,7 @@
  * Database.
  */
 
+import { isAlreadyThere, schemaStatements } from "../src/lib/schemaFile";
 import { applySyncMigrations } from "../src/lib/syncMeta";
 import { HISTORY_SQL, doneDates, hasHistory, type TaskEvent } from "../src/lib/history";
 import { KNOWN_KEYS, isKnownKey, sanitizeForBackup } from "../src/lib/storageKeys";
@@ -160,28 +161,14 @@ function schemaPath(): string {
 async function makeDevice(): Promise<{ db: NodeDb; store: SqlLocalStore }> {
   const db = new NodeDb();
   const sql = fs.readFileSync(schemaPath(), "utf8");
-  // "Statements are separated by a line containing only `-- @@`", per the file's
-  // own rules. Splitting on the bare substring instead cuts the header in half,
-  // because the header is where that rule is written down.
-  for (const stmt of sql.split(/^[ \t]*--[ \t]*@@[ \t]*$/m)) {
-    // Comment lines are dropped before deciding whether a chunk is empty. The
-    // file's own header explains the separator and therefore contains the
-    // separator, so splitting leaves one fragment that is the tail of a comment
-    // and nothing else.
-    const t = stmt
-      .split("\n")
-      .filter((l: string) => !l.trim().startsWith("--"))
-      .join("\n")
-      .trim();
-    if (t === "") continue;
+  for (const statement of schemaStatements(sql)) {
     try {
-      db.raw.exec(t);
+      db.raw.exec(statement);
     } catch (e) {
       // schema.sql carries the ALTERs that migrated an existing database, and
       // on a database built fresh from the same file the column is already
       // there. That is the normal path, not an error.
-      const msg = String(e);
-      if (!msg.includes("duplicate column")) throw e;
+      if (!isAlreadyThere(e)) throw e;
     }
   }
   await applySyncMigrations(db as never);
@@ -1610,93 +1597,29 @@ async function main(): Promise<void> {
       quiet.pushed === 0 && quiet.wrote === null);
   }
 
-  // ── the two schemas agree, column for column ────────────────────────────
+  // ── there is only one schema now ────────────────────────────────────────
   //
-  // There are two definitions of these tables and there always have been.
-  // database.ts builds the database this app actually runs on, as a sequence of
-  // db.execute() calls. schema.sql builds the phone's, and the throwaway ones
-  // above. The file's own header says one place knows what the tables are; that
-  // has never been true, and nothing until now compared them.
+  // There used to be two. database.ts wrote out every CREATE and ALTER of its
+  // own, and schema.sql wrote them again for the phone and for the throwaway
+  // databases below. The check that lived here built one database from each and
+  // compared them column for column, and the first time it ran it found
+  // tasks.notify_before_min in one and not the other.
   //
-  // What it found the first time it ran: tasks.notify_before_min was added to
-  // schema.sql when the column was invented and never added to database.ts, so
-  // every database on this machine has been missing it — while TASK_COLUMNS
-  // names it in the INSERT that writes a task. The checks above could not see
-  // it, because they build from schema.sql, which has the column.
-  //
-  // HOW IT READS database.ts
-  //
-  // As text, pulling out every string literal that begins with CREATE or ALTER.
-  // That is a strange thing for a test to do and it is deliberate: the
-  // alternative is restructuring database.ts so its statements are data, which
-  // is a change to the code that builds a database holding months of real rows,
-  // and this check is the thing that would make that change provably safe. So
-  // the check comes first.
-  //
-  // The day database.ts loads schema.sql instead of carrying its own copy, this
-  // whole block deletes itself, because there will be one definition and
-  // nothing left to compare.
+  // It was always meant to retire. Its job was to make merging the two provably
+  // safe, and once they were merged there was nothing left to compare. What
+  // replaces it is the rule that keeps it merged: no SQL that builds a table
+  // goes back into that file.
   {
     const source = fs.readFileSync("src/lib/database.ts", "utf8");
     const literals: string[] = [];
     for (const m of source.matchAll(/`([^`]*)`|\'((?:[^\'\\\n]|\\.)*)\'|"((?:[^"\\\n]|\\.)*)"/g)) {
       const t = (m[1] ?? m[2] ?? m[3] ?? "").trim();
-      if (/^(CREATE|ALTER)\b/i.test(t)) literals.push(t);
+      if (/^(CREATE TABLE|CREATE INDEX|CREATE TRIGGER|ALTER TABLE)\b/i.test(t)) literals.push(t);
     }
-    check("database.ts still declares its schema in string literals", literals.length > 20);
-
-    const run = async (db: NodeDb, statements: string[]) => {
-      for (const t of statements) {
-        try {
-          await db.execute(t);
-        } catch (e) {
-          // Re-running an ALTER on a database that already has the column is
-          // the normal path here, exactly as it is at startup.
-          if (!String(e).includes("duplicate column")) throw e;
-        }
-      }
-      // Both sides get the sync columns the same way the app does, so uid,
-      // updated_at and deleted are not a difference between the two lists.
-      await applySyncMigrations(db as never);
-    };
-
-    const fromCode = new NodeDb();
-    await run(fromCode, literals);
-
-    const fromFile = new NodeDb();
-    const text = fs.readFileSync(schemaPath(), "utf8");
-    await run(
-      fromFile,
-      text
-        .split(/^[ \t]*--[ \t]*@@[ \t]*$/m)
-        .map((c) => c.split("\n").filter((l) => !l.trimStart().startsWith("--")).join("\n").trim())
-        .filter((c) => c.length > 0),
+    check(
+      "database.ts keeps no copy of the schema: " + (literals[0] ?? "none"),
+      literals.length === 0,
     );
-
-    const shape = (db: NodeDb): Record<string, string[]> => {
-      const out: Record<string, string[]> = {};
-      const names = rows(
-        db,
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
-      ).map((r: any) => r.name as string);
-      for (const t of names) {
-        out[t] = rows(db, `PRAGMA table_info(${t})`).map((c: any) => c.name as string).sort();
-      }
-      return out;
-    };
-
-    const code = shape(fromCode);
-    const file = shape(fromFile);
-    const all = [...new Set([...Object.keys(code), ...Object.keys(file)])].sort();
-    for (const t of all) {
-      check(`${t} exists in both database.ts and schema.sql`,
-        code[t] !== undefined && file[t] !== undefined);
-      if (!code[t] || !file[t]) continue;
-      const missingHere = file[t].filter((c) => !code[t].includes(c));
-      const missingThere = code[t].filter((c) => !file[t].includes(c));
-      check(`${t} has the same columns in both`,
-        missingHere.length === 0 && missingThere.length === 0);
-    }
   }
 
   // ── every table the schema names actually gets built ────────────────────

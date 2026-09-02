@@ -299,20 +299,43 @@ ALTER TABLE tasks ADD COLUMN cycle_checked_until TEXT DEFAULT NULL;
 -- @@
 ALTER TABLE tasks ADD COLUMN missed_streak INTEGER DEFAULT 0;
 -- @@
+-- The smallest version of a task that still counts as having done it.
+-- "ล้างจาน" is a wall; "ล้างจาน 1 ใบ" is a doorway. Depression and ordinary
+-- procrastination both fail at the same place — starting — and shrinking the
+-- first step is the standard way through it. Nullable, because most tasks
+-- never need one.
 ALTER TABLE tasks ADD COLUMN min_step TEXT;
 -- @@
 ALTER TABLE tasks ADD COLUMN paused_until TEXT DEFAULT NULL;
 -- @@
 ALTER TABLE tasks ADD COLUMN deleted_at TEXT DEFAULT NULL;
 -- @@
+-- Which unit the number in `amount` is counted in. Added while these tables
+-- held a few hundred rows and there was no sync protocol that would have to be
+-- renegotiated, for the same reason the sync columns were: the expensive
+-- version of this migration is the one done later.
+--
+-- Backfilling existing rows as THB is not a guess. Every row that existed was
+-- entered when the app could only mean baht.
 ALTER TABLE expenses ADD COLUMN currency TEXT NOT NULL DEFAULT 'THB';
 -- @@
 ALTER TABLE income ADD COLUMN currency TEXT NOT NULL DEFAULT 'THB';
 -- @@
+-- A limit and a target are amounts, and an amount without a unit is not one.
+--
+-- These two columns were the last money in the database with no currency
+-- beside it, which did not matter while the app could only mean baht and became
+-- a silent rewrite the moment it could not: a ฿5,000 food budget read as $5,000
+-- the instant the setting changed, with nothing on screen saying so, and a
+-- 30,000 goal likewise. Nothing was converted and nothing was wrong in the row
+-- — the number was simply reinterpreted.
 ALTER TABLE budgets ADD COLUMN currency TEXT NOT NULL DEFAULT 'THB';
 -- @@
 ALTER TABLE saving_goals ADD COLUMN currency TEXT NOT NULL DEFAULT 'THB';
 -- @@
+-- A bank reference is the one thing on a slip worth keeping: short, opaque, no
+-- account numbers or names in it, and it is what makes photographing the same
+-- slip twice detectable instead of silently doubling a month's total.
 ALTER TABLE expenses ADD COLUMN slip_ref TEXT;
 -- @@
 CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_slip_ref

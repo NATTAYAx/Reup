@@ -9,6 +9,8 @@ import {
 import { initSettings, type SettingsDb } from "./userSettings";
 import { dbNow } from "./sync/sqlLocalStore";
 import Database from "@tauri-apps/plugin-sql";
+import SCHEMA_SQL from "../../schema.sql?raw";
+import { isAlreadyThere, schemaStatements } from "./schemaFile";
 import { applySyncMigrations, SYNC_TABLES } from "./syncMeta";
 import { sweepTrash, sweepTombstones, PURGE_TASK_SQL } from "./tombstones";
 import { HISTORY_SQL, doneDates, type TaskEvent } from "./history";
@@ -53,243 +55,43 @@ export function dbQueue<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 async function initializeSchema(db: Database): Promise<void> {
-  // ── Tasks table ────────────────────────────────────────────
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS tasks (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      description TEXT DEFAULT '',
-      category TEXT DEFAULT 'game',
-      reset_type TEXT NOT NULL,
-      reset_time TEXT,
-      reset_day INTEGER,
-      reset_interval_days INTEGER,
-      anchor_date TEXT,
-      event_start TEXT,
-      event_end TEXT,
-      specific_date TEXT,
-      is_priority INTEGER DEFAULT 0,
-      is_urgent INTEGER DEFAULT 0,
-      is_active INTEGER DEFAULT 1,
-      completed_until TEXT DEFAULT NULL,
-      created_at TEXT DEFAULT (datetime('now'))
-    )
-  `);
-  // Task migrations
-  try { await db.execute(`ALTER TABLE tasks ADD COLUMN specific_date TEXT`); } catch (_) {}
-  try { await db.execute(`ALTER TABLE tasks ADD COLUMN is_priority INTEGER DEFAULT 0`); } catch (_) {}
-  try { await db.execute(`ALTER TABLE tasks ADD COLUMN is_urgent INTEGER DEFAULT 0`); } catch (_) {}
-  try { await db.execute(`ALTER TABLE tasks ADD COLUMN completed_until TEXT DEFAULT NULL`); } catch (_) {}
-  // Added here as well as in schema.sql because this list is what an already
-  // installed database is upgraded by; schema.sql only ever builds fresh ones.
-  // Two lists that have to agree is the shape of every bug this project has
-  // spent a month removing, and the day they are merged is the day this comment
-  // can go.
-  try { await db.execute(`ALTER TABLE tasks ADD COLUMN completed_at TEXT DEFAULT NULL`); } catch (_) {}
-
-  // Append-only history. Created here as well as in schema.sql, because this
-  // list is what an already installed database is upgraded by.
-  await db.execute(`CREATE TABLE IF NOT EXISTS task_events (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_uid  TEXT NOT NULL,
-    kind      TEXT NOT NULL,
-    at        TEXT NOT NULL,
-    for_cycle TEXT
-  )`);
-  try { await db.execute(`ALTER TABLE tasks ADD COLUMN notes TEXT DEFAULT ''`); } catch (_) {}
-  // Null = the time floats with the app's zone, which is what every row already
-  // did before this column existed. Nothing needs backfilling.
-  try { await db.execute(`ALTER TABLE tasks ADD COLUMN time_zone TEXT DEFAULT NULL`); } catch (_) {}
-  // Null intent means nobody answered, which is read as unknown rather than as
-  // obligation — see types/index.ts. The two cycle columns exist so that "was
-  // the last cycle completed" is answerable at all; completed_until is a single
-  // overwritten value and keeps no history.
-  try { await db.execute(`ALTER TABLE tasks ADD COLUMN intent TEXT DEFAULT NULL`); } catch (_) {}
-  try { await db.execute(`ALTER TABLE tasks ADD COLUMN cycle_checked_until TEXT DEFAULT NULL`); } catch (_) {}
-  try { await db.execute(`ALTER TABLE tasks ADD COLUMN missed_streak INTEGER DEFAULT 0`); } catch (_) {}
-
-  // How many minutes before the deadline to say something. Added to schema.sql
-  // when the column was invented and never added here, so every database on
-  // this machine has been missing it ever since — while TASK_COLUMNS in
-  // taskDraft.ts has been naming it in the INSERT that writes a task.
+  // ── THE TABLES COME FROM schema.sql ─────────────────────────────────────
   //
-  // Nothing caught it because the only thing that checks this schema builds its
-  // databases from schema.sql, which has the column. The check added below in
-  // check-sync compares the two definitions directly, and this line is what it
-  // found.
-  try { await db.execute(`ALTER TABLE tasks ADD COLUMN notify_before_min INTEGER`); } catch (_) {}
-
-  // ── Income table ───────────────────────────────────────────
-  await db.execute(`CREATE TABLE IF NOT EXISTS income (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    amount REAL NOT NULL,
-    source TEXT DEFAULT 'other',
-    note TEXT DEFAULT '',
-    date TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now'))
-  )`);
-
-  // ── Finance: expenses ──────────────────────────────────────
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS expenses (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      amount REAL NOT NULL,
-      category TEXT NOT NULL DEFAULT 'other',
-      note TEXT DEFAULT '',
-      date TEXT NOT NULL,
-      created_at TEXT DEFAULT (datetime('now'))
-    )
-  `);
-
-  // Which unit the number in `amount` is counted in. Added now, while these
-  // tables hold a few hundred rows and there is no sync protocol that would
-  // have to be renegotiated, for the same reason the sync columns were: the
-  // expensive version of this migration is the one done later.
+  // They used to be written out here as well, two hundred lines of CREATE and
+  // ALTER that had to agree, statement for statement, with a file this app
+  // never read. The comment that sat at the top of them said so:
   //
-  // Backfilling existing rows as THB is not a guess. Every row that exists was
-  // entered when the app could only mean baht.
-  try { await db.execute("ALTER TABLE expenses ADD COLUMN currency TEXT NOT NULL DEFAULT 'THB'"); } catch (_) {}
-  try { await db.execute("ALTER TABLE income   ADD COLUMN currency TEXT NOT NULL DEFAULT 'THB'"); } catch (_) {}
-
-  // Money that should arrive and has not. Created here with every other table
-  // rather than by a helper in its own file, and NOT because that is tidier:
+  //   Two lists that have to agree is the shape of every bug this project has
+  //   spent a month removing, and the day they are merged is the day this
+  //   comment can go.
   //
-  // the helper called getDb(), and this runs INSIDE getDb(). getDb sets its
-  // ready-promise, then awaits this function; the helper then asked for the
-  // database, was handed that same not-yet-resolved promise, and waited for it.
-  // A promise waiting on a function waiting on that promise. The database never
-  // opened, so nothing loaded anywhere in the app — which reads as "it lost all
-  // my data" rather than as a hang, because the screens render fine and empty.
+  // This is that day. The last thing the two lists disagreed about was
+  // tasks.notify_before_min, which schema.sql had and this file did not, so
+  // every database on this machine was missing a column the code writing a task
+  // names in its INSERT. Nothing noticed for months, because every check builds
+  // its databases from schema.sql.
   //
-  // Every other table is created with a `db` already in hand. Following that
-  // made the deadlock impossible rather than merely absent.
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS expected_income (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      source TEXT NOT NULL,
-      amount REAL,
-      currency TEXT NOT NULL DEFAULT 'THB',
-      expect_date TEXT NOT NULL,
-      repeat TEXT,
-      note TEXT NOT NULL DEFAULT '',
-      status TEXT NOT NULL DEFAULT 'waiting',
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      deleted INTEGER NOT NULL DEFAULT 0
-    )
-  `);
-  await db.execute(
-    "CREATE INDEX IF NOT EXISTS idx_expected_status ON expected_income(status, expect_date)",
-  );
-
-  // ── Finance: budgets ───────────────────────────────────────
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS budgets (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      category TEXT NOT NULL,
-      limit_amount REAL NOT NULL,
-      month TEXT NOT NULL,
-      UNIQUE(category, month)
-    )
-  `);
-
-  // ── Finance: saving goals ──────────────────────────────────
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS saving_goals (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      target_amount REAL NOT NULL,
-      current_amount REAL NOT NULL DEFAULT 0,
-      deadline TEXT,
-      emoji TEXT DEFAULT '🎯',
-      is_completed INTEGER DEFAULT 0,
-      created_at TEXT DEFAULT (datetime('now'))
-    )
-  `);
-
-  // A limit and a target are amounts, and an amount without a unit is not one.
+  // WHY IT IS SAFE TO RUN THIS ON A DATABASE THAT ALREADY EXISTS
   //
-  // These two columns were the last money in the database with no currency
-  // beside it, which did not matter while the app could only mean baht and
-  // became a silent rewrite the moment it could not: a ฿5,000 food budget was
-  // read as $5,000 the instant the setting changed, with nothing on screen
-  // saying so, and a 30,000 goal likewise. Nothing was converted and nothing
-  // was wrong in the row — the number was simply reinterpreted.
+  // Every CREATE in the file is IF NOT EXISTS and there are no INSERTs in it,
+  // so on an existing database the whole file is a sequence of no-ops and
+  // duplicate-column errors. That is the file's own first rule, and check-sync
+  // enforces the rest of its shape.
   //
-  // Backfilling as THB is not a guess for the same reason it was not one for
-  // expenses: every row that exists was entered when baht was the only thing
-  // the app could mean.
-  try { await db.execute("ALTER TABLE budgets      ADD COLUMN currency TEXT NOT NULL DEFAULT 'THB'"); } catch (_) {}
-  try { await db.execute("ALTER TABLE saving_goals ADD COLUMN currency TEXT NOT NULL DEFAULT 'THB'"); } catch (_) {}
-
-  // ── App settings (key-value) ───────────────────────────────
-  // Generic store for app preferences like wallpaper path/enabled.
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS app_settings (
-      key TEXT PRIMARY KEY,
-      value TEXT
-    )
-  `);
-
-  // The half of the above that describes a person rather than a machine, and
-  // therefore the half that syncs. app_settings holds the pairing key and the
-  // WebDAV password, so what may leave this machine is decided by which table a
-  // row is in rather than by a predicate over key names that four separate
-  // places would have to get right identically. See schema.sql.
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS user_settings (
-      id     INTEGER PRIMARY KEY AUTOINCREMENT,
-      key    TEXT NOT NULL UNIQUE,
-      value  TEXT
-    )
-  `);
-
-  // Categories are user data, not a constant in the source. See the header of
-  // the category section in financeDatabase.ts for why. label is NULLABLE and
-  // null means "built-in, translate it", which keeps the nine defaults
-  // bilingual while letting anything the user makes carry a literal name.
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS expense_categories (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      key TEXT NOT NULL UNIQUE,
-      label TEXT,
-      emoji TEXT NOT NULL DEFAULT '📦',
-      color TEXT,
-      sort_order INTEGER NOT NULL DEFAULT 0,
-      is_hidden INTEGER NOT NULL DEFAULT 0
-    )
-  `);
-
-  // The smallest version of a task that still counts as having done it.
-  // "ล้างจาน" is a wall; "ล้างจาน 1 ใบ" is a doorway. Depression and ordinary
-  // procrastination both fail at the same place — starting — and shrinking the
-  // first step is the standard way through it. Nullable, because most tasks
-  // never need one.
-  try {
-    await db.execute("ALTER TABLE tasks ADD COLUMN min_step TEXT");
-  } catch (_) { /* already there */ }
-
-  // A bank reference is the one thing on a slip worth keeping: short, opaque,
-  // no account numbers or names in it, and it is what makes photographing the
-  // same slip twice detectable instead of silently doubling a month's total.
-  // Added separately from CREATE TABLE so existing databases get it too.
-  try {
-    await db.execute("ALTER TABLE expenses ADD COLUMN slip_ref TEXT");
-  } catch (_) { /* already there */ }
-  await db.execute(
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_slip_ref ON expenses(slip_ref) WHERE slip_ref IS NOT NULL",
-  );
-
-  // Setting a task aside without deleting it. Null means running; a datetime
-  // means paused until then. See types/index.ts for why this is not a boolean.
-  try {
-    await db.execute("ALTER TABLE tasks ADD COLUMN paused_until TEXT DEFAULT NULL");
-  } catch (_) { /* already there */ }
-
-  // When the person deleted it, as opposed to the several other ways a row can
-  // reach is_active = 0. Only rows with this set are offered back in the bin.
-  try {
-    await db.execute("ALTER TABLE tasks ADD COLUMN deleted_at TEXT DEFAULT NULL");
-  } catch (_) { /* already there */ }
+  // WHY THE IMPORT IS ?raw
+  //
+  // It inlines the text at build time, so there is no file to find at runtime
+  // and nothing to bundle beside the executable. Somebody tried this once
+  // before and could not, because the file lived outside this repository and
+  // the import would not resolve — see the note in tombstones.ts. It resolves
+  // now.
+  for (const statement of schemaStatements(SCHEMA_SQL)) {
+    try {
+      await db.execute(statement);
+    } catch (e) {
+      if (!isAlreadyThere(e)) throw e;
+    }
+  }
 
   // Empty the bin. Thirty days is long enough that a mistake noticed a month
   // later is still recoverable, and short enough that the bin does not turn
