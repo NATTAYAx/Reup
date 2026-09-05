@@ -1,4 +1,23 @@
 import { useState, useEffect, useRef } from "react";
+// The theme lived here as well as in lib/theme.ts: two AppTheme types, two
+// DEFAULT_THEMEs, two loadThemes, two saveThemes and two applyThemes, under the
+// same localStorage key. They had drifted by eight CSS rules and one opacity.
+//
+// The reason that was visible rather than merely untidy: both applyThemes write
+// to the same <style id="theme-override-style">, so whichever ran last replaced
+// the whole sheet. App.tsx calls the one in lib/theme at startup; this screen
+// called its own the moment a theme was picked. So the app rendered one set of
+// overrides until the settings screen was used, a different set afterwards, and
+// the first set again on the next launch.
+//
+// One copy now, in lib/theme.ts, holding the union of the two rule sets.
+import {
+  applyTheme,
+  DEFAULT_THEME,
+  loadTheme,
+  saveTheme,
+  type AppTheme,
+} from "../lib/theme";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Power, Image, Palette, Upload, Sparkles, Check, RotateCcw, Bell, BellOff, Clock, Languages, Globe, Wallet, ChevronDown, Moon } from "lucide-react";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
@@ -36,31 +55,9 @@ interface Props {
   onClose: () => void;
 }
 
-// ─── Theme type ────────────────────────────────────────────────────────────────
-export interface AppTheme {
-  primary: string;       // main accent color (buttons, highlights)
-  secondary: string;     // secondary accent
-  accent: string;        // bright pop color
-  bg: string;            // main background
-  bgCard: string;        // card background
-  border: string;        // border color
-  textMuted: string;     // muted text
-  name: string;          // theme name
-}
 
-export const DEFAULT_THEME: AppTheme = {
-  primary: "#7c3aed",
-  secondary: "#4f46e5",
-  accent: "#a78bfa",
-  bg: "#030712",
-  bgCard: "rgba(255,255,255,0.05)",
-  border: "rgba(255,255,255,0.10)",
-  textMuted: "rgba(255,255,255,0.40)",
-  name: "Default Purple",
-};
 
 // ─── Theme storage helpers ────────────────────────────────────────────────────
-const THEME_KEY = "gamesched_theme_v1";
 const SOUND_KEY  = "gamesched_notif_sound_v1"; // base64 data URL of custom sound
 
 export function loadCustomSound(): string | null {
@@ -72,104 +69,8 @@ export function saveCustomSound(dataUrl: string | null) {
 }
 const ICON_KEY  = "gamesched_icon_v1";
 
-export function loadTheme(): AppTheme {
-  try { return JSON.parse(localStorage.getItem(THEME_KEY) || "null") ?? DEFAULT_THEME; }
-  catch { return DEFAULT_THEME; }
-}
 
-export function saveTheme(t: AppTheme) {
-  localStorage.setItem(THEME_KEY, JSON.stringify(t));
-}
 
-export function applyTheme(t: AppTheme) {
-  const r = document.documentElement.style;
-  r.setProperty("--color-primary",   t.primary);
-  r.setProperty("--color-secondary", t.secondary);
-  r.setProperty("--color-accent",    t.accent);
-  r.setProperty("--color-bg",        t.bg);
-  r.setProperty("--color-card",      t.bgCard);
-  r.setProperty("--color-border",    t.border);
-  r.setProperty("--color-muted",     t.textMuted);
-
-  // Inject dynamic <style> that overrides all hardcoded Tailwind purple/indigo classes
-  const id = "theme-override-style";
-  let el = document.getElementById(id) as HTMLStyleElement | null;
-  if (!el) {
-    el = document.createElement("style");
-    el.id = id;
-    document.head.appendChild(el);
-  }
-
-  // hex to "r g b" for rgb() / rgba()
-  const hexToRgb = (hex: string) => {
-    const c = hex.replace("#", "");
-    return [parseInt(c.slice(0,2),16), parseInt(c.slice(2,4),16), parseInt(c.slice(4,6),16)];
-  };
-  const [pr, pg, pb] = hexToRgb(t.primary);
-  const [sr, sg, sb] = hexToRgb(t.secondary);
-  
-
-  el.textContent = `
-    /* Dynamic theme override — applyTheme() */
-
-    /* Gradient buttons */
-    .bg-gradient-to-r.from-purple-600.to-indigo-600 {
-      background: linear-gradient(135deg, ${t.primary}, ${t.secondary}) !important;
-    }
-    .bg-gradient-to-br.from-purple-500.to-indigo-600 {
-      background: linear-gradient(135deg, ${t.primary}, ${t.secondary}) !important;
-    }
-
-    /* Solid purple */
-    .bg-purple-600 { background-color: ${t.primary} !important; }
-
-    /* Purple text */
-    .text-purple-400 { color: ${t.accent} !important; }
-    .text-purple-300 { color: ${t.accent}cc !important; }
-
-    /* Gradient stops */
-    .from-purple-500, .from-purple-600 { --tw-gradient-from: ${t.primary} !important; }
-    .to-indigo-600 { --tw-gradient-to: ${t.secondary} !important; }
-    .from-purple-600\\/20 { --tw-gradient-from: rgba(${pr},${pg},${pb},0.20) !important; }
-    .from-purple-600\\/30 { --tw-gradient-from: rgba(${pr},${pg},${pb},0.30) !important; }
-    .to-indigo-600\\/20   { --tw-gradient-to: rgba(${sr},${sg},${sb},0.20) !important; }
-    .to-indigo-600\\/30   { --tw-gradient-to: rgba(${sr},${sg},${sb},0.30) !important; }
-
-    /* Tinted backgrounds */
-    .bg-purple-500\\/10, .bg-purple-600\\/10 { background-color: rgba(${pr},${pg},${pb},0.10) !important; }
-    .bg-purple-600\\/20 { background-color: rgba(${pr},${pg},${pb},0.20) !important; }
-    .bg-purple-600\\/90 { background-color: rgba(${pr},${pg},${pb},0.90) !important; }
-    .bg-indigo-500\\/10 { background-color: rgba(${sr},${sg},${sb},0.10) !important; }
-
-    /* Borders */
-    .border-purple-500\\/30 { border-color: rgba(${pr},${pg},${pb},0.30) !important; }
-    .border-purple-500\\/40 { border-color: rgba(${pr},${pg},${pb},0.40) !important; }
-    .border-purple-500\\/60 { border-color: rgba(${pr},${pg},${pb},0.60) !important; }
-    .hover\\:border-purple-500\\/60:hover { border-color: rgba(${pr},${pg},${pb},0.60) !important; }
-
-    /* Focus */
-    .focus\\:border-purple-500:focus { border-color: ${t.primary} !important; }
-    .focus\\:bg-purple-500\\/10:focus { background-color: rgba(${pr},${pg},${pb},0.10) !important; }
-    input:focus, select:focus { border-color: ${t.primary} !important; outline-color: ${t.primary} !important; }
-
-    /* Glow */
-    .theme-glow { box-shadow: 0 0 20px rgba(${pr},${pg},${pb},0.35) !important; }
-    .shadow-purple-500\\/30,
-    .shadow-lg.shadow-purple-500\\/30 {
-      box-shadow: 0 10px 15px -3px rgba(${pr},${pg},${pb},0.30) !important;
-    }
-
-    /* Ring */
-    .ring-2.ring-purple-500 { --tw-ring-color: ${t.primary} !important; }
-
-    /* Calendar badge */
-    .bg-purple-600.rounded-full { background-color: ${t.primary} !important; }
-
-    /* AI assist button highlight hover */
-    .hover\\:from-purple-600\\/30:hover { --tw-gradient-from: rgba(${pr},${pg},${pb},0.30) !important; }
-    .hover\\:to-indigo-600\\/30:hover   { --tw-gradient-to: rgba(${sr},${sg},${sb},0.30) !important; }
-  `;
-}
 
 // ─── Preset themes ─────────────────────────────────────────────────────────────
 const PRESET_THEMES: AppTheme[] = [

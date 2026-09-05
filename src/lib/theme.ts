@@ -85,7 +85,11 @@ export function applyTheme(t: AppTheme) {
 
     /* ── Text colors ── */
     .text-purple-400 { color: ${t.accent} !important; }
+    /* The two copies disagreed here: bb in this one, cc in the other. Keeping
+       bb, which is what every launch has drawn; cc only appeared after the
+       theme was changed from the settings screen and lasted until restart. */
     .text-purple-300 { color: ${t.accent}bb !important; }
+
 
     /* ── Gradient stops ── */
     .from-purple-500, .from-purple-600 { --tw-gradient-from: ${t.primary} !important; }
@@ -95,6 +99,13 @@ export function applyTheme(t: AppTheme) {
     .from-purple-600\\/30 { --tw-gradient-from: rgba(${pr},${pg},${pb},0.30) !important; }
     .to-indigo-600\\/20   { --tw-gradient-to:   rgba(${sr},${sg},${sb},0.20) !important; }
     .to-indigo-600\\/30   { --tw-gradient-to:   rgba(${sr},${sg},${sb},0.30) !important; }
+
+    /* Two rules that existed only in the copy of this function that used to
+       live in SettingsModal.tsx. Both copies wrote to the same <style> element,
+       so whichever ran last won the whole sheet: these worked while the
+       settings screen had been opened and vanished on the next launch. */
+    .hover\\:from-purple-600\\/30:hover { --tw-gradient-from: rgba(${pr},${pg},${pb},0.30) !important; }
+    .hover\\:to-indigo-600\\/30:hover   { --tw-gradient-to:   rgba(${sr},${sg},${sb},0.30) !important; }
 
     /* ── Transparent fills ── */
     .bg-purple-500\\/10, .bg-purple-600\\/10 { background-color: rgba(${pr},${pg},${pb},0.10) !important; }

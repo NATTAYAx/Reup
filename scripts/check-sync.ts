@@ -1597,6 +1597,45 @@ async function main(): Promise<void> {
       quiet.pushed === 0 && quiet.wrote === null);
   }
 
+  // ── one function paints the app, not two ────────────────────────────────
+  //
+  // The theme system existed twice: once in lib/theme.ts and once inside
+  // SettingsModal.tsx, under the same localStorage key, with two AppTheme
+  // types, two defaults and two applyThemes that had drifted by eight CSS rules
+  // and one opacity value.
+  //
+  // It was visible rather than merely untidy because both wrote to the same
+  // <style id="theme-override-style">, so whichever ran last replaced the whole
+  // sheet. App.tsx applies the one in lib/theme at startup; the settings screen
+  // applied its own the moment a theme was picked. The app rendered one set of
+  // overrides until that screen was used, a different set afterwards, and the
+  // first set again on the next launch.
+  //
+  // Same rule as the schema below: a thing that paints the app lives in one
+  // place, and a second definition is a bug waiting for the two to disagree.
+  {
+    const files = [
+      "src/lib/theme.ts",
+      "src/components/SettingsModal.tsx",
+      "src/App.tsx",
+      "src/components/NotificationOverlay.tsx",
+    ];
+    let defined = 0;
+    for (const f of files) {
+      const text = fs.readFileSync(f, "utf8");
+      defined += (text.match(/^export function applyTheme\b/gm) ?? []).length;
+      defined += (text.match(/^function applyTheme\b/gm) ?? []).length;
+    }
+    check("applyTheme is defined once", defined === 1);
+
+    const modal = fs.readFileSync("src/components/SettingsModal.tsx", "utf8");
+    check(
+      "the settings screen imports the theme rather than declaring it",
+      !/^export interface AppTheme\b/m.test(modal) &&
+        !/^export const DEFAULT_THEME\b/m.test(modal),
+    );
+  }
+
   // ── there is only one schema now ────────────────────────────────────────
   //
   // There used to be two. database.ts wrote out every CREATE and ALTER of its
