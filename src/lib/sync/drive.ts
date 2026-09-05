@@ -52,8 +52,10 @@ const API = "https://www.googleapis.com/drive/v3/files";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 
-/** The one scope this app asks for. Non-sensitive; see the header. */
-export const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+// The one scope this app asks for lives in oauth.ts, which is the only thing
+// that uses it. It was declared here as well, exported, and imported by
+// nobody — two copies of a string Google matches exactly, where the one that
+// mattered was the other one. See DRIVE_SCOPE there.
 
 // ─── tokens ──────────────────────────────────────────────────────────────────
 
