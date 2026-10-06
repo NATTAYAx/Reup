@@ -1,6 +1,60 @@
 // ─── App Theme System ─────────────────────────────────────────────────────────
+//
+// ─── WHAT A THEME IS, NOW THAT THERE ARE TWO MACHINES ────────────────────────
+//
+// It used to be a bag of colours in localStorage. That was the right shape while
+// the palette only had to reach the CSS on this screen. It is the wrong shape
+// for a choice that has to survive the trip to a phone.
+//
+// The two machines cannot share colours, and that is not a gap to be closed.
+// This side paints a web page and needs a gradient, a border alpha and a muted
+// text colour. The phone paints native views and needs a card, a raised
+// surface, a field, and an ink colour for text sitting on the primary — which
+// on three of its themes is black, because white failed a contrast test this
+// side has no equivalent of. Sending one side's palette to the other either
+// loses half the fields or carries colours nobody checked.
+//
+// So what travels is the *id*, and each machine looks up its own colours under
+// that name. Six ids, spelled identically in both languages, pinned by
+// store-vectors.json the same way the setting keys and the currency fallback
+// are: a string two languages must agree on where no compiler ever sees both
+// sides at once.
+//
+// ─── THE ONE RULE FOR AN ID THAT ARRIVES ─────────────────────────────────────
+//
+// An id this device does not know is not a change this device can make.
+//
+// That single rule is what lets this side keep a palette it worked out from a
+// wallpaper video without inventing a second mechanism for it. Such a palette is
+// stored under the id "custom", which is a real id here and a meaningless one on
+// the phone: the phone reads it, does not recognise it, and keeps the theme the
+// person picked there. The same rule covers anything a later version adds, in
+// either direction.
+//
+// The alternative was a cursor — remembering which id this device had already
+// acted on, so that reading an unchanged row would not overwrite a local
+// choice. That is a second piece of state to keep honest. Making the *reader*
+// refuse ids it cannot express does the same work with nothing to keep.
+//
+// ─── WHY THE BLOB IS STILL HERE ──────────────────────────────────────────────
+//
+// gamesched_theme_v1 now holds the custom palette and nothing else, and it never
+// travels. Choosing a preset no longer overwrites it, so switching to Forest for
+// an afternoon and back to the wallpaper colours later costs nothing.
+
+import { THEME_ID_KEY } from "./settingKeys";
+import { putSetting } from "./userSettings";
 
 export interface AppTheme {
+  /**
+   * The name both machines know this theme by.
+   *
+   * Absent means a palette this device worked out for itself — from a video or
+   * an image — which has no name to share. [themeId] turns that into "custom"
+   * at the one place it matters, so the AI and wallpaper paths that build a
+   * palette out of pixels do not each have to remember to stamp one on.
+   */
+  id?: string;
   name: string;
   primary: string;
   secondary: string;
@@ -11,8 +65,22 @@ export interface AppTheme {
   textMuted: string;
 }
 
-export const DEFAULT_THEME: AppTheme = {
-  name: "Default Purple",
+/** A palette with no shared name. Never matches anything on the other device. */
+export const CUSTOM_ID = "custom";
+
+/** Where the custom palette lives. Device-local, and not in SYNCED_SETTING_KEYS. */
+const THEME_BLOB_KEY = "gamesched_theme_v1";
+
+// ─── the six ─────────────────────────────────────────────────────────────────
+//
+// Same ids and same order as THEMES in the phone's core/Palette.kt. The colours
+// are not the same and are not meant to be — see the note at the top. What has
+// to match is which name is which position in a picker, so that "the third one"
+// means the same thing when somebody is describing it out loud.
+
+const VIOLET: AppTheme = {
+  id: "violet",
+  name: "Violet",
   primary: "#7c3aed",
   secondary: "#4f46e5",
   accent: "#a78bfa",
@@ -22,19 +90,195 @@ export const DEFAULT_THEME: AppTheme = {
   textMuted: "rgba(255,255,255,0.40)",
 };
 
-const THEME_KEY = "gamesched_theme_v1";
+const OCEAN: AppTheme = {
+  id: "ocean",
+  name: "Ocean",
+  primary: "#0891b2", secondary: "#0e7490", accent: "#22d3ee",
+  bg: "#020f14", bgCard: "rgba(8,145,178,0.08)", border: "rgba(34,211,238,0.15)",
+  textMuted: "rgba(255,255,255,0.40)",
+};
 
-export function loadTheme(): AppTheme {
+const FOREST: AppTheme = {
+  id: "forest",
+  name: "Forest",
+  primary: "#16a34a", secondary: "#15803d", accent: "#4ade80",
+  bg: "#020d05", bgCard: "rgba(22,163,74,0.08)", border: "rgba(74,222,128,0.15)",
+  textMuted: "rgba(255,255,255,0.40)",
+};
+
+const EMBER: AppTheme = {
+  id: "ember",
+  name: "Ember",
+  primary: "#d97706", secondary: "#b45309", accent: "#fbbf24",
+  bg: "#0c0800", bgCard: "rgba(217,119,6,0.08)", border: "rgba(251,191,36,0.15)",
+  textMuted: "rgba(255,255,255,0.40)",
+};
+
+const ROSE: AppTheme = {
+  id: "rose",
+  name: "Rose",
+  primary: "#e11d48", secondary: "#be123c", accent: "#fb7185",
+  bg: "#0f0509", bgCard: "rgba(225,29,72,0.08)", border: "rgba(251,113,133,0.15)",
+  textMuted: "rgba(255,255,255,0.40)",
+};
+
+/**
+ * For the days when a colour that wants something from you is too much.
+ *
+ * New on this side, and carried over from the phone rather than invented: it
+ * was one of the six there and had no counterpart here, which meant picking it
+ * on the phone would have sent this machine an id it could not honour. A theme
+ * that exists on one device only is a theme that cannot be chosen from the
+ * other.
+ */
+const QUIET: AppTheme = {
+  id: "quiet",
+  name: "Quiet",
+  primary: "#4b5563", secondary: "#374151", accent: "#c3c8cf",
+  bg: "#08090b", bgCard: "rgba(255,255,255,0.05)", border: "rgba(255,255,255,0.10)",
+  textMuted: "rgba(255,255,255,0.40)",
+};
+
+export const PRESET_THEMES: readonly AppTheme[] = [VIOLET, OCEAN, FOREST, EMBER, ROSE, QUIET];
+
+export const DEFAULT_THEME: AppTheme = VIOLET;
+
+/** The ids, in order. What the vector file pins and the phone must reproduce. */
+export const THEME_IDS: readonly string[] = PRESET_THEMES.map(t => t.id as string);
+
+/**
+ * The names the presets used to carry, for installs that predate ids.
+ *
+ * Kept explicitly rather than matched loosely, because the migration below is a
+ * one-way door: read the old blob wrong once and the person's theme silently
+ * becomes "custom" with the right colours in it, which looks fine and stops
+ * following the other machine for ever after.
+ */
+const LEGACY_NAMES: Readonly<Record<string, string>> = {
+  "Default Purple": "violet",
+  "Ocean Cyan": "ocean",
+  "Forest": "forest",
+  "Amber": "ember",
+  "Rose Gold": "rose",
+};
+
+/** What this theme is called on the wire. */
+export function themeId(t: AppTheme): string {
+  return t.id ?? CUSTOM_ID;
+}
+
+export function presetById(id: string | null | undefined): AppTheme | null {
+  if (!id) return null;
+  return PRESET_THEMES.find(t => t.id === id) ?? null;
+}
+
+function cacheGet(key: string): string | null {
   try {
-    const stored = localStorage.getItem(THEME_KEY);
-    return stored ? JSON.parse(stored) : DEFAULT_THEME;
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The custom palette, or the default if there is not one worth reading.
+ *
+ * Merged onto the default rather than trusted whole, so a blob written by an
+ * older version — or half-written by a quota error — costs one wrong colour
+ * instead of a screen with `undefined` in every CSS variable.
+ */
+function customTheme(): AppTheme {
+  const raw = cacheGet(THEME_BLOB_KEY);
+  if (!raw) return DEFAULT_THEME;
+  try {
+    const v: unknown = JSON.parse(raw);
+    if (typeof v !== "object" || v === null || Array.isArray(v)) return DEFAULT_THEME;
+    const out: Record<string, unknown> = { ...DEFAULT_THEME };
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      if (k !== "id" && typeof val === "string" && val !== "") out[k] = val;
+    }
+    out.id = CUSTOM_ID;
+    return out as unknown as AppTheme;
   } catch {
     return DEFAULT_THEME;
   }
 }
 
+/**
+ * Which id an install that predates ids should be treated as having.
+ *
+ * By name, against the names those presets actually carried. Anything else is
+ * a palette somebody derived, and "custom" is the honest answer for it.
+ */
+export function migratedThemeId(rawBlob: string | null | undefined): string {
+  if (!rawBlob) return DEFAULT_THEME.id as string;
+  try {
+    const v: unknown = JSON.parse(rawBlob);
+    if (typeof v !== "object" || v === null) return CUSTOM_ID;
+    const name = (v as Record<string, unknown>).name;
+    if (typeof name !== "string") return CUSTOM_ID;
+    const legacy = LEGACY_NAMES[name];
+    if (legacy) return legacy;
+    const current = PRESET_THEMES.find(t => t.name === name);
+    return current ? (current.id as string) : CUSTOM_ID;
+  } catch {
+    return CUSTOM_ID;
+  }
+}
+
+/**
+ * The theme for an id that arrived from the other machine, or null.
+ *
+ * Null means the id names a theme this device cannot express, which is not a
+ * change it can make — see the rule at the top of this file. The caller leaves
+ * the screen alone.
+ */
+export function themeForIncomingId(id: string | null | undefined): AppTheme | null {
+  if (!id) return null;
+  if (id === CUSTOM_ID) return customTheme();
+  return presetById(id);
+}
+
+export function loadTheme(): AppTheme {
+  const stored = cacheGet(THEME_ID_KEY);
+  if (stored === null || stored === "") {
+    // First launch after ids existed. Work out which one this install has been
+    // running, and write it down through putSetting so the row goes with it —
+    // if the database is not attached yet the cache alone is written and the
+    // row is seeded by hydrateSettings on the next launch.
+    const id = migratedThemeId(cacheGet(THEME_BLOB_KEY));
+    putSetting(THEME_ID_KEY, id);
+    return id === CUSTOM_ID ? customTheme() : (presetById(id) ?? DEFAULT_THEME);
+  }
+  if (stored === CUSTOM_ID) return customTheme();
+  // Locally, an unknown id falls back rather than refusing: this is the value
+  // this device is already running on, and there is no current theme to keep.
+  return presetById(stored) ?? DEFAULT_THEME;
+}
+
 export function saveTheme(t: AppTheme) {
-  localStorage.setItem(THEME_KEY, JSON.stringify(t));
+  const id = themeId(t);
+  if (id === CUSTOM_ID) {
+    try {
+      localStorage.setItem(THEME_BLOB_KEY, JSON.stringify({ ...t, id: CUSTOM_ID }));
+    } catch {
+      /* quota — the id still travels, and the colours come back as the default */
+    }
+  }
+  putSetting(THEME_ID_KEY, id);
+}
+
+/**
+ * Follow a theme the other machine picked.
+ *
+ * Called when a sync reports that user_settings moved. Returns whether anything
+ * was applied, which is only used by the checker.
+ */
+export function reapplyThemeFromSettings(): boolean {
+  const next = themeForIncomingId(cacheGet(THEME_ID_KEY));
+  if (!next) return false;
+  applyTheme(next);
+  return true;
 }
 
 function hexToRgb(hex: string): [number, number, number] {

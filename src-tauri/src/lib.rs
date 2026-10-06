@@ -16,6 +16,11 @@ struct NotificationPayload {
     urgency: String,
     time_left: String,
     category: String,
+    /// Show the card without a sound. Decided in notifier.ts, which knows the
+    /// task and the clock; the overlay only obeys it. Defaults to false so a
+    /// payload from a build that did not send it behaves as it always did.
+    #[serde(default)]
+    silent: bool,
 }
 
 type PendingQueue = Arc<Mutex<Vec<NotificationPayload>>>;
@@ -230,11 +235,18 @@ fn show_notification(
     urgency: String,
     time_left: String,
     category: String,
+    silent: Option<bool>,
 ) -> Result<(), String> {
     use tauri::Emitter;
     const LABEL: &str = "notification-overlay";
 
-    let payload = NotificationPayload { task_name, urgency, time_left, category };
+    let payload = NotificationPayload {
+        task_name,
+        urgency,
+        time_left,
+        category,
+        silent: silent.unwrap_or(false),
+    };
 
     // Invalidates any teardown already counting down, so a toast arriving at
     // 4:59 cannot be met with the window vanishing at 5:00.

@@ -395,3 +395,11 @@ ALTER TABLE expected_income ADD COLUMN updated_at TEXT;
 -- @@
 ALTER TABLE tasks ADD COLUMN notify_before_min INTEGER;
 -- @@
+-- Allowed to ring through quiet hours, and only at its last call: the final
+-- ten-minute warning, or the one reminder when the notice window is that short
+-- anyway. Quiet hours otherwise show a reminder without a sound. Set by the
+-- person on the task, in advance, the way an alarm is - never inferred from
+-- is_urgent, which answers how important a thing is and not whether it is worth
+-- waking somebody for. See lib/chime.ts.
+ALTER TABLE tasks ADD COLUMN ring_in_quiet INTEGER NOT NULL DEFAULT 0;
+-- @@

@@ -8,6 +8,7 @@ import { loadTheme, type AppTheme } from "../lib/theme";
 import { refreshLang } from "../lib/i18n";
 import { loadToastStyle, STYLE_HEIGHT, type ToastStyle } from "../lib/toastStyle";
 import { Toast, type ToastData } from "./ToastCard";
+import { chimeOn } from "../lib/chime";
 
 const TOAST_WIDTH = 356;
 const TOAST_GAP   = 10;
@@ -36,6 +37,61 @@ function playChime(urgency: "critical" | "warning") {
       o.start(t0); o.stop(t0 + 0.36);
     });
   } catch {}
+}
+
+// ─── the sound, and when it is allowed ───────────────────────────────────────
+//
+// A chime is a pointer to a card. Three things could leave it pointing at
+// nothing, and each one was a person jumping at a noise with no way to find out
+// what it was.
+//
+// THE SWITCH. Off means the card arrives silently. See lib/chime.ts.
+//
+// QUIET HOURS. Decided in notifier.ts, not here, and handed over as `silent`
+// on the payload. That is where the task and the clock are both known, and the
+// decision needs both: inside quiet hours a reminder is shown without a sound,
+// unless its task was marked ring_in_quiet and this is its last call. This
+// window knows neither which task a card is about nor whether it is the last
+// warning, and the first version of this gate, which checked quiet hours here,
+// could not have honoured that exception without guessing. One owner; this
+// side obeys. check-sync fails if the overlay starts deciding quiet hours again.
+//
+// NOT ON SCREEN. After five idle minutes the overlay window is torn down, so
+// the first reminder after that rebuilds it: the payload is handed over as the
+// page mounts, and the window is shown 350ms later. The chime used to play at
+// the hand-over, before the window existed on screen. Whatever stopped the show
+// - a hide still in flight from the previous card, a window placed off the
+// monitor - left the sound and nothing else. Now it waits for the page to
+// become visible, briefly, and is dropped if that never happens. A reminder
+// nobody could see is still in the log. It is no longer a noise.
+//
+// If the page reports itself visible while it is not, this degrades to exactly
+// what it replaced, which is why it is safe to have even unverified.
+
+/** Long enough for a cold rebuild's 350ms show, short enough not to be late. */
+const CHIME_WAIT_MS = 1500;
+
+function chimeWhenSeen(urgency: "critical" | "warning", silent: boolean): void {
+  if (silent) return;
+  if (!chimeOn()) return;
+  if (document.visibilityState === "visible") {
+    playChime(urgency);
+    return;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let done = false;
+  const finish = (play: boolean) => {
+    if (done) return;
+    done = true;
+    document.removeEventListener("visibilitychange", onChange);
+    if (timer !== undefined) clearTimeout(timer);
+    if (play) playChime(urgency);
+  };
+  const onChange = () => {
+    if (document.visibilityState === "visible") finish(true);
+  };
+  document.addEventListener("visibilitychange", onChange);
+  timer = setTimeout(() => finish(false), CHIME_WAIT_MS);
 }
 
 function getDuration() {
@@ -105,10 +161,11 @@ export default function NotificationOverlay() {
   }, [toasts.length]);
 
   // Stable ref so the listener closure never captures a stale addToast
-  const addToastRef = useRef<(n: string, u: string, t: string, c: string) => void>(undefined as any);
+  const addToastRef = useRef<(n: string, u: string, t: string, c: string, s?: boolean) => void>(undefined as any);
 
   const addToast = useCallback((
     task_name: string, urgency: string, time_left: string, category: string,
+    silent?: boolean,
   ) => {
     // Dedup: if this task_name was shown within the last 5 seconds, skip.
     // This prevents the Rust retry-emit from creating duplicate toasts.
@@ -145,7 +202,7 @@ export default function NotificationOverlay() {
       requestAnimationFrame(() => { document.body.style.opacity = "1"; });
     });
 
-    playChime(urgency as "critical" | "warning");
+    chimeWhenSeen(urgency as "critical" | "warning", silent === true);
     const tm = setTimeout(() => dismiss(id), durationMs);
     timers.current.set(id, tm);
   }, [dismiss]);
@@ -162,20 +219,22 @@ export default function NotificationOverlay() {
     // The dedup map in addToast ensures retries don't create duplicate toasts.
     const unlisten = listen<{
       task_name: string; urgency: string; time_left: string; category: string;
+      silent?: boolean;
     }>("new-toast", e => {
       addToastRef.current?.(
         e.payload.task_name,
         e.payload.urgency,
         e.payload.time_left,
         e.payload.category,
+        e.payload.silent,
       );
     });
 
-    invoke<Array<{ task_name: string; urgency: string; time_left: string; category: string }>>(
+    invoke<Array<{ task_name: string; urgency: string; time_left: string; category: string; silent?: boolean }>>(
       "overlay_ready",
     )
       .then(p => p.forEach(x =>
-        addToastRef.current?.(x.task_name, x.urgency, x.time_left, x.category),
+        addToastRef.current?.(x.task_name, x.urgency, x.time_left, x.category, x.silent),
       ))
       .catch(() => {});
 

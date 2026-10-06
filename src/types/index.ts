@@ -24,6 +24,8 @@ export interface Task {
   specific_date: string | null;
   is_priority: boolean;
   is_urgent: boolean;
+  /** May ring through quiet hours, at its last call only. See lib/chime.ts. */
+  ring_in_quiet?: boolean | number;
   is_active: boolean;
   completed_until: string | null;  // ISO datetime — task is "done" until this time
   /** Null means the time floats: it is read in whatever zone the app is set to,

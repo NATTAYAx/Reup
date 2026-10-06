@@ -13,15 +13,18 @@ import { useState, useEffect, useRef } from "react";
 // One copy now, in lib/theme.ts, holding the union of the two rule sets.
 import {
   applyTheme,
+  PRESET_THEMES,
+  themeId,
   DEFAULT_THEME,
   loadTheme,
   saveTheme,
   type AppTheme,
 } from "../lib/theme";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, Power, Image, Palette, Upload, Sparkles, Check, RotateCcw, Bell, BellOff, Clock, Languages, Globe, Wallet, ChevronDown, Moon } from "lucide-react";
+import { X, Power, Image, Palette, Upload, Sparkles, Check, RotateCcw, Bell, BellOff, Clock, Languages, Globe, Wallet, ChevronDown, Moon, Volume2, VolumeX } from "lucide-react";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { isMuted, setMuted, getQuietHours, setQuietHours, type QuietHours } from "../lib/notifier";
+import { chimeOn, setChimeOn } from "../lib/chime";
 import TimePicker from "./TimePicker";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -72,35 +75,6 @@ const ICON_KEY  = "gamesched_icon_v1";
 
 
 
-// ─── Preset themes ─────────────────────────────────────────────────────────────
-const PRESET_THEMES: AppTheme[] = [
-  DEFAULT_THEME,
-  {
-    name: "Ocean Cyan",
-    primary: "#0891b2", secondary: "#0e7490", accent: "#22d3ee",
-    bg: "#020f14", bgCard: "rgba(8,145,178,0.08)", border: "rgba(34,211,238,0.15)",
-    textMuted: "rgba(255,255,255,0.40)",
-  },
-  {
-    name: "Rose Gold",
-    primary: "#e11d48", secondary: "#be123c", accent: "#fb7185",
-    bg: "#0f0509", bgCard: "rgba(225,29,72,0.08)", border: "rgba(251,113,133,0.15)",
-    textMuted: "rgba(255,255,255,0.40)",
-  },
-  {
-    name: "Forest",
-    primary: "#16a34a", secondary: "#15803d", accent: "#4ade80",
-    bg: "#020d05", bgCard: "rgba(22,163,74,0.08)", border: "rgba(74,222,128,0.15)",
-    textMuted: "rgba(255,255,255,0.40)",
-  },
-  {
-    name: "Amber",
-    primary: "#d97706", secondary: "#b45309", accent: "#fbbf24",
-    bg: "#0c0800", bgCard: "rgba(217,119,6,0.08)", border: "rgba(251,191,36,0.15)",
-    textMuted: "rgba(255,255,255,0.40)",
-  },
-];
-
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function SettingsModal({ open, onClose }: Props) {
   const [autostart, setAutostart]       = useState(false);
@@ -114,6 +88,7 @@ export default function SettingsModal({ open, onClose }: Props) {
   const [aiError, setAiError]           = useState("");
   const [saved, setSaved]               = useState(false);
   const [notifMuted, setNotifMuted]     = useState(false);
+  const [chime, setChime]               = useState<boolean>(chimeOn);
   const [quiet, setQuiet]               = useState<QuietHours>(getQuietHours);
   // Read when the panel opens. It only grows while a reminder is firing, and
   // nobody is reading this list at that moment.
@@ -240,6 +215,7 @@ export default function SettingsModal({ open, onClose }: Props) {
       setAiPreview(null);
       setAiError("");
       setNotifMuted(isMuted());
+      setChime(chimeOn());
       const stored = parseInt(localStorage.getItem("gamesched_toast_duration_sec") || "8");
       setToastDuration(isNaN(stored) ? 8 : stored);
       const snd = loadCustomSound();
@@ -454,6 +430,12 @@ export default function SettingsModal({ open, onClose }: Props) {
     const next = !notifMuted;
     setMuted(next);
     setNotifMuted(next);
+  };
+
+  const toggleChime = () => {
+    const next = !chime;
+    setChimeOn(next);
+    setChime(next);
   };
 
   const handleDurationChange = (v: number) => {
@@ -948,6 +930,31 @@ Rules:
                     </div>
                     {!notifMuted && (
                       <div className="border-t border-white/8 pt-3 space-y-3">
+                        {/* Sound - the card without the noise. A switch of
+                            its own because the one above removes the card as
+                            well, and "I am in the room and it makes me jump"
+                            wants the card. Stays on this machine: it is about
+                            these speakers. See lib/chime.ts. */}
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-start gap-2 min-w-0">
+                            {chime
+                              ? <Volume2 size={13} className="text-white/40 mt-0.5 shrink-0" />
+                              : <VolumeX size={13} className="text-white/40 mt-0.5 shrink-0" />}
+                            <div className="min-w-0">
+                              <span className="text-white/60 text-xs font-semibold">{t("settings.chime")}</span>
+                              <p className="text-white/30 text-[11px] leading-relaxed">
+                                {chime ? t("settings.chimeOn") : t("settings.chimeOff")}
+                              </p>
+                            </div>
+                          </div>
+                          <button
+                            onClick={toggleChime}
+                            className={`w-10 h-5 rounded-full transition-all relative shrink-0 ${chime ? "bg-purple-500" : "bg-white/20"}`}
+                          >
+                            <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-all ${chime ? "left-5.5" : "left-0.5"}`} />
+                          </button>
+                        </div>
+
                         {/* Quiet hours — a window, not an off switch.
                             Mute is all-or-nothing and that is the wrong shape
                             for "not at five in the morning". Reminders held
@@ -1026,6 +1033,7 @@ Rules:
                                   })}
                                   {"  "}{e.name}
                                   {e.final ? ` ${t("notifyLog.final")}` : ""}
+                                  {e.silent ? ` ${t("notifyLog.silent")}` : ""}
                                 </p>
                               ))}
                             </div>
@@ -1568,20 +1576,20 @@ Rules:
                   {/* Preset themes */}
                   <div>
                     <p className="text-white/40 text-xs font-semibold uppercase tracking-widest mb-2 px-1">{t("settings.presets")}</p>
-                    <div className="grid grid-cols-5 gap-2">
+                    <div className="grid grid-cols-6 gap-2">
                       {PRESET_THEMES.map(theme => (
                         <button
-                          key={theme.name}
+                          key={theme.id}
                           onClick={() => applyAndSave(theme)}
                           title={theme.name}
                           className={`relative h-10 rounded-xl border transition-all overflow-hidden ${
-                            currentTheme.name === theme.name
+                            themeId(currentTheme) === theme.id
                               ? "border-white/50 scale-105 shadow-lg"
                               : "border-white/10 hover:border-white/30 hover:scale-105"
                           }`}
                           style={{ background: `linear-gradient(135deg, ${theme.primary}, ${theme.secondary})` }}
                         >
-                          {currentTheme.name === theme.name && (
+                          {themeId(currentTheme) === theme.id && (
                             <div className="absolute inset-0 flex items-center justify-center">
                               <Check size={14} className="text-white drop-shadow" />
                             </div>
@@ -1589,9 +1597,9 @@ Rules:
                         </button>
                       ))}
                     </div>
-                    <div className="grid grid-cols-5 gap-2 mt-1">
+                    <div className="grid grid-cols-6 gap-2 mt-1">
                       {PRESET_THEMES.map(theme => (
-                        <p key={theme.name} className="text-white/25 text-center" style={{ fontSize: "9px" }}>
+                        <p key={theme.id} className="text-white/25 text-center" style={{ fontSize: "9px" }}>
                           {theme.name.split(" ")[0]}
                         </p>
                       ))}

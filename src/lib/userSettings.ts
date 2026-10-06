@@ -55,29 +55,35 @@ export interface SettingsDb {
 // is one more thing that can be updated on one side only.
 
 /** `{ enabled, start, end }`, as notifier.ts writes it. */
-export const QUIET_KEY = "gamesched_quiet_hours_v1";
+import { CURRENCY_KEY, LANG_KEY, QUIET_KEY, THEME_ID_KEY } from "./settingKeys";
+
+export { CURRENCY_KEY, LANG_KEY, QUIET_KEY, THEME_ID_KEY };
 /** An ISO 4217 code. */
-export const CURRENCY_KEY = "gamesched_currency";
 /** "th" or "en". */
-export const LANG_KEY = "gamesched_lang_v1";
 /** Minutes after midnight where this person's day starts. "0" is midnight. */
 export const DAY_START_KEY = "gamesched_day_start_v1";
 
 /**
  * Everything that travels, and nothing else.
  *
- * Four, and each one earns its place by being about the person rather than the
- * hardware in front of them. Theme, sound file, toast style, tray hints and the
- * wallpaper path are all about a screen; the API keys and the pairing code are
- * secrets; the "important" card is deliberately never sent anywhere. None of
- * them is here, and adding a fourth means adding it to this list and nowhere
+ * Five, and each one earns its place by being about the person rather than the
+ * hardware in front of them. The sound file, the toast style, the tray hints and
+ * the wallpaper path are all about a screen; the API keys and the pairing code
+ * are secrets; the "important" card is deliberately never sent anywhere. None of
+ * them is here, and adding a sixth means adding it to this list and nowhere
  * else.
+ *
+ * The theme is the one that had to change shape to get on this list. It was a
+ * whole palette object, and a palette is about a screen — but *which* theme is
+ * about a person, so what travels is the id and each machine keeps its own
+ * colours under that name. lib/theme.ts is where that is argued.
  */
 export const SYNCED_SETTING_KEYS: readonly string[] = [
   QUIET_KEY,
   CURRENCY_KEY,
   LANG_KEY,
   DAY_START_KEY,
+  THEME_ID_KEY,
 ];
 
 // ─── when this person's day starts ───────────────────────────────────────────
@@ -194,13 +200,13 @@ export function parseQuiet(raw: string | null | undefined): QuietSetting {
  * fires the outbox trigger and puts a row on the wire — every time, on both
  * devices, for ever.
  */
-const UPSERT =
+export const SETTING_UPSERT_SQL =
   `INSERT INTO user_settings (key, value) VALUES (?, ?)
    ON CONFLICT(key) DO UPDATE SET value = excluded.value
     WHERE user_settings.value IS NOT excluded.value`;
 
 export async function writeSetting(db: SettingsDb, key: string, value: string): Promise<void> {
-  await db.execute(UPSERT, [key, value]);
+  await db.execute(SETTING_UPSERT_SQL, [key, value]);
 }
 
 export async function readSettings(db: SettingsDb): Promise<Map<string, string>> {

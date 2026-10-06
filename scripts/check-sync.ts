@@ -32,7 +32,18 @@
 import { isAlreadyThere, schemaStatements } from "../src/lib/schemaFile";
 import { applySyncMigrations } from "../src/lib/syncMeta";
 import { HISTORY_SQL, doneDates, hasHistory, type TaskEvent } from "../src/lib/history";
-import { KNOWN_KEYS, isKnownKey, sanitizeForBackup } from "../src/lib/storageKeys";
+import { KNOWN_KEYS, RETIRED_KEYS, isKnownKey, sanitizeForBackup } from "../src/lib/storageKeys";
+import {
+  CUSTOM_ID,
+  PRESET_THEMES,
+  THEME_IDS,
+  migratedThemeId,
+  presetById,
+  themeForIncomingId,
+} from "../src/lib/theme";
+import { SYNCED_SETTING_KEYS, THEME_ID_KEY } from "../src/lib/userSettings";
+import { CHIME_KEY, chimeOn, quietTakesSound } from "../src/lib/chime";
+import { TASK_COLUMNS as TASK_COLUMNS_Q, TASK_EDITABLE as TASK_EDITABLE_Q } from "../src/lib/taskDraft";
 import { sync, type SyncState } from "../src/lib/sync/engine";
 import { SqlLocalStore, SYNCED_TABLES, dbNow, type Db } from "../src/lib/sync/sqlLocalStore";
 import {
@@ -1045,6 +1056,144 @@ async function main(): Promise<void> {
         .sort();
       check(`every line in storageKeys is a key something still writes${orphans.length ? " — orphaned: " + orphans.join(", ") : ""}`,
         orphans.length === 0);
+
+      // A key is live or retired, never both and never neither. Without this,
+      // retiring a key by adding it to one list and forgetting to remove it
+      // from the other reads as still being written.
+      const bothLists = KNOWN_KEYS.filter(k => RETIRED_KEYS.includes(k));
+      check(
+        `no key is both live and retired${bothLists.length ? " — " + bothLists.join(", ") : ""}`,
+        bothLists.length === 0,
+      );
+      const retiredStillWritten = RETIRED_KEYS.filter(k => found.has(k));
+      check(
+        `nothing writes a retired key${retiredStillWritten.length ? " — " + retiredStillWritten.join(", ") : ""}`,
+        retiredStillWritten.length === 0,
+      );
+
+      // ─── the theme, which is now a name rather than a bag of colours ──────
+      //
+      // Everything below is about one string crossing a language boundary with
+      // no compiler on either side of it. The failure it guards against is not
+      // an error: an id this machine spells differently is an id the phone
+      // reads, does not recognise, and correctly refuses - so picking that one
+      // theme silently stops working while the other five keep working, which
+      // is the hardest shape of bug to be told about.
+
+      check("every preset theme has an id", PRESET_THEMES.every(x => typeof x.id === "string" && x.id !== ""));
+      check("no two presets share an id", new Set(THEME_IDS).size === THEME_IDS.length);
+      check("there are six of them, as on the phone", THEME_IDS.length === 6);
+      // "custom" means a palette this device worked out and cannot share. If it
+      // were also a preset id the phone would match it and adopt colours nobody
+      // checked for contrast.
+      check("custom is not one of the six", !THEME_IDS.includes(CUSTOM_ID));
+
+      check("a preset id resolves to that preset", presetById("forest")?.name === "Forest");
+      check("an id from a later version resolves to nothing", presetById("aubergine") === null);
+
+      // The rule the whole design rests on: an id this device does not know is
+      // not a change this device can make. Returning the default instead would
+      // mean a phone on Quiet flipping the desktop to Violet the first time a
+      // build without Quiet in it read the row.
+      check("an unknown id changes nothing", themeForIncomingId("aubergine") === null);
+      check("nothing at all changes nothing", themeForIncomingId(null) === null && themeForIncomingId("") === null);
+      check("a known id is a change", themeForIncomingId("rose")?.id === "rose");
+      // Custom is a real id on this side, and only on this side.
+      check("custom resolves here", themeForIncomingId(CUSTOM_ID) !== null);
+
+      // Installs that predate ids have a blob with a name in it. Reading it
+      // wrong once is a one-way door: the theme silently becomes custom with
+      // the right colours in it, looks fine, and stops following the other
+      // machine for ever after.
+      check("a theme from before ids keeps the one it had",
+        migratedThemeId(JSON.stringify({ name: "Ocean Cyan" })) === "ocean" &&
+        migratedThemeId(JSON.stringify({ name: "Amber" })) === "ember" &&
+        migratedThemeId(JSON.stringify({ name: "Default Purple" })) === "violet");
+      check("a palette worked out from a picture is custom",
+        migratedThemeId(JSON.stringify({ name: "Sunset over the river" })) === CUSTOM_ID);
+      check("no blob at all is the default rather than custom",
+        migratedThemeId(null) === "violet");
+      check("an unreadable blob does not throw",
+        migratedThemeId("{not json") === CUSTOM_ID);
+
+      check("the theme id travels with the other settings",
+        SYNCED_SETTING_KEYS.includes(THEME_ID_KEY));
+      // The palette blob is the one thing here that must NOT travel: it is this
+      // machine's own colours, in this machine's own fields.
+      check("the palette itself does not travel",
+        !SYNCED_SETTING_KEYS.includes("gamesched_theme_v1"));
+
+      // And the copy the phone is actually pinned to. This is the check that
+      // fires when the ids change here and nobody re-runs the generator, which
+      // is the only way the two lists can drift now.
+      {
+        const vectorPath = path.resolve("../reup-shared/store-vectors.json");
+        if (fs.existsSync(vectorPath)) {
+          const v = JSON.parse(fs.readFileSync(vectorPath, "utf8")) as Record<string, unknown>;
+          const pinned = v.themeIds;
+          check("the phone is pinned to these same six, in this order",
+            Array.isArray(pinned) && JSON.stringify(pinned) === JSON.stringify([...THEME_IDS]));
+        }
+      }
+
+      // ─── the sound ────────────────────────────────────────────────────────
+      //
+      // A chime at midnight with nothing on the screen was the report. The
+      // overlay now plays sound through one gate that asks three things: is the
+      // switch on, is it outside quiet hours, is the card actually on screen.
+      // The gate is only worth anything if nothing goes round it, and the next
+      // person to add a sound will reach for playChime, because it is right
+      // there with an obvious name.
+
+      check("the sound switch is on until somebody turns it off", chimeOn() === true);
+      check("the sound switch stays on this machine", !SYNCED_SETTING_KEYS.includes(CHIME_KEY));
+      {
+        const src = fs.readFileSync(path.resolve("src/components/NotificationOverlay.tsx"), "utf8");
+        const gateAt = src.indexOf("function chimeWhenSeen(");
+        // The gate's body ends at the first closing brace in column zero.
+        const gateEnd = gateAt < 0 ? -1 : src.indexOf("\n}", gateAt);
+        const calls: number[] = [];
+        const re = /playChime\(/g;
+        for (let m = re.exec(src); m; m = re.exec(src)) {
+          const isDefinition = src.slice(Math.max(0, m.index - 9), m.index) === "function ";
+          if (!isDefinition) calls.push(m.index);
+        }
+        const outside = calls.filter(i => gateAt < 0 || i < gateAt || i > gateEnd);
+        check("nothing plays the chime except through the gate",
+          gateAt >= 0 && calls.length > 0 && outside.length === 0);
+        check("a new card asks the gate, not the speaker",
+          /chimeWhenSeen\(urgency/.test(src));
+      }
+
+      // ─── who may ring through quiet hours ─────────────────────────────────
+      //
+      // Quiet hours show a reminder without a sound. A task the person marked
+      // ring_in_quiet is let through - and only at its last call, because the
+      // notice that opens four hours before a 02:00 deadline is not worth a
+      // sound in somebody's night, and the one ten minutes before it is.
+
+      check("outside quiet hours nothing is silenced",
+        !quietTakesSound(false, 0, false) && !quietTakesSound(false, 1, true));
+      check("inside quiet hours an ordinary reminder is silent",
+        quietTakesSound(true, 0, false) && quietTakesSound(true, 0, true));
+      // The midnight case, kept as a check: daily, resets 04:00, four hours of
+      // notice, so the main reminder opens at 00:00 and is not the last call.
+      check("a task allowed through stays silent before its last call",
+        quietTakesSound(true, 1, false));
+      check("and rings at its last call", !quietTakesSound(true, 1, true));
+      check("the flag reads the way SQLite, a form and a synced row hand it over",
+        !quietTakesSound(true, true, true) && !quietTakesSound(true, "1", true) &&
+        quietTakesSound(true, "0", true) && quietTakesSound(true, null, true));
+      check("the column is one the phone can write too",
+        (TASK_COLUMNS_Q as readonly string[]).includes("ring_in_quiet") && TASK_EDITABLE_Q.ring_in_quiet === "flag");
+      {
+        const overlay = fs.readFileSync(path.resolve("src/components/NotificationOverlay.tsx"), "utf8");
+        // One owner. The overlay cannot see which task a card is about or
+        // whether it is the last warning, so a quiet-hours check there would
+        // have to ignore the exception the person set.
+        check("the overlay obeys the quiet-hours decision rather than making one",
+          !overlay.includes("quietWindowEnd"));
+      }
 
       // And the two that must never reach the file, asked by name rather than
       // only through the predicate that decides it.

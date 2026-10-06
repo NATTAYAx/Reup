@@ -3,9 +3,8 @@
 // Timezone always stays Asia/Bangkok regardless of language.
 export type Lang = "en" | "th";
 
-import { putSetting } from "./userSettings";
+import { LANG_KEY, putSetting } from "./userSettings";
 
-const LANG_KEY = "gamesched_lang_v1";
 
 export function getLang(): Lang {
   const v = localStorage.getItem(LANG_KEY);
@@ -380,7 +379,16 @@ const translations = {
   "settings.autostart":     { en: "Start with Windows",    th: "เปิดตอนเปิดเครื่อง" },
   "settings.autostartSub":  { en: "Launch automatically on login", th: "เปิดอัตโนมัติตอน login" },
   "settings.notifications": { en: "Overlay Notifications", th: "การแจ้งเตือน" },
-  "settings.muted":         { en: "Muted",                 th: "ปิดเสียง" },
+  // Was "ปิดเสียง", which said sound and did everything: this switch removes
+  // the card as well. The sound has a switch of its own now, just below.
+  "settings.muted":         { en: "Off - no card, no sound", th: "ปิดทั้งหมด ไม่มีการ์ด ไม่มีเสียง" },
+  "settings.chime":         { en: "Sound",                 th: "เสียง" },
+  "settings.chimeOn":       { en: "The card arrives with a chime", th: "การ์ดขึ้นพร้อมเสียง" },
+  "settings.chimeOff":      { en: "The card arrives silently",     th: "การ์ดขึ้นเงียบ ๆ ไม่มีเสียง" },
+  "addTask.wake":           { en: "May ring in quiet hours", th: "ดังได้ในช่วงเงียบ" },
+  "addTask.wakeHint":       { en: "In quiet hours it stays silent until the last ten minutes, then rings.",
+                              th: "ในช่วงเงียบจะเงียบไว้ก่อน แล้วดังตอนเหลือสิบนาที" },
+  "notifyLog.silent":       { en: "(silent)",              th: "(เงียบ)" },
   "settings.toastSub":      { en: "Toast when tasks go critical · click-through", th: "แจ้งเตือนเมื่องานเร่งด่วน · ลิงก์ผ่านได้" },
   "settings.duration":      { en: "Duration",              th: "ระยะเวลา" },
   "settings.seconds":       { en: "sec",                   th: "วิ" },
@@ -528,8 +536,8 @@ const translations = {
   "quiet.off":              { en: "Off",                    th: "ปิดอยู่" },
   "quiet.from":             { en: "From",                   th: "ตั้งแต่" },
   "quiet.to":               { en: "Until",                  th: "ถึง" },
-  "quiet.note":             { en: "Anything actually due inside the window still rings — being quiet should delay a reminder, not lose it.",
-                              th: "งานที่ครบกำหนดในช่วงนี้จะยังเตือนตามปกติ เพราะการเงียบควรเลื่อนการเตือน ไม่ใช่ทำให้พลาด" },
+  "quiet.note":             { en: "Anything due inside the window still shows up, without a sound - unless its task is set to ring in quiet hours, and then only in its last ten minutes.",
+                              th: "งานที่ครบกำหนดในช่วงนี้ยังขึ้นการ์ดแต่ไม่มีเสียง ยกเว้นงานที่ตั้งให้ดังได้ในช่วงเงียบ ซึ่งจะดังแค่ตอนเหลือสิบนาที" },
 
   "app.loading":            { en: "Loading...",              th: "กำลังโหลด..." },
   "app.nothingDone":        { en: "Nothing done yet",        th: "ยังไม่มีงานที่เสร็จ" },

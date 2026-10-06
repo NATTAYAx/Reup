@@ -124,6 +124,7 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
       intent: (form.intent as "want" | "must" | null) ?? null,
       is_priority: form.is_priority ?? 0,
       is_urgent: form.is_urgent ?? 0,
+      ring_in_quiet: form.ring_in_quiet ? 1 : 0,
       cover_image: form.cover_image ?? null,
     };
 
@@ -393,6 +394,16 @@ export default function EditTaskModal({ taskId, initialTask, onClose, onSaved }:
                 <span>{form.is_urgent ? "🔥" : "○"}</span>
                 <span className="text-xs font-medium">{form.is_urgent ? t("addTask.critical") : t("addTask.markCritical")}</span>
               </div>
+            </div>
+            <div onClick={() => set("ring_in_quiet", form.ring_in_quiet ? 0 : 1)}
+              className={`px-3 py-3 rounded-xl border cursor-pointer transition-all ${form.ring_in_quiet?"bg-purple-500/10 border-purple-500/40 text-purple-300":"bg-white/5 border-white/10 text-white/40 hover:text-white"}`}>
+              <div className="flex items-center gap-2">
+                <span>{form.ring_in_quiet ? "🔔" : "○"}</span>
+                <span className="text-xs font-medium">{t("addTask.wake")}</span>
+              </div>
+              {form.ring_in_quiet ? (
+                <p className="text-[11px] leading-relaxed mt-1 text-white/40">{t("addTask.wakeHint")}</p>
+              ) : null}
             </div>
 
             {saveError && (

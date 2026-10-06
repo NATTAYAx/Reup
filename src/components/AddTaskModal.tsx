@@ -38,6 +38,7 @@ const EMPTY_FORM = {
   specific_date: "",
   is_priority: 0,
   is_urgent: 0,
+  ring_in_quiet: 0,
   cover_image: null as string | null,
   notify_before_min: "",
   min_step: "",
@@ -317,7 +318,21 @@ export default function AddTaskModal({ open, onClose, onTaskAdded }: Props) {
                           }`}>
                           {form.is_urgent ? "🔥" : "○"} {t("addTask.critical")}
                         </button>
+                        {/* Not the same question as urgent. Urgent is how much it
+                            matters; this is whether it may wake somebody. See
+                            lib/chime.ts. */}
+                        <button type="button" onClick={() => set("ring_in_quiet", form.ring_in_quiet ? 0 : 1)}
+                          className={`text-xs rounded-full px-3 py-1.5 border transition-colors ${
+                            form.ring_in_quiet
+                              ? "bg-purple-500/15 border-purple-500/40 text-purple-300"
+                              : "border-white/10 text-white/40 hover:text-white"
+                          }`}>
+                          {form.ring_in_quiet ? "🔔" : "○"} {t("addTask.wake")}
+                        </button>
                       </div>
+                      {form.ring_in_quiet ? (
+                        <p className="text-white/30 text-[11px] leading-relaxed -mt-2">{t("addTask.wakeHint")}</p>
+                      ) : null}
 
                       <input
                         value={form.description}

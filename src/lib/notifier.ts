@@ -33,6 +33,7 @@ import { recordNotify } from "./notifyLog";
 import { parseQuiet, putSetting, QUIET_KEY } from "./userSettings";
 import { CountdownResult } from "../types";
 import { wallClock } from "./tz";
+import { chimeOn, quietTakesSound } from "./chime";
 
 const INVOKE_TIMEOUT = 3_000;
 const FINAL_WARN_MS  = 10 * 60 * 1000;
@@ -247,12 +248,12 @@ function buildKey(taskId: number, tier: "main" | "final"): string {
 
 function fireNotification(
   taskName: string, urgencyLabel: "critical" | "warning",
-  timeLeft: string, category: string,
+  timeLeft: string, category: string, silent: boolean,
 ) {
   void (async () => {
     try {
       await withTimeout(
-        invoke("show_notification", { taskName, urgency: urgencyLabel, timeLeft, category }),
+        invoke("show_notification", { taskName, urgency: urgencyLabel, timeLeft, category, silent }),
         INVOKE_TIMEOUT,
       );
     } catch (e) {
@@ -302,6 +303,15 @@ export function checkAndNotify(results: CountdownResult[]) {
     // replace it with nothing.
     if (quietUntil !== null && deadlineNow > quietUntil) continue;
 
+    // And what is let through quiet hours is let through silently. The
+    // exemption above keeps a reminder from being lost; it was never meant to
+    // make a noise at night, and it did - a daily task resetting at 04:00 gets
+    // four hours of notice, so it rang at exactly 00:00, inside the window the
+    // person had asked to be left alone in. The card still shows and is still
+    // written down. A task the person marked ring_in_quiet rings at its last
+    // call. The rule lives in chime.ts, where check-sync can read it.
+    const inQuiet = quietUntil !== null;
+
     const notifyWindowMs = getNotifyWindowMs(result);
     const mainKey        = buildKey(task.id, "main");
     const finalKey       = buildKey(task.id, "final");
@@ -316,8 +326,14 @@ export function checkAndNotify(results: CountdownResult[]) {
       // Written down as well as shown. The card takes itself away after eight
       // seconds and the console is gone at the next restart, so without this
       // the only record of a reminder is having been in the room for it.
-      recordNotify({ name: task.name, at: Date.now(), label });
-      fireNotification(task.name, label, timeLeft, task.category);
+      // The main reminder is the last call only when the notice window is so
+      // short that no separate ten-minute warning will follow it.
+      const silent = quietTakesSound(inQuiet, task.ring_in_quiet, notifyWindowMs <= FINAL_WARN_MS);
+      recordNotify({
+        name: task.name, at: Date.now(), label,
+        ...(silent || !chimeOn() ? { silent: true as const } : {}),
+      });
+      fireNotification(task.name, label, timeLeft, task.category, silent);
     }
 
     // FINAL warning at ≤ 10 min
@@ -328,8 +344,12 @@ export function checkAndNotify(results: CountdownResult[]) {
         console.log(`[notifier] 🔔 FINAL "${task.name}" remaining=${Math.round(time_remaining_ms/1000)}s`);
         // Marked as the ten-minute warning, because that one fires by a
         // different rule and "it rang twice" is otherwise unexplainable.
-        recordNotify({ name: task.name, at: Date.now(), label: "critical", final: true });
-        fireNotification(task.name, "critical", timeLeft, task.category);
+        const silent = quietTakesSound(inQuiet, task.ring_in_quiet, true);
+        recordNotify({
+          name: task.name, at: Date.now(), label: "critical", final: true,
+          ...(silent || !chimeOn() ? { silent: true as const } : {}),
+        });
+        fireNotification(task.name, "critical", timeLeft, task.category, silent);
       }
     }
   }

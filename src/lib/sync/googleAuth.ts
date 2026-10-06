@@ -23,7 +23,9 @@ import {
  * backup may not carry can be built from it rather than from a string typed out
  * a second time.
  */
-export const GOOGLE_TOKENS_KEY = "sync_google_tokens";
+import { GOOGLE_TOKENS_KEY } from "../settingKeys";
+
+export { GOOGLE_TOKENS_KEY };
 
 /** How long the browser has. Long enough to find a password, short enough that
  *  a tab closed without deciding does not leave a thread waiting for ever. */

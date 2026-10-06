@@ -33,7 +33,9 @@ import { outboxReseed } from "../syncMeta";
 import { hydrateSettings, type SettingsDb } from "../userSettings";
 
 /** The one row in `app_settings` that holds all of this. */
-export const SYNC_CONFIG_KEY = "sync_config_v1";
+import { SYNC_CONFIG_KEY } from "../settingKeys";
+
+export { SYNC_CONFIG_KEY };
 
 /**
  * Google Drive is deliberately absent.

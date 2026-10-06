@@ -128,7 +128,9 @@ export async function dbNow(db: Db): Promise<string> {
  * it by retyping the string: the backup has to leave it behind, and the settings
  * screen has to know it is not the person's data.
  */
-export const SYNC_STATE_KEY = "sync_state_v1";
+import { SYNC_STATE_KEY } from "../settingKeys";
+
+export { SYNC_STATE_KEY };
 
 /**
  * The tables that sync, named here rather than discovered.

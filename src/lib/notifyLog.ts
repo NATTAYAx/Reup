@@ -50,6 +50,9 @@ export interface NotifyEntry {
   label: "critical" | "warning";
   /** True for the ten-minute warning rather than the main reminder. */
   final?: true;
+  /** True when it was shown without a sound - quiet hours, or the sound switch.
+   *  The answer to "there was a card and no chime, is that a bug". */
+  silent?: true;
 }
 
 /**

@@ -7,7 +7,7 @@ import { useCountdowns } from "./hooks/useCountdowns";
 import { onDataChanged } from "./lib/dataChanged";
 import { runAutoBackupIfDue } from "./lib/autoBackup";
 import { startAutoSync } from "./lib/autoSync";
-import { loadTheme, applyTheme } from "./lib/theme";
+import { loadTheme, applyTheme, reapplyThemeFromSettings } from "./lib/theme";
 import { deleteTask, togglePriority, toggleUrgent, getSetting, pauseTask } from "./lib/database";
 import { PAUSE_FOREVER } from "./types";
 import { installWindowActive, useWindowActive } from "./lib/windowActive";
@@ -177,6 +177,11 @@ export default function App() {
   // make every countdown reload and re-run its cycle reconciliation.
   useEffect(() => onDataChanged((tables) => {
     if (tables.has("tasks")) refreshTasks();
+    // A theme picked on the phone. Applied rather than merely stored, because
+    // the alternative is a window that keeps yesterday's colours until it is
+    // restarted, which reads as the setting not having synced at all. An id
+    // this build does not know changes nothing - see lib/theme.ts.
+    if (tables.has("user_settings")) reapplyThemeFromSettings();
     if (tables.has("expenses") || tables.has("income") || tables.has("budgets") ||
         tables.has("saving_goals") || tables.has("expected_income") ||
         tables.has("expense_categories")) {

@@ -45,6 +45,7 @@ export const TASK_COLUMNS = [
   "notify_before_min",
   "time_zone",
   "intent",
+  "ring_in_quiet",
 ] as const;
 
 /** The reset types the engine knows how to schedule. */
@@ -76,6 +77,7 @@ export interface TaskDraft {
   is_urgent?: unknown;
   min_step?: unknown;
   notify_before_min?: unknown;
+  ring_in_quiet?: unknown;
   time_zone?: unknown;
   intent?: unknown;
   /**
@@ -143,7 +145,7 @@ function num(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** The sixteen values, in TASK_COLUMNS order. */
+/** The values, in TASK_COLUMNS order. */
 export function taskValues(d: TaskDraft): SqlValue[] {
   return [
     typeof d.name === "string" ? d.name : String(d.name ?? ""),
@@ -163,6 +165,7 @@ export function taskValues(d: TaskDraft): SqlValue[] {
     num(d.notify_before_min),
     sanitizeText(d.time_zone),
     d.intent === "want" || d.intent === "must" ? d.intent : null,
+    d.ring_in_quiet ? 1 : 0,
   ];
 }
 
@@ -206,6 +209,7 @@ export const TASK_EDITABLE: Record<string, "raw" | "clean" | "int" | "flag" | "i
   notify_before_min: "int",
   time_zone: "clean",
   intent: "intent",
+  ring_in_quiet: "flag",
 };
 
 function coerce(how: string, v: unknown): SqlValue {

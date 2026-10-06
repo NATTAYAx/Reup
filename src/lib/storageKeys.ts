@@ -150,11 +150,13 @@ export const KNOWN_KEYS: readonly string[] = [
   `${PREFIX}_important_v1`,
   `${PREFIX}_lang_v1`,
   `${PREFIX}_low_power_date`,
+  `${PREFIX}_notif_chime_v1`,
   `${PREFIX}_notif_log_v1`,
   `${PREFIX}_notif_sound_name`,
   `${PREFIX}_notif_sound_v1`,
   `${PREFIX}_notifications_muted`,
   `${PREFIX}_quiet_hours_v1`,
+  `${PREFIX}_theme_id_v1`,
   `${PREFIX}_theme_v1`,
   `${PREFIX}_timezone`,
   `${PREFIX}_toast_duration_sec`,
@@ -163,6 +165,47 @@ export const KNOWN_KEYS: readonly string[] = [
   `${PREFIX}_tz_source`,
   `${PREFIX}_weeknote_shown`,
 ];
+
+/**
+ * Keys that were real once and are not written by anything any more.
+ *
+ * WHY THIS LIST EXISTS RATHER THAN A DELETED LINE
+ *
+ * The check in check-sync asks two things of the list above: every key the
+ * source writes has a line, and every line is a key the source writes. When the
+ * second half fires, deleting the line answers it and leaves the value sitting
+ * in localStorage on every machine that ever had it, where nothing reads it and
+ * a backup copies it forward for ever. Naming it here instead means
+ * [sanitizeForBackup] can leave it out, so it stops spreading, and the next
+ * person to find the string somewhere has a line to read rather than a mystery.
+ *
+ * A key belongs to exactly one of the two lists. check-sync enforces that.
+ *
+ * --- EMPTY, AND THAT IS THE CORRECTION ---
+ *
+ * `_notifications_muted` was put here on the strength of the second check
+ * firing, with a line saying the mute switch had become a setting that travels
+ * between machines. It had not. Nothing in SYNCED_SETTING_KEYS is a mute, and
+ * notifier.ts still reads and writes that boolean; the tree it was retired from
+ * was a working copy whose change was never committed, and restoring that file
+ * from git brought the writes back. The check went red immediately and was
+ * right to - it is the only reason anybody noticed the two halves had come
+ * apart.
+ *
+ * So it is live again, above. And the move it was retired for is not obviously
+ * the right one: muting is a fact about the machine in front of you. The
+ * desktop speakers here are off; the phone is where a reminder actually lands.
+ * A mute that travelled would silence the one device that was working.
+ */
+export const RETIRED_KEYS: readonly string[] = [
+  // Empty on purpose. The machinery above is right and the one entry it held
+  // was not. The next key that genuinely stops being written goes here.
+];
+
+/** Whether this key was one of ours and has since been retired. */
+export function isRetiredKey(key: string): boolean {
+  return RETIRED_KEYS.includes(key);
+}
 
 /** Whether this key has a line in the list above, prefixes included. */
 export function isKnownKey(key: string): boolean {
@@ -175,6 +218,12 @@ export function isKnownKey(key: string): boolean {
  */
 export function sanitizeForBackup(key: string, value: string): string | null {
   if (isSecretKey(key) || isTransientKey(key) || isMachineOnlyKey(key)) return null;
+
+  // A value nothing reads any more does not need carrying into the next
+  // machine. Left out here rather than deleted at startup, because deleting it
+  // would need a hook that runs in all three windows and this hook already
+  // exists.
+  if (isRetiredKey(key)) return null;
 
   if (key === AI_LOG) {
     try {

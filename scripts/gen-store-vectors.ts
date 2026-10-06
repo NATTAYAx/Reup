@@ -30,7 +30,17 @@
  */
 
 import { outboxReseed, syncMigrations } from "../src/lib/syncMeta";
-import { parseQuiet } from "../src/lib/userSettings";
+import {
+  CURRENCY_KEY,
+  GOOGLE_TOKENS_KEY,
+  LANG_KEY,
+  QUIET_KEY,
+  SYNC_CONFIG_KEY,
+  SYNC_STATE_KEY,
+  THEME_ID_KEY,
+} from "../src/lib/settingKeys";
+import { THEME_IDS } from "../src/lib/theme";
+import { SETTING_UPSERT_SQL, parseQuiet } from "../src/lib/userSettings";
 import { SQL_BUMP, SQL_CLOCK_READ, SQL_SEEN } from "../src/lib/sync/sqlLocalStore";
 import { TASK_COLUMNS, TASK_EDITABLE, sanitizeText, taskProblems, taskUpdate, taskValues } from "../src/lib/taskDraft";
 import {
@@ -279,6 +289,9 @@ async function main(): Promise<void> {
     { name: "x", reset_type: "daily", intent: "want" },
     { name: "x", reset_type: "daily", intent: "maybe" },
     { name: "x", reset_type: "daily", is_urgent: 1, description: "", category: "personal" },
+    // Allowed through quiet hours. A flag like is_urgent, pinned so the phone
+    // writes the same 1 the desktop does.
+    { name: "pills", reset_type: "daily", reset_time: "02:00", ring_in_quiet: 1, category: "personal" },
     { name: "x", reset_type: "daily", min_step: "", time_zone: "Asia/Bangkok" },
   ];
   V.taskColumns = [...TASK_COLUMNS];
@@ -288,6 +301,7 @@ async function main(): Promise<void> {
   // is different: not what sixteen values a new row gets, but which of them an
   // edit is allowed to touch and in what order they come out.
   V.taskUpdate = ([
+    { ring_in_quiet: 1 },
     {},
     { name: "x" },
     { nope: 1, name: "x" },
@@ -415,6 +429,48 @@ async function main(): Promise<void> {
   // loudly if the two sides disagree — one device just files a month in a unit
   // the other one filters out.
   V.moneyFallbacks = [CURRENCY_FALLBACK, CATEGORY_FALLBACK];
+
+  // The names a setting is stored under.
+  //
+  // Both machines look these rows up by name, and a spelling that disagrees
+  // does not throw or log anything: one side writes a row the other never
+  // reads, so the setting has no effect on the device that did not write it.
+  // Quiet hours that apply to one phone, a currency that reverts, a sync config
+  // the phone cannot find.
+  //
+  // Order matters, because the phone compares the list rather than the values.
+  V.settingKeys = [
+    QUIET_KEY,
+    CURRENCY_KEY,
+    LANG_KEY,
+    SYNC_CONFIG_KEY,
+    GOOGLE_TOKENS_KEY,
+    SYNC_STATE_KEY,
+    THEME_ID_KEY,
+  ];
+
+  // The six themes, by the name that travels.
+  //
+  // The colours are not shared and are not meant to be: this side needs a
+  // gradient and a border alpha, the phone needs a card, a field and an ink
+  // colour for text on the primary. What both sides must spell identically is
+  // which theme is called what, because that string is the whole of what
+  // crosses. An id spelled differently on one side is a theme picked here that
+  // the phone reads, fails to recognise, and correctly ignores - so the setting
+  // simply never arrives, quietly, for that one theme.
+  //
+  // Order matters here too: it is the order of the picker on both machines, so
+  // that "the third one" means the same thing out loud.
+  V.themeIds = [...THEME_IDS];
+
+  // The write both machines make into user_settings.
+  //
+  // The WHERE on the upsert is the part worth pinning rather than the INSERT.
+  // Without it, saving a settings screen with nothing changed bumps updated_at,
+  // fires the outbox trigger and puts a row on the wire - every time, on both
+  // devices, for ever. A phone that wrote the plain upsert instead would look
+  // like it was working while quietly filling the folder.
+  V.settingQueries = [SETTING_UPSERT_SQL];
 
   // The shapes as SQLite actually reports them, which is also the fixture the
   // rest of the cases are built on.
@@ -739,6 +795,9 @@ async function main(): Promise<void> {
     ["moneyQueries", (V.moneyQueries as unknown[]).length],
     ["moneyUpdate", (V.moneyUpdate as unknown[]).length],
     ["moneyFallbacks", (V.moneyFallbacks as unknown[]).length],
+    ["settingKeys", (V.settingKeys as unknown[]).length],
+    ["themeIds", (V.themeIds as unknown[]).length],
+    ["settingQueries", (V.settingQueries as unknown[]).length],
     ["shapes", (V.shapes as unknown[]).length],
     ["recordFromRow", (V.recordFromRow as unknown[]).length],
     ["upsert", (V.upsert as unknown[]).length],
