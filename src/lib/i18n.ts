@@ -378,7 +378,7 @@ const translations = {
   "settings.title":         { en: "Settings",              th: "การตั้งค่า" },
   "settings.autostart":     { en: "Start with Windows",    th: "เปิดตอนเปิดเครื่อง" },
   "settings.autostartSub":  { en: "Launch automatically on login", th: "เปิดอัตโนมัติตอน login" },
-  "settings.notifications": { en: "Overlay Notifications", th: "การแจ้งเตือน" },
+  "settings.notifications": { en: "Notifications on this computer", th: "การแจ้งเตือนบนเครื่องนี้" },
   // Was "ปิดเสียง", which said sound and did everything: this switch removes
   // the card as well. The sound has a switch of its own now, just below.
   "settings.muted":         { en: "Off - no card, no sound", th: "ปิดทั้งหมด ไม่มีการ์ด ไม่มีเสียง" },
@@ -797,6 +797,24 @@ const translations = {
   "task.timeLabel":  { en: "Time",     th: "เวลา" },
   "task.allDay":     { en: "All day",  th: "ทั้งวัน" },
   "task.allDayHint": { en: "Due at the end of that day.", th: "ครบกำหนดตอนสิ้นวัน" },
+  // The board on the desktop: components/DesktopWidget and DesktopWidgetCard.
+  "widget.title":     { en: "Desktop widget", th: "วิดเจ็ตบนเดสก์ท็อป" },
+  "widget.enable":    { en: "Show on the desktop", th: "แสดงบนเดสก์ท็อป" },
+  "widget.enableSub": { en: "Above the icons, under every window, and still there after Win+D.", th: "อยู่เหนือไอคอน ใต้หน้าต่างทุกอัน กด Win+D ก็ยังอยู่" },
+  "widget.tint":      { en: "Shade behind the words", th: "เงาหลังตัวหนังสือ" },
+  "widget.tintNone":  { en: "none", th: "ไม่มี" },
+  "widget.money":     { en: "This month's money", th: "ยอดเงินเดือนนี้" },
+  "widget.moneySub":  { en: "Off unless you turn it on: anyone walking past can read a desktop.", th: "ปิดไว้ก่อน เพราะใครเดินผ่านก็อ่านได้" },
+  "widget.move":      { en: "Move or resize", th: "ย้ายหรือปรับขนาด" },
+  "widget.moveDone":  { en: "Done", th: "เสร็จแล้ว" },
+  "widget.reset":     { en: "Back to the right half", th: "กลับไปครึ่งขวาของจอ" },
+  "widget.note":      { en: "Clicks go straight through it to the desktop, so open the app from the tray icon as before. The tray menu can also turn it off or move it.", th: "คลิกทะลุไปถึงเดสก์ท็อปได้ เปิดแอปจากไอคอนในถาดเหมือนเดิม เมนูในถาดก็ปิดหรือย้ายวิดเจ็ตได้" },
+  "widget.next":      { en: "Next", th: "ถัดไป" },
+  "widget.noNext":    { en: "Nothing queued", th: "ไม่มีรอบถัดไป" },
+  "widget.later":     { en: "Longer rounds still open", th: "รอบยาวที่ยังไม่ทำ" },
+  "widget.quiet":     { en: "Quiet hours", th: "ช่วงเวลาเงียบ" },
+  "widget.dragHint":  { en: "Drag to move · drag an edge or a corner to resize", th: "ลากเพื่อย้าย · ลากขอบหรือมุมเพื่อปรับขนาด" },
+  "widget.waiting":   { en: "Waiting for the app…", th: "รอข้อมูลจากแอป…" },
 } as const;
 
 type TranslationKey = keyof typeof translations;
