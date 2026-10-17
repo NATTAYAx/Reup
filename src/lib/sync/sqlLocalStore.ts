@@ -150,6 +150,7 @@ export const SYNCED_TABLES = [
   "expected_income",
   "task_events",
   "user_settings",
+  "notes",
 ] as const;
 
 // ─── reading the shape out of the database ───────────────────────────────────

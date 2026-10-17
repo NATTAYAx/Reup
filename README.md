@@ -50,6 +50,12 @@ you read it is not a record.
 Notifications respect quiet hours. Themes can be generated from an image.
 There is a live wallpaper feature that mostly works, about which see below.
 
+There is also a board for the desktop: the clock, what is next, the rest of the
+day and the longer rounds still open. It sits above the icons and under every
+window, stays put through Win+D, and lets clicks through, so the half of the
+screen it covers still works as desktop. Turn it on from the appearance tab or
+the tray.
+
 ![Notification](docs/8-notification.png)
 ---
 
@@ -67,6 +73,12 @@ pnpm build        # typecheck + vite build
 pnpm tauri build  # installer
 pnpm eval         # the parser regression suite, see below
 ```
+
+The installer is the NSIS one, `src-tauri/target/release/bundle/nsis/*-setup.exe`.
+It asks to close Reup if Reup is running, which matters for an app that lives
+in the tray: the MSI this used to build had no way to close it, and with Reup
+left running it could stall on "Validating install". Coming from that MSI, the
+setup uninstalls it first; quit Reup from the tray before that one run.
 
 Bump the version with `pnpm bump` rather than by hand. It writes both
 `package.json` and `tauri.conf.json`, and if those two disagree the installer
@@ -181,6 +193,10 @@ receipt in the world had been printed in Thailand.
 
 Both corpora are deliberately stacked with hard cases, so the on-device hit rate
 they report is much lower than the real one.
+
+`pnpm check:widget` pins the clock and the timezone and checks what the desktop
+board says about a day: what is next, what counts towards the bar, what turns
+amber, and that an appointment already missed is still said out loud.
 
 ---
 

@@ -36,6 +36,10 @@ export const LANG_KEY = "gamesched_lang_v1";
  *  lib/theme.ts. */
 export const THEME_ID_KEY = "gamesched_theme_id_v1";
 
+/** How notes look: bright, muted or dark paper. Synced, like the theme, and
+ *  for the same reason: it is a taste, not a screen. See lib/notes.ts. */
+export const NOTE_STYLE_KEY = "gamesched_note_style_v1";
+
 /** Where this device syncs to and with which key. Never synced: it is the way
  *  in, and a device that copied another device's would be syncing with itself. */
 export const SYNC_CONFIG_KEY = "sync_config_v1";

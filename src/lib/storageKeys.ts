@@ -150,6 +150,7 @@ export const KNOWN_KEYS: readonly string[] = [
   `${PREFIX}_important_v1`,
   `${PREFIX}_lang_v1`,
   `${PREFIX}_low_power_date`,
+  `${PREFIX}_note_style_v1`,
   `${PREFIX}_notif_chime_v1`,
   `${PREFIX}_notif_log_v1`,
   `${PREFIX}_notif_sound_name`,
@@ -164,6 +165,8 @@ export const KNOWN_KEYS: readonly string[] = [
   `${PREFIX}_tray_hint_seen`,
   `${PREFIX}_tz_source`,
   `${PREFIX}_weeknote_shown`,
+  `${PREFIX}_widget_money_v1`,
+  `${PREFIX}_widget_tint_v1`,
 ];
 
 /**

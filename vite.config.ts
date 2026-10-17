@@ -24,6 +24,7 @@ export default defineConfig({
         main: "index.html",
         notification: "notification.html",
         wallpaper: "wallpaper.html",
+        widget: "widget.html",
       },
     },
   },

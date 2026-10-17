@@ -29,6 +29,7 @@ import { getAllTasks } from "../lib/database";
 import { calculateCountdown } from "../lib/countdown";
 import { reconcileCycles } from "../lib/cycles";
 import { checkAndNotify } from "../lib/notifier";
+import { feedWidget } from "../lib/widgetFeed";
 import { CountdownResult } from "../types";
 
 // How soon the nearest deadline is → how often we need to re-check.
@@ -78,6 +79,9 @@ export function useCountdowns() {
         console.error("[useCountdowns] reconcileCycles error:", err);
       }
       tasksRef.current = tasks;
+      // The board on the desktop gets the same list, from the same load, so
+      // the two never disagree. See lib/widgetFeed.
+      feedWidget(tasks);
     } catch (err) {
       console.error("[useCountdowns] loadTasks error:", err);
     } finally {

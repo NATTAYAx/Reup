@@ -34,6 +34,7 @@ import {
   CURRENCY_KEY,
   GOOGLE_TOKENS_KEY,
   LANG_KEY,
+  NOTE_STYLE_KEY,
   QUIET_KEY,
   SYNC_CONFIG_KEY,
   SYNC_STATE_KEY,
@@ -41,6 +42,24 @@ import {
 } from "../src/lib/settingKeys";
 import { THEME_IDS } from "../src/lib/theme";
 import { SETTING_UPSERT_SQL, parseQuiet } from "../src/lib/userSettings";
+import {
+  NOTE_COLORS,
+  NOTE_INK,
+  NOTE_LOOKS,
+  NOTE_MAX_CHARS,
+  NOTE_PAPER,
+  NOTE_STYLE_DEFAULT,
+  NOTE_STYLES,
+  NOTES_SHOWN,
+  SQL_ADD_NOTE,
+  SQL_EDIT_NOTE,
+  SQL_LIVE_NOTES,
+  SQL_PEEL_NOTE,
+  SQL_UNPEEL_NOTE,
+  noteBody,
+  noteTilt,
+  noteTyped,
+} from "../src/lib/notes";
 import { SQL_BUMP, SQL_CLOCK_READ, SQL_SEEN } from "../src/lib/sync/sqlLocalStore";
 import { TASK_COLUMNS, TASK_EDITABLE, sanitizeText, taskProblems, taskUpdate, taskValues } from "../src/lib/taskDraft";
 import {
@@ -447,6 +466,7 @@ async function main(): Promise<void> {
     GOOGLE_TOKENS_KEY,
     SYNC_STATE_KEY,
     THEME_ID_KEY,
+    NOTE_STYLE_KEY,
   ];
 
   // The six themes, by the name that travels.
@@ -471,6 +491,59 @@ async function main(): Promise<void> {
   // devices, for ever. A phone that wrote the plain upsert instead would look
   // like it was working while quietly filling the folder.
   V.settingQueries = [SETTING_UPSERT_SQL];
+
+  // Notes stuck on the home screen. Both machines write the table, so the
+  // statements are pinned like every other write - the peel most of all, which
+  // blanks the words on its way to being a tombstone, and a phone that only
+  // set the flag would send a month of somebody's notes into the sync folder.
+  V.noteQueries = [SQL_LIVE_NOTES, SQL_ADD_NOTE, SQL_EDIT_NOTE, SQL_PEEL_NOTE, SQL_UNPEEL_NOTE];
+  // The papers and the ink, by name and in picker order: the name is what is
+  // stored, and an unknown one is drawn as the first.
+  V.noteColors = NOTE_COLORS.map((name) => ({ name, paper: NOTE_PAPER[name], ink: NOTE_INK }));
+  V.noteLimits = [{ maxChars: NOTE_MAX_CHARS, shown: NOTES_SHOWN }];
+  // How the papers look: one setting for every note, synced like the theme.
+  // The names are what travels and the colours are what both machines draw,
+  // so both are pinned - a style spelled differently is a setting that never
+  // arrives, and a colour that drifted is the same note in two shades.
+  V.noteStyles = [...NOTE_STYLES];
+  V.noteStyleDefault = [NOTE_STYLE_DEFAULT];
+  V.noteLooks = NOTE_STYLES.flatMap((style) =>
+    NOTE_COLORS.map((color) => ({ style, color, paper: NOTE_LOOKS[style][color].paper, ink: NOTE_LOOKS[style][color].ink })),
+  );
+  // The one rule about what a note may say. The cases are where a second
+  // implementation would differ: Windows line ends, blank lines, a no-break
+  // space at the end of a line (trimmed here, and not by every trim), a cut
+  // that would land inside an emoji, and nothing left at all.
+  V.noteBody = [
+    { id: "plain", raw: "ซื้อนม 2 ขวด" },
+    { id: "outer-space", raw: "   โทรหาร้านซ่อม  " },
+    { id: "lines", raw: "เอาผ้าออก\nจากเครื่อง" },
+    { id: "windows-lines", raw: "เอาผ้าออก\r\nจากเครื่อง\r" },
+    { id: "blank-lines", raw: "\n\nบรรทัดแรก\n\n\n  \nบรรทัดสอง\n\n" },
+    { id: "no-break-space", raw: "ปิดแก๊ส\u00A0\n\u00A0ล็อกประตู" },
+    { id: "byte-order-mark", raw: "\uFEFFจ่ายค่าไฟ" },
+    { id: "nothing", raw: "   \n \t \n" },
+    { id: "empty", raw: "" },
+    { id: "long", raw: "ก".repeat(NOTE_MAX_CHARS + 30) },
+    { id: "cut-at-emoji", raw: "ก".repeat(NOTE_MAX_CHARS - 1) + "🐱🐱" },
+    { id: "cut-leaves-space", raw: "ก".repeat(NOTE_MAX_CHARS - 1) + " ข" },
+  ].map((c) => ({ ...c, expected: noteBody(c.raw) }));
+  V.noteTilt = ["", "a", "11111111-1111-4111-8111-111111111111", "ffffffff-ffff-4fff-bfff-ffffffffffff", "โน้ต", "zzzzzzzzzzzzzzzz"]
+    .map((uid) => ({ uid, expected: noteTilt(uid) }));
+  // The box a note is written in. Nothing here is stored, so it is not a sync
+  // rule; pinned anyway, so the two boxes behave alike under the same hands:
+  // never more than a note may say, and a paste that would go over keeps what
+  // was written and as much of itself as fits, with no emoji cut in half.
+  const k = (n: number) => "ก".repeat(n);
+  V.noteTyped = [
+    { id: "fits", was: "", now: "ซื้อนม" },
+    { id: "just-fits", was: k(NOTE_MAX_CHARS - 1), now: k(NOTE_MAX_CHARS) },
+    { id: "paste-at-end", was: k(100), now: k(100) + "ข".repeat(50) },
+    { id: "paste-in-middle", was: k(50) + "ค".repeat(60), now: k(50) + "ข".repeat(40) + "ค".repeat(60) },
+    { id: "full-box", was: k(60) + "ค".repeat(60), now: k(60) + "ข" + "ค".repeat(60) },
+    { id: "room-for-one-emoji", was: k(NOTE_MAX_CHARS - 1), now: k(NOTE_MAX_CHARS - 1) + "🐱🐱" },
+    { id: "same-first-unit", was: k(NOTE_MAX_CHARS - 1) + "🐶", now: k(NOTE_MAX_CHARS - 1) + "🐱🐶" },
+  ].map((c) => ({ ...c, expected: noteTyped(c.was, c.now) }));
 
   // The shapes as SQLite actually reports them, which is also the fixture the
   // rest of the cases are built on.
@@ -527,6 +600,26 @@ async function main(): Promise<void> {
 
   const upsertCases: { id: string; table: string; record: ChangeRecord }[] = [
     { id: "upsert-task", table: "tasks", record: taskRecord() },
+    // tasks.ring_in_quiet is NOT NULL. A writer that knows it sends it; one
+    // that has never heard of it - an older build, or a file from before the
+    // column existed - sends nothing, and the column has to be left out of the
+    // statement rather than bound as null. The second case is the one that
+    // stopped a new phone's first sync.
+    {
+      id: "upsert-task-that-knows-ring-in-quiet",
+      table: "tasks",
+      record: taskRecord({ fields: { ...taskRecord().fields, ring_in_quiet: 1 } }),
+    },
+    {
+      id: "upsert-task-from-a-writer-without-ring-in-quiet",
+      table: "tasks",
+      record: (() => {
+        const r = taskRecord();
+        const fields: Record<string, unknown> = { ...r.fields };
+        delete fields.ring_in_quiet;
+        return { ...r, fields };
+      })(),
+    },
     { id: "upsert-task-tombstone", table: "tasks", record: taskRecord({ deleted: true }) },
     {
       id: "upsert-task-with-a-column-this-schema-does-not-have",
@@ -798,6 +891,12 @@ async function main(): Promise<void> {
     ["settingKeys", (V.settingKeys as unknown[]).length],
     ["themeIds", (V.themeIds as unknown[]).length],
     ["settingQueries", (V.settingQueries as unknown[]).length],
+    ["noteQueries", (V.noteQueries as unknown[]).length],
+    ["noteColors", (V.noteColors as unknown[]).length],
+    ["noteBody", (V.noteBody as unknown[]).length],
+    ["noteTilt", (V.noteTilt as unknown[]).length],
+    ["noteTyped", (V.noteTyped as unknown[]).length],
+    ["noteLooks", (V.noteLooks as unknown[]).length],
     ["shapes", (V.shapes as unknown[]).length],
     ["recordFromRow", (V.recordFromRow as unknown[]).length],
     ["upsert", (V.upsert as unknown[]).length],

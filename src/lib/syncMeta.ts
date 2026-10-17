@@ -111,6 +111,10 @@ export const SYNC_TABLES: SyncTable[] = [
   // device pushes back and resurrects — the same failure as a deleted task,
   // with the difference that nobody would think to look for it here.
   { name: "user_settings", needsDeleted: true, hasCreatedAt: false },
+  // Notes stuck on the home screen. Taking one off is the tombstone and only
+  // the tombstone: a note that came back on the other machine because its
+  // removal left no trace would be the one thing a note must never do.
+  { name: "notes", needsDeleted: true, hasCreatedAt: true },
 ];
 
 /**

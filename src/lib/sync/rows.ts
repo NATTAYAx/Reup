@@ -137,6 +137,18 @@ export function upsert(shape: TableShape, r: ChangeRecord): Statement {
   }
   for (const c of payloadColumns(shape)) {
     if (!known.has(c)) continue;
+    // A field the record does not carry at all is left out of the statement,
+    // rather than written as null. Absent is not the same as null here: every
+    // writer puts each of its own columns in, nulls included, so a missing key
+    // means the writer's table has no such column - an older build, or a file
+    // written before the column existed. Left out, an insert gets the column's
+    // default and an update keeps what is already there.
+    //
+    // Writing null was wrong both ways. On a nullable column it wiped a value
+    // the writer had never seen. On tasks.ring_in_quiet, which is NOT NULL, it
+    // refused the whole batch - which is how a new phone reading files written
+    // before that column existed could not finish its first sync at all.
+    if (!Object.prototype.hasOwnProperty.call(r.fields, c)) continue;
     cols.push(c);
     params.push(r.fields[c] ?? null);
   }

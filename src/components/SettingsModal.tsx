@@ -33,6 +33,7 @@ import { getLang, setLang, t, type Lang } from "../lib/i18n";
 import TimeZonePicker from "./TimeZonePicker";
 import BackupCard from "./BackupCard";
 import SyncCard from "./SyncCard";
+import DesktopWidgetCard from "./DesktopWidgetCard";
 import { getTimeZonePreference, setTimeZonePreference, getAppTimeZone, offsetLabel, SYSTEM } from "../lib/tz";
 import { getCurrency, setCurrency, formatMoney, currencySymbol } from "../lib/money";
 import CurrencyPicker from "./CurrencyPicker";
@@ -52,6 +53,9 @@ import { Toast } from "./ToastCard";
 import { paletteFromVideo } from "../lib/videoPalette";
 import { DAY_START_DEFAULT, DAY_START_KEY, parseDayStart } from "../lib/userSettings";
 import { read as readNotifyLog } from "../lib/notifyLog";
+import { NOTE_STYLES } from "../lib/notes";
+import { setNoteStyle, useNoteStyle } from "../lib/noteStyle";
+import { MiniNote, noteStyleName } from "./NotePaper";
 
 interface Props {
   open: boolean;
@@ -81,6 +85,7 @@ export default function SettingsModal({ open, onClose }: Props) {
   const [autostartNote, setAutostartNote] = useState("");
   const [activeTab, setActiveTab]       = useState<"general" | "appearance">("general");
   const [currentTheme, setCurrentTheme] = useState<AppTheme>(loadTheme);
+  const noteStyleNow = useNoteStyle();
   const [customIcon, setCustomIcon]     = useState<string | null>(null);
   const [aiLoading, setAiLoading]       = useState(false);
   const [aiTheme, setAiTheme]           = useState<AppTheme | null>(null);
@@ -1606,6 +1611,38 @@ Rules:
                     </div>
                   </div>
 
+                  {/* Note paper: one look for every note, synced like the theme */}
+                  <div>
+                    <p className="text-white/40 text-xs font-semibold uppercase tracking-widest mb-2 px-1">{t("settings.notePaper")}</p>
+                    <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label={t("settings.notePaper")}>
+                      {NOTE_STYLES.map(s => {
+                        const on = s === noteStyleNow;
+                        return (
+                          <button
+                            key={s}
+                            role="radio"
+                            aria-checked={on}
+                            onClick={() => setNoteStyle(s)}
+                            className={`rounded-xl border p-1.5 transition-all ${
+                              on ? "border-white/50 bg-white/[0.06] shadow-lg" : "border-white/10 hover:border-white/30"
+                            }`}
+                          >
+                            <div className="h-14 rounded-lg flex items-center justify-center gap-1.5" style={{ background: "var(--color-bg)" }}>
+                              <MiniNote style={s} color="yellow" tilt={-5} />
+                              <MiniNote style={s} color="pink" tilt={3} />
+                              <MiniNote style={s} color="blue" tilt={-2} />
+                            </div>
+                            <p className={`mt-1.5 mb-0.5 flex items-center justify-center gap-1 text-xs font-semibold ${on ? "text-white" : "text-white/45"}`}>
+                              {on && <Check size={12} />}
+                              {noteStyleName(s)}
+                            </p>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-white/30 text-xs mt-2 px-1">{t("settings.notePaperSub")}</p>
+                  </div>
+
                   {/* Divider */}
                   <div className="flex items-center gap-3">
                     <div className="flex-1 h-px bg-white/10" />
@@ -1820,6 +1857,9 @@ Rules:
                       </p>
                     </div>
                   </div>
+
+                  {/* ── The board on the desktop ── */}
+                  <DesktopWidgetCard />
 
                   {/* Reset to default */}
                   <button

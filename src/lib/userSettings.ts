@@ -55,9 +55,9 @@ export interface SettingsDb {
 // is one more thing that can be updated on one side only.
 
 /** `{ enabled, start, end }`, as notifier.ts writes it. */
-import { CURRENCY_KEY, LANG_KEY, QUIET_KEY, THEME_ID_KEY } from "./settingKeys";
+import { CURRENCY_KEY, LANG_KEY, NOTE_STYLE_KEY, QUIET_KEY, THEME_ID_KEY } from "./settingKeys";
 
-export { CURRENCY_KEY, LANG_KEY, QUIET_KEY, THEME_ID_KEY };
+export { CURRENCY_KEY, LANG_KEY, NOTE_STYLE_KEY, QUIET_KEY, THEME_ID_KEY };
 /** An ISO 4217 code. */
 /** "th" or "en". */
 /** Minutes after midnight where this person's day starts. "0" is midnight. */
@@ -66,12 +66,13 @@ export const DAY_START_KEY = "gamesched_day_start_v1";
 /**
  * Everything that travels, and nothing else.
  *
- * Five, and each one earns its place by being about the person rather than the
+ * Six, and each one earns its place by being about the person rather than the
  * hardware in front of them. The sound file, the toast style, the tray hints and
  * the wallpaper path are all about a screen; the API keys and the pairing code
  * are secrets; the "important" card is deliberately never sent anywhere. None of
- * them is here, and adding a sixth means adding it to this list and nowhere
- * else.
+ * them is here, and adding another means adding it to this list and nowhere
+ * else. How the note paper looks was the sixth: notes are on both machines, so
+ * the way they are drawn is too.
  *
  * The theme is the one that had to change shape to get on this list. It was a
  * whole palette object, and a palette is about a screen — but *which* theme is
@@ -84,6 +85,7 @@ export const SYNCED_SETTING_KEYS: readonly string[] = [
   LANG_KEY,
   DAY_START_KEY,
   THEME_ID_KEY,
+  NOTE_STYLE_KEY,
 ];
 
 // ─── when this person's day starts ───────────────────────────────────────────

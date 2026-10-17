@@ -268,6 +268,34 @@ CREATE TABLE IF NOT EXISTS expense_categories (
 );
 -- @@
 
+-- ─── notes ───────────────────────────────────────────────────────────────────
+-- What somebody sticks on the home screen so as not to forget it, the way a
+-- note goes on a fridge door: a line or two in their own words, with no cycle,
+-- no time, no category and nothing counting how long it has been there.
+--
+-- WHY IT IS NOT A KIND OF TASK
+--
+-- A task has a schedule, and everything the app does with a task - the alarm,
+-- the countdown, the tick, the history - starts from that schedule. A note has
+-- none of it, and a task with every field blank would be read by all of that
+-- code as a task somebody forgot to fill in. The one thing a note does is stay
+-- where it can be seen until it is taken off.
+--
+-- Taking it off is the tombstone the sync migrations add, and nothing else: no
+-- "peeled at", no record that it existed. A note that is gone is gone, the same
+-- on both machines.
+--
+-- `body` is what was typed, trimmed and nothing more. `color` is the paper, one
+-- of the names in notes.ts / Notes.kt; one this version has never heard of is
+-- drawn as the first, rather than refused.
+CREATE TABLE IF NOT EXISTS notes (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  body        TEXT NOT NULL,
+  color       TEXT NOT NULL DEFAULT 'yellow',
+  created_at  TEXT DEFAULT (datetime('now'))
+);
+-- @@
+
 -- ─── migrations ──────────────────────────────────────────────────────────────
 --
 -- Everything below is an ALTER that must survive being run again. SQLite has no

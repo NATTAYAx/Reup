@@ -32,6 +32,7 @@
 import { isAlreadyThere, schemaStatements } from "../src/lib/schemaFile";
 import { applySyncMigrations } from "../src/lib/syncMeta";
 import { HISTORY_SQL, doneDates, hasHistory, type TaskEvent } from "../src/lib/history";
+import { SQL_ADD_NOTE, SQL_EDIT_NOTE, SQL_LIVE_NOTES, SQL_PEEL_NOTE, SQL_UNPEEL_NOTE } from "../src/lib/notes";
 import { KNOWN_KEYS, RETIRED_KEYS, isKnownKey, sanitizeForBackup } from "../src/lib/storageKeys";
 import {
   CUSTOM_ID,
@@ -43,6 +44,8 @@ import {
 } from "../src/lib/theme";
 import { SYNCED_SETTING_KEYS, THEME_ID_KEY } from "../src/lib/userSettings";
 import { CHIME_KEY, chimeOn, quietTakesSound } from "../src/lib/chime";
+import { upsert as upsertRow } from "../src/lib/sync/rows";
+import { readShape as readShapeOf } from "../src/lib/sync/sqlLocalStore";
 import { TASK_COLUMNS as TASK_COLUMNS_Q, TASK_EDITABLE as TASK_EDITABLE_Q } from "../src/lib/taskDraft";
 import { sync, type SyncState } from "../src/lib/sync/engine";
 import { SqlLocalStore, SYNCED_TABLES, dbNow, type Db } from "../src/lib/sync/sqlLocalStore";
@@ -1195,6 +1198,56 @@ async function main(): Promise<void> {
           !overlay.includes("quietWindowEnd"));
       }
 
+      // ─── a record from a writer that never had a column ───────────────────
+      //
+      // A new phone reads every file in the folder from the start, including
+      // ones written before tasks.ring_in_quiet existed. Those records carry no
+      // such field. Bound as null, the NOT NULL column refused the whole batch
+      // and the phone could never finish its first sync.
+      {
+        const { db } = await makeDevice();
+        const shape = await readShapeOf(db as never, "tasks");
+        const uid = "aaaaaaaa-0000-4000-8000-0000000000a1";
+        const fields = { name: "dailies", reset_type: "daily", reset_time: "04:00", category: "game" };
+        let landed = true;
+        try {
+          const s = upsertRow(shape, { uid, updatedAt: "2026-10-01T00:00:00.000Z", deleted: false, fields } as never);
+          await db.execute(s.sql, s.params);
+        } catch {
+          landed = false;
+        }
+        check("a row from a writer that never had a column still lands", landed);
+        const first = await db.select<{ ring_in_quiet: number }[]>(
+          "SELECT ring_in_quiet FROM tasks WHERE uid = ?", [uid]);
+        check("and that column takes its default", first[0]?.ring_in_quiet === 0);
+
+        // The person marks it here, then a later edit arrives from the writer
+        // that does not know the column. The edit wins the row; it must not
+        // take a value it never carried.
+        await db.execute("UPDATE tasks SET ring_in_quiet = 1 WHERE uid = ?", [uid]);
+        const s2 = upsertRow(shape, {
+          uid, updatedAt: "2026-10-02T00:00:00.000Z", deleted: false,
+          fields: { ...fields, name: "dailies, renamed" },
+        } as never);
+        try { await db.execute(s2.sql, s2.params); } catch { /* reported by the check below */ }
+        const after = await db.select<{ ring_in_quiet: number; name: string }[]>(
+          "SELECT ring_in_quiet, name FROM tasks WHERE uid = ?", [uid]);
+        check("a later edit from that writer does not wipe what it never knew",
+          after[0]?.ring_in_quiet === 1 && after[0]?.name === "dailies, renamed");
+
+        // A writer that does know the column and cleared a field sends an
+        // explicit null, which is still written - absent and null stay apart.
+        await db.execute("UPDATE tasks SET notify_before_min = 30 WHERE uid = ?", [uid]);
+        const s3 = upsertRow(shape, {
+          uid, updatedAt: "2026-10-03T00:00:00.000Z", deleted: false,
+          fields: { ...fields, ring_in_quiet: 1, notify_before_min: null },
+        } as never);
+        try { await db.execute(s3.sql, s3.params); } catch { /* reported by the check below */ }
+        const cleared = await db.select<{ notify_before_min: number | null }[]>(
+          "SELECT notify_before_min FROM tasks WHERE uid = ?", [uid]);
+        check("a field cleared on purpose is still cleared", cleared[0]?.notify_before_min === null);
+      }
+
       // And the two that must never reach the file, asked by name rather than
       // only through the predicate that decides it.
       check("an API key is not written into a backup",
@@ -1580,6 +1633,74 @@ async function main(): Promise<void> {
 
     check("and a daily is not offered an answer at all, because that is a streak",
       !hasHistory("daily") && !hasHistory("specific_date") && hasHistory("weekly"));
+  }
+
+  // ── notes on the home screen ───────────────────────────────────────────────
+  //
+  // Written on either machine and taken off on either, through the same five
+  // statements the phone is pinned to. The failure worth a block of its own is
+  // the one a note must never do: come back. A peel that left no trace would be
+  // pushed straight back by the machine that still had the note.
+  {
+    const cloud = new MemoryStorage();
+    const a = await makeDevice();
+    const b = await makeDevice();
+
+    a.db.raw.prepare(SQL_ADD_NOTE).run("ปิดแก๊สก่อนออกจากบ้าน", "pink");
+    a.db.raw.prepare(SQL_ADD_NOTE).run("ซื้อนม", "yellow");
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+
+    const onB = rows(b.db, SQL_LIVE_NOTES);
+    check("a note stuck up on one machine is up on the other", onB.length === 2);
+    check("with its words and its paper",
+      onB.some((n) => n.body === "ปิดแก๊สก่อนออกจากบ้าน" && n.color === "pink"));
+    const mine = rows(a.db, SQL_LIVE_NOTES);
+    check("and in the same order on both, newest first",
+      JSON.stringify(mine.map((n) => n.uid)) === JSON.stringify(onB.map((n) => n.uid)));
+
+    // Taken off on the other machine.
+    const milk = onB.find((n) => n.body === "ซื้อนม")!;
+    b.db.raw.prepare(SQL_PEEL_NOTE).run(milk.uid);
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+    check("a note taken off on one machine is off the other",
+      rows(a.db, SQL_LIVE_NOTES).every((n) => n.uid !== milk.uid));
+    const gone = row(a.db, "SELECT body, deleted FROM notes WHERE uid = ?", [milk.uid]);
+    check("and what it said did not travel with the tombstone",
+      gone?.deleted === 1 && gone?.body === "");
+
+    // The machine that had it syncs again, and again. It must not come back.
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+    check("it does not come back from the machine that still had it",
+      rows(a.db, SQL_LIVE_NOTES).length === 1 && rows(b.db, SQL_LIVE_NOTES).length === 1);
+
+    // The undo, on the machine that took it off, after the other has heard.
+    b.db.raw.prepare(SQL_UNPEEL_NOTE).run("ซื้อนม", "yellow", milk.uid);
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+    const back = rows(a.db, SQL_LIVE_NOTES).find((n) => n.uid === milk.uid);
+    check("putting it back up reaches the other machine, words and all",
+      back?.body === "ซื้อนม" && back?.color === "yellow");
+
+    // An edit and a peel of one note, each on a different machine, between
+    // syncs. Last write wins, as everywhere; what matters is that both end up
+    // holding the same answer.
+    const gas = rows(a.db, SQL_LIVE_NOTES).find((n) => n.body.startsWith("ปิดแก๊ส"))!;
+    a.db.raw.prepare(SQL_EDIT_NOTE).run("ปิดแก๊ส + ล็อกประตู", "pink", gas.uid);
+    b.db.raw.prepare(SQL_PEEL_NOTE).run(gas.uid);
+    await runSync(cloud, a);
+    await runSync(cloud, b);
+    await runSync(cloud, a);
+    const liveA = rows(a.db, SQL_LIVE_NOTES).map((n) => `${n.uid}:${n.body}`).sort();
+    const liveB = rows(b.db, SQL_LIVE_NOTES).map((n) => `${n.uid}:${n.body}`).sort();
+    check("an edit and a peel at once end the same way on both machines",
+      JSON.stringify(liveA) === JSON.stringify(liveB));
+
+    const quiet = await runSync(cloud, a);
+    check("notes do not churn once they have settled", quiet.pushed === 0 && quiet.wrote === null);
   }
 
   // ── the folder cleans itself up under a device that was away ──────────────

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, WebviewWindow,
 };
@@ -9,6 +9,9 @@ use tauri_plugin_autostart::MacosLauncher;
 mod wallpaper;
 mod sync_http;
 mod oauth_loopback;
+mod widget;
+#[cfg(target_os = "windows")]
+mod desk_layer;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct NotificationPayload {
@@ -420,10 +423,26 @@ pub fn run() {
                 win.open_devtools();
             }
 
+            // The board on the desktop. Read before the menu is built, so the
+            // check mark starts out matching what is on screen.
+            widget::setup(app.handle());
+
             let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
             let hide = MenuItem::with_id(app, "hide", "Hide", true, None::<&str>)?;
+            let board = CheckMenuItem::with_id(
+                app,
+                "widget",
+                "Desktop widget",
+                true,
+                widget::is_enabled(app.handle()),
+                None::<&str>,
+            )?;
+            let arrange = MenuItem::with_id(app, "widget-arrange", "Move widget", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
+            let line1 = PredefinedMenuItem::separator(app)?;
+            let line2 = PredefinedMenuItem::separator(app)?;
+            let menu = Menu::with_items(app, &[&show, &hide, &line1, &board, &arrange, &line2, &quit])?;
+            widget::remember_menu(app.handle(), board.clone());
 
             TrayIconBuilder::with_id("tray")
                 .menu(&menu)
@@ -440,6 +459,8 @@ pub fn run() {
                             let _ = win.hide();
                         }
                     }
+                    "widget" => widget::tray_toggle(app),
+                    "widget-arrange" => widget::tray_arrange(app),
                     "quit" => {
                         wallpaper::kill_wallpaper_process(app);
                         app.exit(0);
@@ -507,6 +528,10 @@ pub fn run() {
             wallpaper::stop_wallpaper,
             wallpaper::swap_wallpaper,
             wallpaper::pick_video,
+            widget::widget_status,
+            widget::widget_enable,
+            widget::widget_arrange,
+            widget::widget_reset,
         ])
         .run(ctx)
         .expect("error while running tauri application");

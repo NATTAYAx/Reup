@@ -69,7 +69,7 @@ export interface AppTheme {
 export const CUSTOM_ID = "custom";
 
 /** Where the custom palette lives. Device-local, and not in SYNCED_SETTING_KEYS. */
-const THEME_BLOB_KEY = "gamesched_theme_v1";
+export const THEME_BLOB_KEY = "gamesched_theme_v1";
 
 // ─── the six ─────────────────────────────────────────────────────────────────
 //

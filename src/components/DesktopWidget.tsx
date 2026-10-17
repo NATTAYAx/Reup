@@ -41,6 +41,15 @@
 // into whole rows and nothing is ever cut through the middle. The night's
 // rounds get first claim on it, as on the phone: up to six of them, then the
 // longer rounds, then whatever is left goes back to the night.
+//
+// THE NOTES
+//
+// Under the date, before what is next, as on the phone: up to three squares of
+// paper, newest first, leaning a little, in the same hand, and how many more
+// there are. Paper brings its own background, so a note needs neither the mist
+// nor a shadow on its words - only the one under the paper. Like everything
+// else here it takes no clicks; a note is changed or taken off in the app or on
+// the phone, and the board hears about it with the tasks.
 
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactElement } from "react";
@@ -49,7 +58,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Moon } from "lucide-react";
 import type { Task } from "../types";
-import type { WidgetPayload } from "../lib/widgetFeed";
+import type { WidgetNote, WidgetPayload } from "../lib/widgetFeed";
+import { NOTES_SHOWN, noteColor, noteLook, noteTilt, type NoteStyle } from "../lib/notes";
+import { getNoteStyle } from "../lib/noteStyle";
+import { Tape, paperEdge, paperFill } from "./NotePaper";
 import {
   widgetRows, widgetFace, moneyLine, boardDate, lineText, WIDGET_WORDS,
   type WidgetFace, type WidgetLine, type WidgetLang,
@@ -60,7 +72,7 @@ import { quietWindowEnd } from "../lib/notifier";
 import { t, getLang, refreshLang } from "../lib/i18n";
 import { applyTheme, loadTheme, THEME_BLOB_KEY } from "../lib/theme";
 import { formatMoney } from "../lib/money";
-import { LANG_KEY, THEME_ID_KEY } from "../lib/settingKeys";
+import { LANG_KEY, NOTE_STYLE_KEY, THEME_ID_KEY } from "../lib/settingKeys";
 
 interface Status {
   enabled: boolean;
@@ -77,6 +89,8 @@ const INK_FAINT = "rgba(255,255,255,0.56)";
 const WARN = "#fbbf24";
 const GOOD = "#4ade80";
 const ACCENT = "var(--color-accent)";
+/** What keeps the words readable where the mist does not reach. */
+const SHADOW = "0 1px 2px rgba(0,0,0,0.55), 0 0 12px rgba(0,0,0,0.38)";
 /** The mist: the theme's own colour pressed almost to black, so it sits in the
  *  wallpaper like shade rather than like a sheet of grey laid over it. */
 const MIST = "color-mix(in srgb, var(--color-primary) 20%, #05030a)";
@@ -96,7 +110,7 @@ const COLUMN_EM = 31;
 const FEATHER_EM = 3.5;
 
 /** Settings written by the main window that change what this page shows. */
-const WATCHED = [LANG_KEY, THEME_ID_KEY, THEME_BLOB_KEY, TZ_KEY, WIDGET_TINT_KEY];
+const WATCHED = [LANG_KEY, THEME_ID_KEY, THEME_BLOB_KEY, TZ_KEY, WIDGET_TINT_KEY, NOTE_STYLE_KEY];
 
 function signature(): string {
   try {
@@ -355,7 +369,7 @@ export default function DesktopWidget() {
   const complete = !!face && face.load > 0 && face.done >= face.load;
   const pct = face && face.load > 0 ? Math.min(100, (face.done / face.load) * 100) : 0;
 
-  const shadow = "0 1px 2px rgba(0,0,0,0.55), 0 0 12px rgba(0,0,0,0.38)";
+  const notes = payload?.notes ?? [];
   const align = side === "right" ? "flex-end" : "flex-start";
 
   return (
@@ -379,7 +393,7 @@ export default function DesktopWidget() {
       )}
 
       <div className="relative h-full flex" style={{ justifyContent: align, padding: "1.5em 1.9em 1.3em" }}>
-        <div ref={columnRef} className="h-full flex flex-col min-w-0" style={{ width: `min(100%, ${COLUMN_EM}em)`, textShadow: shadow }}>
+        <div ref={columnRef} className="h-full flex flex-col min-w-0" style={{ width: `min(100%, ${COLUMN_EM}em)`, textShadow: SHADOW }}>
           {/* the clock: the one large thing */}
           <div data-ink className="shrink-0">
             <div
@@ -404,6 +418,8 @@ export default function DesktopWidget() {
               )}
             </div>
           </div>
+
+          {notes.length > 0 && <Papers notes={notes} style={getNoteStyle()} />}
 
           {/* what is next */}
           <div data-ink className="shrink-0 mt-[1.4em]">
@@ -461,6 +477,64 @@ export default function DesktopWidget() {
       </div>
 
       {arranging && <Arrange />}
+    </div>
+  );
+}
+
+/**
+ * The notes that are up: the newest few on paper, in the style the app is set
+ * to (a change there reaches this window through WATCHED), and a count of the
+ * rest.
+ */
+function Papers({ notes, style }: { notes: WidgetNote[]; style: NoteStyle }) {
+  const shown = notes.slice(0, NOTES_SHOWN);
+  const more = notes.length - shown.length;
+  return (
+    <div className="shrink-0 mt-[1.3em] flex items-start" style={{ gap: "0.95em", paddingLeft: "0.15em", textShadow: "none" }}>
+      {shown.map(n => {
+        const look = noteLook(style, noteColor(n.color));
+        return (
+          <div
+            key={n.uid}
+            className="note-hand relative"
+            style={{
+              flex: "0 1 8.8em",
+              minWidth: "5.5em",
+              height: "6.4em",
+              padding: "0.6em 0.7em",
+              background: paperFill(look),
+              border: paperEdge(look),
+              color: look.ink,
+              borderRadius: "0.18em",
+              transform: `rotate(${noteTilt(n.uid)}deg)`,
+              boxShadow: look.dark
+                ? "0 0.25em 0.7em rgba(0,0,0,0.55), 0 0.06em 0.16em rgba(0,0,0,0.4)"
+                : "0 0.2em 0.55em rgba(0,0,0,0.42), 0 0.06em 0.14em rgba(0,0,0,0.3)",
+            }}
+          >
+            {look.dark && <Tape ink={look.ink} width="2.6em" height="0.7em" top="-0.38em" />}
+            <span
+              style={{
+                display: "-webkit-box",
+                WebkitLineClamp: 4,
+                WebkitBoxOrient: "vertical",
+                overflow: "hidden",
+                fontSize: "0.92em",
+                lineHeight: 1.3,
+                whiteSpace: "pre-line",
+                overflowWrap: "anywhere",
+              }}
+            >
+              {n.body}
+            </span>
+          </div>
+        );
+      })}
+      {more > 0 && (
+        <span className="shrink-0 self-center" style={{ color: INK_SOFT, fontWeight: 500, fontVariantNumeric: "tabular-nums", textShadow: SHADOW }}>
+          +{more}
+        </span>
+      )}
     </div>
   );
 }

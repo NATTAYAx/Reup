@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Settings, Gamepad2, Clock, CalendarDays, CheckCircle2, Brain, Wallet, BatteryLow, Archive } from "lucide-react";
+import { Plus, Settings, Gamepad2, Clock, CalendarDays, CheckCircle2, Brain, Wallet, BatteryLow, Archive, StickyNote } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
+import { enable as enableAutostart, isEnabled as autostartEnabled } from "@tauri-apps/plugin-autostart";
 import { useCountdowns } from "./hooks/useCountdowns";
 import { onDataChanged } from "./lib/dataChanged";
+import { startWidgetFeed, sendToWidget } from "./lib/widgetFeed";
 import { runAutoBackupIfDue } from "./lib/autoBackup";
 import { startAutoSync } from "./lib/autoSync";
 import { loadTheme, applyTheme, reapplyThemeFromSettings } from "./lib/theme";
@@ -20,6 +22,9 @@ import FinanceView from "./components/FinanceView";
 import EditTaskModal from "./components/EditTaskModal";
 import UnifiedAIChat from "./components/UnifiedAIChat";
 import TaskShelf from "./components/TaskShelf";
+import { NotesBoard, NoteEditor } from "./components/NotesBoard";
+import { useNotes } from "./hooks/useNotes";
+import type { Note } from "./lib/notes";
 // import DebugOverlay from "./components/DebugOverlay"; // debug tool, re-enable if needed
 import { localHour, personalToday } from "./lib/dateUtil";
 import { getAppTimeZone } from "./lib/tz";
@@ -66,6 +71,19 @@ export default function App() {
       }
     })();
 
+    // Start-at-login points Windows at one particular Reup.exe. When the app
+    // moves - the MSI put it in Program Files, the setup.exe puts it under the
+    // user's AppData - that entry is left pointing at a file that is gone, and
+    // the only sign is that Reup quietly stops starting with Windows. So on
+    // every start, if it is switched on, it is written again with this copy's
+    // path. Switched off, or turned off in Task Manager, it is left alone; a
+    // dev build never touches it (see toggleAutostart in SettingsModal).
+    if (!import.meta.env.DEV) {
+      autostartEnabled()
+        .then(on => (on ? enableAutostart() : undefined))
+        .catch(err => console.warn("autostart refresh failed:", err));
+    }
+
     // Restore custom tray icon from localStorage on every startup.
     // The Rust tray always starts with the default icon — we must re-send
     // the custom one each launch so it persists across restarts.
@@ -93,6 +111,11 @@ export default function App() {
   const [filter, setFilter] = useState<Filter>("all");
   const [calendarKey, setCalendarKey] = useState(0);
   const [financeKey, setFinanceKey] = useState(0);
+
+  // The notes stuck up, here, on the phone and on the desktop board. Which one
+  // is open to be written on: { note: null } for a new one.
+  const notesApi = useNotes();
+  const [noteEditing, setNoteEditing] = useState<{ note: Note | null } | null>(null);
 
   // A switch the PERSON flips, never the app. An app guessing at someone's
   // capacity gets it wrong in both directions: it nags on a fine day and
@@ -145,6 +168,7 @@ export default function App() {
   const mountSettings = useMountOnce(settingsOpen);
   const mountEdit     = useMountOnce(editTaskId !== null);
   const mountAi       = useMountOnce(aiOpen);
+  const mountNote     = useMountOnce(noteEditing !== null);
 
   const refreshAll = useCallback(() => {
     refreshTasks();
@@ -156,6 +180,10 @@ export default function App() {
   // comes back: it announces what it wrote through dataChanged like any other
   // sync, so the effect below is what makes the screen follow.
   useEffect(() => startAutoSync(), []);
+
+  // The board on the desktop asks for the list when it opens, and keeps its
+  // money line fresh while it shows one. See lib/widgetFeed.
+  useEffect(() => startWidgetFeed(), []);
 
   // A backup nobody has to remember, once a week, into the app's own folder.
   //
@@ -186,6 +214,9 @@ export default function App() {
         tables.has("saving_goals") || tables.has("expected_income") ||
         tables.has("expense_categories")) {
       setFinanceKey(k => k + 1);
+      // The board's money line, if it has one. Tasks reach it through
+      // refreshTasks above.
+      if (tables.has("expenses") || tables.has("income")) void sendToWidget();
     }
     // The calendar reads tasks and expenses both, so it follows either.
     if (tables.size > 0) setCalendarKey(k => k + 1);
@@ -341,6 +372,12 @@ export default function App() {
               <BatteryLow size={16} className={lowPower ? "text-amber-400" : "text-white/40"} />
             </motion.button>
 
+            <motion.button whileTap={{ scale: 0.95 }} onClick={() => setNoteEditing({ note: null })}
+              className="p-2.5 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition-all"
+              title={t("notes.add")} aria-label={t("notes.add")}>
+              <StickyNote size={16} className="text-white/40" />
+            </motion.button>
+
             <motion.button whileTap={{ scale: 0.95 }} onClick={() => setShelfOpen(true)}
               className="p-2.5 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition-all"
               title={t("shelf.title")}>
@@ -361,7 +398,7 @@ export default function App() {
               <motion.button whileTap={{ scale: 0.95 }} onClick={() => setAddOpen(true)}
                 className="px-4 py-2.5 rounded-xl hover:opacity-90 transition-all flex items-center gap-2 theme-btn">
                 <Plus size={16} />
-                <span className="text-sm font-semibold">{t("btn.addTask")}</span>
+                <span className="text-sm font-semibold whitespace-nowrap">{t("btn.addTask")}</span>
               </motion.button>
             )}
           </div>
@@ -371,6 +408,13 @@ export default function App() {
           {/* All views stay mounted — hidden via CSS to prevent re-mount freezes */}
           <div style={{ display: view === "tasks" ? "flex" : "none" }} className="flex flex-col flex-1 overflow-hidden min-h-0">
 
+              {/* The notes first: the one thing on this screen somebody wrote
+                  to themselves. Not there at all while none are up. */}
+              <NotesBoard
+                api={notesApi}
+                onOpen={note => setNoteEditing({ note })}
+                onAdd={() => setNoteEditing({ note: null })}
+              />
 
               {/* urgent alert banner */}
               <AnimatePresence>
@@ -559,6 +603,7 @@ export default function App() {
         onTaskAdded={refreshAll} onOpenAI={() => { setAddOpen(false); setAiOpen(true); }} />}
       {mountSettings && <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />}
       <TaskShelf open={shelfOpen} onClose={() => setShelfOpen(false)} onChanged={refreshAll} />
+      {mountNote && <NoteEditor open={noteEditing !== null} note={noteEditing?.note ?? null} api={notesApi} onClose={() => setNoteEditing(null)} />}
       {mountEdit && <EditTaskModal taskId={editTaskId} initialTask={editTask} onClose={() => { setEditTaskId(null); setEditTask(null); }} onSaved={() => { setEditTaskId(null); setEditTask(null); setTimeout(refreshAll, 100); }} />}
       {mountAi && <UnifiedAIChat
         open={aiOpen}

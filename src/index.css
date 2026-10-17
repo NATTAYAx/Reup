@@ -22,6 +22,24 @@
 @import "@fontsource/ibm-plex-sans-thai/600.css";
 @import "@fontsource/ibm-plex-sans-thai/700.css";
 
+/* ─── The hand notes are written in ──────────────────────────────────────────
+   Mali, by Cadson Demak, under the SIL Open Font License (Mali-OFL.txt beside
+   the file; the font carries the same notice in its own metadata). The same
+   file the phone draws its notes with, so a note looks like the same piece of
+   paper on both. Bundled for the same reason as Plex above. Only notes use it,
+   so only a screen with a note on it loads it. */
+@font-face {
+  font-family: "Reup Note Hand";
+  src: url("./assets/fonts/Mali-Medium.ttf") format("truetype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+.note-hand {
+  font-family: "Reup Note Hand", "IBM Plex Sans Thai", "Leelawadee UI", sans-serif;
+  font-weight: 500;
+}
+
 @theme {
   /* Leelawadee UI stays behind it as the Windows Thai fallback, so the app is
      still readable in the instant before the bundled file is decoded, and on a

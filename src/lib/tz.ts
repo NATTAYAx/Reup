@@ -29,7 +29,7 @@
 // Net effect: this replaces date-fns-tz, which was pulled in for one function
 // and dragged date-fns along with it.
 
-const TZ_KEY = "gamesched_timezone";
+export const TZ_KEY = "gamesched_timezone";
 const FALLBACK_ZONE = "Asia/Bangkok";
 
 /** The stored preference is either this word or a real IANA name. Storing the
