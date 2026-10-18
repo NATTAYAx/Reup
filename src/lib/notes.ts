@@ -102,6 +102,14 @@ export const NOTE_MAX_CHARS = 120;
 /** How many the boards show at once; the rest are counted. */
 export const NOTES_SHOWN = 3;
 
+/**
+ * How far apart a note's lines are, in em. Mali stacks a tone mark on an upper
+ * vowel as high as 1.45 em and hangs ุ and ู 0.41 em under the line, so lines
+ * any closer run one line's marks into the vowels under the line above, as
+ * they did at 1.33. The phone's is the same number (Notes.kt).
+ */
+export const NOTE_LEAD = 1.6;
+
 export interface Note {
   id: number;
   uid: string;

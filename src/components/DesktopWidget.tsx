@@ -59,7 +59,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Moon } from "lucide-react";
 import type { Task } from "../types";
 import type { WidgetNote, WidgetPayload } from "../lib/widgetFeed";
-import { NOTES_SHOWN, noteColor, noteLook, noteTilt, type NoteStyle } from "../lib/notes";
+import { NOTE_LEAD, NOTES_SHOWN, noteColor, noteLook, noteTilt, type NoteStyle } from "../lib/notes";
+import { FitText } from "./FitText";
 import { getNoteStyle } from "../lib/noteStyle";
 import { Tape, paperEdge, paperFill } from "./NotePaper";
 import {
@@ -513,20 +514,11 @@ function Papers({ notes, style }: { notes: WidgetNote[]; style: NoteStyle }) {
             }}
           >
             {look.dark && <Tape ink={look.ink} width="2.6em" height="0.7em" top="-0.38em" />}
-            <span
-              style={{
-                display: "-webkit-box",
-                WebkitLineClamp: 4,
-                WebkitBoxOrient: "vertical",
-                overflow: "hidden",
-                fontSize: "0.92em",
-                lineHeight: 1.3,
-                whiteSpace: "pre-line",
-                overflowWrap: "anywhere",
-              }}
-            >
-              {n.body}
-            </span>
+            <FitText
+              text={n.body}
+              lines={3}
+              style={{ fontSize: "0.92em", lineHeight: NOTE_LEAD, whiteSpace: "pre-line", overflowWrap: "anywhere" }}
+            />
           </div>
         );
       })}
@@ -546,20 +538,14 @@ function Next({ face, lang }: { face: WidgetFace; lang: WidgetLang }) {
     return (
       <div>
         <p style={{ color: ACCENT, fontWeight: 500 }}>{t("widget.next")}</p>
-        <p
+        {/* Two lines at most, cut without clipping: a clamp would take the
+            tone marks off the first line of a Thai name (see FitText). */}
+        <FitText
+          text={next.name}
+          lines={2}
           className="font-semibold"
-          style={{
-            fontSize: "1.95em",
-            lineHeight: 1.3,
-            marginTop: "0.08em",
-            display: "-webkit-box",
-            WebkitLineClamp: 2,
-            WebkitBoxOrient: "vertical",
-            overflow: "hidden",
-          }}
-        >
-          {next.name}
-        </p>
+          style={{ fontSize: "1.95em", lineHeight: 1.3, marginTop: "0.08em" }}
+        />
         <p style={{ fontSize: "1.25em", fontWeight: 500, marginTop: "0.12em", color: next.warn ? WARN : ACCENT, fontVariantNumeric: "tabular-nums" }}>
           {lineText(next, lang)}
         </p>

@@ -178,9 +178,8 @@ function CardBody({ data, theme, cat, crit, preview, radius }: BodyProps & { rad
             <Badge crit={crit} />
             <span style={{ fontSize: 9, color: theme.textMuted, fontWeight: 600 }}>{t(cat.key)}</span>
           </div>
-          <p style={{
+          <p className="truncate" style={{
             color: "#fff", fontWeight: 700, fontSize: 13.5, lineHeight: 1.3, margin: 0,
-            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}>
             {data.task_name}
           </p>
@@ -268,9 +267,8 @@ function RingBody({ data, theme, cat, crit, preview }: BodyProps) {
           <Badge crit={crit} />
           <span style={{ fontSize: 9, color: theme.textMuted, fontWeight: 600 }}>{t(cat.key)}</span>
         </div>
-        <p style={{
+        <p className="truncate" style={{
           color: "#fff", fontWeight: 700, fontSize: 14, lineHeight: 1.25, margin: 0,
-          whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
         }}>
           {data.task_name}
         </p>
@@ -300,15 +298,13 @@ function MinimalBody({ data, theme, cat, crit, preview }: BodyProps) {
         </div>
 
         <div style={{ flex: 1, minWidth: 0 }}>
-          <p style={{
+          <p className="truncate" style={{
             color: "#fff", fontWeight: 700, fontSize: 12.5, lineHeight: 1.25, margin: 0,
-            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}>
             {data.task_name}
           </p>
-          <p style={{
+          <p className="truncate" style={{
             color: theme.textMuted, fontSize: 9.5, margin: 0, marginTop: 1,
-            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}>
             {(crit ? t("notif.critical") : t("notif.warning")) + " · " + t(cat.key)}
           </p>

@@ -45,6 +45,7 @@ import { SETTING_UPSERT_SQL, parseQuiet } from "../src/lib/userSettings";
 import {
   NOTE_COLORS,
   NOTE_INK,
+  NOTE_LEAD,
   NOTE_LOOKS,
   NOTE_MAX_CHARS,
   NOTE_PAPER,
@@ -500,7 +501,7 @@ async function main(): Promise<void> {
   // The papers and the ink, by name and in picker order: the name is what is
   // stored, and an unknown one is drawn as the first.
   V.noteColors = NOTE_COLORS.map((name) => ({ name, paper: NOTE_PAPER[name], ink: NOTE_INK }));
-  V.noteLimits = [{ maxChars: NOTE_MAX_CHARS, shown: NOTES_SHOWN }];
+  V.noteLimits = [{ maxChars: NOTE_MAX_CHARS, shown: NOTES_SHOWN, lead: NOTE_LEAD }];
   // How the papers look: one setting for every note, synced like the theme.
   // The names are what travels and the colours are what both machines draw,
   // so both are pinned - a style spelled differently is a setting that never

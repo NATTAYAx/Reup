@@ -3,10 +3,11 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Check, Plus, X } from "lucide-react";
 import { t } from "../lib/i18n";
 import {
-  NOTE_COLORS, NOTE_MAX_CHARS, noteBody, noteColor, noteLook, noteTilt, noteTyped,
+  NOTE_COLORS, NOTE_LEAD, NOTE_MAX_CHARS, noteBody, noteColor, noteLook, noteTilt, noteTyped,
   type Note, type NoteColor,
 } from "../lib/notes";
 import { useNoteStyle } from "../lib/noteStyle";
+import { FitText } from "./FitText";
 import { Tape, paperEdge, paperFill, paperShadow, type NoteLook } from "./NotePaper";
 import type { NotesApi } from "../hooks/useNotes";
 
@@ -96,20 +97,11 @@ export function NotesBoard({ api, onOpen, onAdd }: BoardProps) {
                 }}
               >
                 {look.dark && <Tape ink={look.ink} />}
-                <span
-                  className="block overflow-hidden"
-                  style={{
-                    fontSize: 15,
-                    lineHeight: 1.33,
-                    display: "-webkit-box",
-                    WebkitLineClamp: 4,
-                    WebkitBoxOrient: "vertical",
-                    whiteSpace: "pre-line",
-                    overflowWrap: "anywhere",
-                  }}
-                >
-                  {note.body}
-                </span>
+                <FitText
+                  text={note.body}
+                  lines={3}
+                  style={{ fontSize: 15, lineHeight: NOTE_LEAD, whiteSpace: "pre-line", overflowWrap: "anywhere" }}
+                />
               </button>
               <button
                 onClick={() => peel(note)}
@@ -300,7 +292,9 @@ export function NoteEditor({ open, note, api, onClose }: EditorProps) {
                 border: paperEdge(look),
                 transform: `rotate(${tilt}deg)`,
                 boxShadow: paperShadow(look, true),
-                padding: look.dark ? "15px 17px" : "16px 18px",
+                // Less on top than the sides: the box below carries its own,
+                // for the marks over its first line.
+                padding: look.dark ? "9px 17px 13px" : "10px 18px 14px",
               }}
             >
               {look.dark && <Tape ink={look.ink} width="52px" height="13px" top="-7px" />}
@@ -310,11 +304,14 @@ export function NoteEditor({ open, note, api, onClose }: EditorProps) {
                 value={text}
                 onChange={e => type(e.target.value)}
                 disabled={busy}
-                rows={5}
+                rows={4}
                 placeholder={t("notes.placeholder")}
                 aria-label={editing ? t("notes.edit") : t("notes.add")}
                 className={`note-hand w-full resize-none bg-transparent outline-none ${look.dark ? "placeholder:opacity-50" : "placeholder:opacity-40"}`}
-                style={{ color: look.ink, fontSize: 21, lineHeight: 1.42, caretColor: look.ink }}
+                // A textarea cuts what is outside its padding, and Mali's
+                // marks over an upper vowel stand a quarter of an em above
+                // the line: the padding is where they go.
+                style={{ color: look.ink, fontSize: 21, lineHeight: NOTE_LEAD, caretColor: look.ink, paddingTop: "0.3em", paddingBottom: "0.15em" }}
               />
             </div>
 

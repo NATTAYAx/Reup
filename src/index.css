@@ -61,6 +61,32 @@
    crowded is under explicit leading-tight, and the fix for that is to loosen
    the element that is crowded, which is what the budget dialog heading got. */
 
+/* ─── Thai marks above the line ──────────────────────────────────────────────
+   A tone mark stacked on an upper vowel, or on the ำ of น้ำ, stands higher than
+   the top of a Tailwind line box: Plex puts it 1.04-1.14 em above the baseline,
+   and text-xs or leading-tight lines stop at 0.92-0.96 em. CSS lets ink spill
+   out of a line box, which is fine until something clips to the box - and
+   truncate is overflow: hidden. Every task card took the mark off รดน้ำ and ซื้อ.
+
+   truncate only has to clip sideways, where its ellipsis is, so it clips
+   sideways only. min-width: 0 keeps what overflow: hidden gave a flex or grid
+   item without asking - permission to shrink - which a clip box does not get
+   on its own. Unlayered, so it wins over the utility it amends. */
+.truncate {
+  overflow-x: clip;
+  overflow-y: visible;
+  min-width: 0;
+}
+
+/* An input clips its text to its own line too, and there is no way to tell it
+   otherwise; so a field that takes words gets the face's own line, tall enough
+   for the marks - three or four pixels taller at text-xs. Fields for numbers
+   keep theirs: digits have no marks, and the time field sits beside a select
+   of the same height. */
+:is(input:not([type]), input[type="text"], input[type="search"]):not([inputmode="numeric"]):not([inputmode="decimal"]) {
+  line-height: normal;
+}
+
 /* ─── Theme CSS variables (set by applyTheme() in JS) ────────────────────── */
 :root {
   --color-primary:   #7c3aed;
