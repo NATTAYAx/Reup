@@ -40,6 +40,11 @@ export const THEME_ID_KEY = "gamesched_theme_id_v1";
  *  for the same reason: it is a taste, not a screen. See lib/notes.ts. */
 export const NOTE_STYLE_KEY = "gamesched_note_style_v1";
 
+/** Minutes after midnight where this person's day starts, as a string: "0"
+ *  is midnight, "240" is four. Synced. The phone reads it to tell which day
+ *  a deadline belongs to - see todayFace in the phone's Face.kt. */
+export const DAY_START_KEY = "gamesched_day_start_v1";
+
 /** Where this device syncs to and with which key. Never synced: it is the way
  *  in, and a device that copied another device's would be syncing with itself. */
 export const SYNC_CONFIG_KEY = "sync_config_v1";

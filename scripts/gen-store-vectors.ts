@@ -32,6 +32,7 @@
 import { outboxReseed, syncMigrations } from "../src/lib/syncMeta";
 import {
   CURRENCY_KEY,
+  DAY_START_KEY,
   GOOGLE_TOKENS_KEY,
   LANG_KEY,
   NOTE_STYLE_KEY,
@@ -468,6 +469,7 @@ async function main(): Promise<void> {
     SYNC_STATE_KEY,
     THEME_ID_KEY,
     NOTE_STYLE_KEY,
+    DAY_START_KEY,
   ];
 
   // The six themes, by the name that travels.

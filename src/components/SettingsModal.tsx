@@ -51,7 +51,7 @@ import {
 import { loadImportant, saveImportant, shouldReviewImportant, markImportantReviewed, type ImportantCard } from "../lib/importantCard";
 import { Toast } from "./ToastCard";
 import { paletteFromVideo } from "../lib/videoPalette";
-import { DAY_START_DEFAULT, DAY_START_KEY, parseDayStart } from "../lib/userSettings";
+import { DAY_START_DEFAULT, DAY_START_KEY, parseDayStart, putSetting } from "../lib/userSettings";
 import { read as readNotifyLog } from "../lib/notifyLog";
 import { NOTE_STYLES } from "../lib/notes";
 import { setNoteStyle, useNoteStyle } from "../lib/noteStyle";
@@ -424,11 +424,13 @@ export default function SettingsModal({ open, onClose }: Props) {
     setQuietHours(next);
   };
 
+  // Through putSetting, like quiet hours, so the row in user_settings moves
+  // too. Writing localStorage alone was quietly undone: the next launch's
+  // hydrate copies the table back over the cache, so a changed day start
+  // reverted on restart and never reached the phone.
   const saveDayStart = (minutes: number) => {
     setDayStart(minutes);
-    try {
-      localStorage.setItem(DAY_START_KEY, String(minutes));
-    } catch { /* full */ }
+    putSetting(DAY_START_KEY, String(minutes));
   };
 
   const toggleNotifMute = () => {

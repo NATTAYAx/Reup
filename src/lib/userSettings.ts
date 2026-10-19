@@ -55,13 +55,11 @@ export interface SettingsDb {
 // is one more thing that can be updated on one side only.
 
 /** `{ enabled, start, end }`, as notifier.ts writes it. */
-import { CURRENCY_KEY, LANG_KEY, NOTE_STYLE_KEY, QUIET_KEY, THEME_ID_KEY } from "./settingKeys";
+import { CURRENCY_KEY, DAY_START_KEY, LANG_KEY, NOTE_STYLE_KEY, QUIET_KEY, THEME_ID_KEY } from "./settingKeys";
 
-export { CURRENCY_KEY, LANG_KEY, NOTE_STYLE_KEY, QUIET_KEY, THEME_ID_KEY };
+export { CURRENCY_KEY, DAY_START_KEY, LANG_KEY, NOTE_STYLE_KEY, QUIET_KEY, THEME_ID_KEY };
 /** An ISO 4217 code. */
 /** "th" or "en". */
-/** Minutes after midnight where this person's day starts. "0" is midnight. */
-export const DAY_START_KEY = "gamesched_day_start_v1";
 
 /**
  * Everything that travels, and nothing else.
